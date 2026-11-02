@@ -9,4 +9,4 @@ def health(): return {"status":"ok","mode":"mock" if os.getenv("MOCK_INFERENCE",
 @app.post("/v1/describe")
 async def describe(image:UploadFile=File(...)):
     _=await image.read(1024)
-    return {"summary":"Свободный путь впереди","speech":"Дверь в четырех метрах. Стул справа.","objects":[{"label":"door","confidence":.97},{"label":"chair","confidence":.93}],"mock":True}
+    return {"summary":"Clear path ahead","speech":"Door 13 feet ahead. Chair to your right.","objects":[{"label":"door","confidence":.97},{"label":"chair","confidence":.93}],"mock":True}
