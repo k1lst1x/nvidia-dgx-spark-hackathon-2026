@@ -1,0 +1,23 @@
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build VisionMate for the iOS Simulator
+        run: >-
+          xcodebuild
+          -project VisionMate/VisionMate.xcodeproj
+          -scheme VisionMate
+          -configuration Debug
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO
+          build
