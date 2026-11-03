@@ -1,6 +1,6 @@
 # GuideLens
 
-Accessible AI vision companion for the **SFBU NVIDIA DGX Spark Hackathon 2026**. GuideLens uses a phone camera to identify nearby objects and speaks a concise scene description. This repo includes a working mocked MVP: one universal Expo app, a web landing/demo, and a FastAPI inference contract ready for DGX Spark.
+Accessible AI vision companion for the **SFBU NVIDIA DGX Spark Hackathon 2026**. GuideLens uses a phone camera to identify nearby objects and speaks a concise scene description. This repo includes a universal Expo app, a web landing/demo, and a FastAPI gateway using Groq Vision.
 
 It also includes **VisionMate**, a native SwiftUI iPhone client for the first phase of the assistive vision MVP.
 
@@ -10,7 +10,7 @@ It also includes **VisionMate**, a native SwiftUI iPhone client for the first ph
 
 - Expo SDK 58 + React Native 0.88 + TypeScript for iOS, Android and web/PWA.
 - `expo-camera` + `expo-speech` for camera preview and native text-to-speech.
-- FastAPI on Python 3.12 in Docker as the backend boundary.
+- FastAPI on Python 3.12 in Docker as a secure Groq Vision gateway.
 - NVIDIA DGX Spark as the intended inference host using NIM/Triton or TensorRT.
 - GitHub Actions + Pages for automatic web delivery.
 
@@ -28,9 +28,13 @@ npm run dev
 Scan the QR with Expo Go (Android) or the iPhone Camera app. Run web with `npm run web`.
 
 ```bash
+cp .env.example .env
+# Add a newly rotated GROQ_API_KEY to .env. Never commit it.
 docker compose up --build
 curl http://localhost:8000/health
 ```
+
+Set `EXPO_PUBLIC_API_URL` to the backend address reachable from the phone, for example `http://192.168.1.25:8000`, before starting Expo. The camera loop sends one compressed frame at a time, adapts its interval to scene urgency/change, suppresses repeated speech, and exponentially backs off on rate limits or network failures.
 
 ## Native iPhone client: VisionMate Phase 1
 
@@ -74,9 +78,13 @@ GitHub Pages hosts the web app and download links, but cannot distribute a gener
 
 Before replacing mocks, validate camera → API → speech on SFBU Wi-Fi. A phone cannot reach `localhost` on the DGX: set `EXPO_PUBLIC_API_URL` to the DGX Spark LAN address and allow TCP port 8000. Keep a local fallback for demo resilience.
 
-## Real inference
+## Groq Vision architecture
 
-Send a throttled JPEG to `POST /v1/describe`. Replace the mock body in `apps/api/main.py` with the local Triton/NIM call. Return short `speech`, a one-line `summary`, and object boxes. Do not retain video by default.
+The app never receives the Groq key. It sends a compressed JPEG to `POST /v1/describe`; the backend validates size and media type, rate-limits sessions, bounds concurrency, and calls `qwen/qwen3.8-27b` with strict structured output. Only meaningful scene changes are spoken. Frames and model responses are not persisted or logged.
+
+Groq bills each image as input tokens, so this is intentionally near-real-time rather than video streaming: one request is allowed in flight, unchanged scenes slow to roughly 4.5 seconds, changed scenes use roughly 2.4 seconds, and high-urgency scenes use roughly 1.4 seconds. For higher-frequency obstacle detection, add an on-device detector and reserve Groq for semantic descriptions.
+
+If a Groq key is ever pasted into chat, an issue, a commit, or a client bundle, revoke it immediately and create a new one. Never reuse an exposed key.
 
 ## GitHub Pages
 

@@ -5,8 +5,7 @@ import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
-type AssistMode = 'scene' | 'sign';
+import { AssistMode, useVisionLoop } from '../src/vision';
 
 type DetectionBox = {
   l: `${number}%`;
@@ -96,10 +95,18 @@ export default function CameraScreen() {
   const [frameIndex, setFrameIndex] = useState(0);
   const [speaking, setSpeaking] = useState(true);
   const [torchEnabled, setTorchEnabled] = useState(false);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cameraRef = useRef<CameraView>(null);
+  const { result: vision, state: visionState, scanNow } = useVisionLoop(cameraRef, mode, Boolean(permission?.granted));
 
   const frames = mode === 'scene' ? sceneFrames : signFrames;
-  const current = frames[frameIndex % frames.length];
+  const fallback = frames[frameIndex % frames.length];
+  const current: AssistFrame = vision ? {
+    title: vision.summary,
+    detail: vision.speech,
+    speech: vision.speech,
+    icon: mode === 'sign' ? 'hand-left' : vision.urgency === 'high' ? 'warning' : 'navigate',
+    boxes: [],
+  } : fallback;
   const isSignMode = mode === 'sign';
 
   const speak = (text = current.speech) => {
@@ -116,16 +123,10 @@ export default function CameraScreen() {
   };
 
   useEffect(() => {
-    timer.current = setInterval(() => setFrameIndex((value) => (value + 1) % frames.length), 5500);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-      Speech.stop();
-    };
-  }, [mode, frames.length]);
+    if (vision?.changed || vision?.urgency === 'high') speak(vision.speech);
+  }, [vision?.scene_key]);
 
-  useEffect(() => {
-    speak();
-  }, [mode, frameIndex]);
+  useEffect(() => () => { void Speech.stop(); }, []);
 
   if (!permission) return <View style={c.fallback} />;
 
@@ -143,7 +144,7 @@ export default function CameraScreen() {
 
   return (
     <View style={c.root}>
-      <CameraView style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />
+      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />
       <View style={c.shade} />
       <SafeAreaView style={c.overlay}>
         <View style={c.top}>
@@ -152,7 +153,7 @@ export default function CameraScreen() {
           </Pressable>
           <View style={c.modeIndicator}>
             <View style={c.greenDot} />
-            <Text style={c.modeText}>{isSignMode ? 'SIGN INTERPRETATION · DEMO' : 'AI VISION · MOCK'}</Text>
+            <Text style={c.modeText}>{visionState === 'offline' ? 'VISION · RECONNECTING' : visionState === 'analyzing' ? 'VISION · ANALYZING' : isSignMode ? 'SIGN INTERPRETATION · LIVE' : 'GROQ VISION · LIVE'}</Text>
           </View>
           <Pressable accessibilityLabel="Toggle spoken output" onPress={() => { setSpeaking((value) => !value); Speech.stop(); }} style={c.round}>
             <Ionicons name={speaking ? 'volume-high' : 'volume-mute'} size={21} color="#fff" />
@@ -203,7 +204,7 @@ export default function CameraScreen() {
           )}
 
           <View style={c.controls}>
-            <Pressable onPress={() => setFrameIndex((value) => (value + 1) % frames.length)} style={c.control}>
+            <Pressable onPress={scanNow} style={c.control}>
               <Ionicons name="refresh" size={22} color="#EAF6F0" />
               <Text style={c.controlText}>{isSignMode ? 'Read again' : 'Scan again'}</Text>
             </Pressable>

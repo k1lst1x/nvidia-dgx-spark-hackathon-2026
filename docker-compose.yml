@@ -3,7 +3,8 @@ services:
     build: ./apps/api
     ports: ["8000:8000"]
     environment:
-      MOCK_INFERENCE: "true"
+      GROQ_API_KEY: "${GROQ_API_KEY:?Set GROQ_API_KEY in your local .env}"
+      GROQ_VISION_MODEL: "${GROQ_VISION_MODEL:-qwen/qwen3.8-27b}"
       CORS_ORIGINS: "http://localhost:8081"
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

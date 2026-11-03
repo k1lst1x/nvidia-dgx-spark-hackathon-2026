@@ -1,0 +1,36 @@
+import os
+
+from fastapi.testclient import TestClient
+
+os.environ.pop("GROQ_API_KEY", None)
+
+from main import app  # noqa: E402
+
+client = TestClient(app)
+
+
+def test_health_does_not_expose_secrets():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["configured"] is False
+    assert "key" not in response.text.lower()
+
+
+def test_rejects_unsupported_media_type():
+    response = client.post(
+        "/v1/describe",
+        headers={"X-Session-ID": "invalid-media-test"},
+        files={"image": ("frame.txt", b"not-an-image", "text/plain")},
+    )
+    assert response.status_code == 415
+
+
+def test_missing_provider_configuration_fails_closed():
+    response = client.post(
+        "/v1/describe",
+        headers={"X-Session-ID": "missing-key-test"},
+        files={"image": ("frame.jpg", b"fake-jpeg", "image/jpeg")},
+        data={"task": "scene", "previous_scene_key": ""},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Vision service is not configured"
