@@ -11,6 +11,14 @@ const MAX_RESULTS = 12;
 const MODEL = require('../assets/models/yolox_nano.onnx');
 const COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'];
 
+const GRID: Array<{ x: number; y: number; stride: number }> = [];
+for (const stride of [8, 16, 32]) {
+  const size = INPUT_SIZE / stride;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) GRID.push({ x, y, stride });
+  }
+}
+
 let sessionPromise: Promise<InferenceSession> | null = null;
 
 async function getSession() {
@@ -82,15 +90,20 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
       }
       const confidence = objectness * classScore;
       if (confidence < SCORE_THRESHOLD) continue;
-      const width = values[offset + 2] / INPUT_SIZE;
-      const height = values[offset + 3] / INPUT_SIZE;
+      const grid = GRID[row];
+      const centerX = (values[offset] + grid.x) * grid.stride;
+      const centerY = (values[offset + 1] + grid.y) * grid.stride;
+      const width = Math.exp(values[offset + 2]) * grid.stride / INPUT_SIZE;
+      const height = Math.exp(values[offset + 3]) * grid.stride / INPUT_SIZE;
+      const x = Math.min(1, Math.max(0, centerX / INPUT_SIZE - width / 2));
+      const y = Math.min(1, Math.max(0, centerY / INPUT_SIZE - height / 2));
       detections.push({
         label: COCO[classIndex],
         confidence,
-        x: Math.max(0, values[offset] / INPUT_SIZE - width / 2),
-        y: Math.max(0, values[offset + 1] / INPUT_SIZE - height / 2),
-        width: Math.min(1, width),
-        height: Math.min(1, height),
+        x,
+        y,
+        width: Math.min(1 - x, width),
+        height: Math.min(1 - y, height),
       });
     }
     return { available: true, detections: suppressOverlaps(detections) };
