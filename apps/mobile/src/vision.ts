@@ -47,6 +47,22 @@ async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: str
   return (await response.json()) as VisionResult;
 }
 
+export async function interpretSignSequence(frames: string[], signal?: AbortSignal) {
+  if (!API_URL) throw new Error('EXPO_PUBLIC_API_URL is not configured');
+  if (frames.length !== 3) throw new Error('Three sign-language context frames are required');
+  const response = await fetch(`${API_URL}/v1/interpret-sign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+    body: JSON.stringify({ frames }),
+    signal,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail || `Sign interpretation failed: ${response.status}`);
+  }
+  return (await response.json()) as VisionResult;
+}
+
 export function useVisionLoop(camera: RefObject<CameraView | null>, mode: AssistMode, enabled: boolean) {
   const [result, setResult] = useState<VisionResult | null>(null);
   const [state, setState] = useState<VisionState>('starting');

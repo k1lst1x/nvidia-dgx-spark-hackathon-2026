@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
-import { AssistMode, useVisionLoop } from '../src/vision';
+import { AssistMode, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 90, handCount: 0, ready: false };
 
@@ -69,6 +69,7 @@ export default function CameraScreen() {
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const analysisTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const capturedSequence = useRef<number[][]>([]);
+  const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
 
   const isSignMode = mode === 'sign';
@@ -123,6 +124,7 @@ export default function CameraScreen() {
     setFrameIndex(0);
     setSignContext(emptySignContext);
     capturedSequence.current = [];
+    capturedFrames.current = [];
     setContextMessage('');
     setIsAnalysingContext(false);
     setCaptureVersion((value) => value + 1);
@@ -136,19 +138,25 @@ export default function CameraScreen() {
     if (analysisTimer.current) clearTimeout(analysisTimer.current);
     setSignContext(emptySignContext);
     capturedSequence.current = [];
+    capturedFrames.current = [];
     setContextMessage('');
     setIsAnalysingContext(false);
     setCaptureVersion((value) => value + 1);
   };
 
-  const analyzeSignContext = () => {
-    if (!signContext.ready || capturedSequence.current.length !== signContext.maxFrames || isAnalysingContext) return;
+  const analyzeSignContext = async () => {
+    if (!signContext.ready || capturedSequence.current.length !== signContext.maxFrames || capturedFrames.current.length !== 3 || isAnalysingContext) return;
     setIsAnalysingContext(true);
     setContextMessage('');
-    analysisTimer.current = setTimeout(() => {
+    try {
+      const interpreted = await interpretSignSequence(capturedFrames.current);
+      setContextMessage(interpreted.speech);
+      speak(interpreted.speech);
+    } catch (error) {
+      setContextMessage(error instanceof Error ? error.message : 'Sign interpretation failed.');
+    } finally {
       setIsAnalysingContext(false);
-      setContextMessage('Context captured. Ready for a temporal sign-language model to interpret the full signed thought.');
-    }, 900);
+    }
   };
 
   useEffect(() => {
@@ -183,7 +191,7 @@ export default function CameraScreen() {
 
   return (
     <View style={c.root}>
-      {usesBrowserHandTracking ? <HandTracker key={captureVersion} onContextChange={setSignContext} onContextCaptured={(sequence) => { capturedSequence.current = sequence; }} /> : <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />}
+      {usesBrowserHandTracking ? <HandTracker key={captureVersion} onContextChange={setSignContext} onContextCaptured={(sequence, frames) => { capturedSequence.current = sequence; capturedFrames.current = frames; }} /> : <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />}
       <View style={c.shade} />
       <SafeAreaView style={c.overlay}>
         <View style={c.top}>

@@ -34,7 +34,7 @@ export type SignContextState = {
 
 type HandTrackerProps = {
   onContextChange?: (state: SignContextState) => void;
-  onContextCaptured?: (sequence: number[][]) => void;
+  onContextCaptured?: (sequence: number[][], frames: string[]) => void;
 };
 
 async function createHandDetector(runtime: VisionRuntime, vision: unknown): Promise<HandDetector> {
@@ -112,6 +112,8 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sequenceRef = useRef<number[][]>([]);
+  const frameImagesRef = useRef<string[]>([]);
+  const maxHandCountRef = useRef(0);
   const smoothedHandsRef = useRef<Landmark[][]>([]);
   const contextCapturedRef = useRef(false);
   const onContextChangeRef = useRef(onContextChange);
@@ -133,11 +135,12 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
     let lastContextState = '';
 
     const reportContext = (handCount: number, error?: string) => {
+      maxHandCountRef.current = Math.max(maxHandCountRef.current, handCount);
       const frameCount = sequenceRef.current.length;
       const next: SignContextState = {
         frameCount,
         maxFrames: maxContextFrames,
-        handCount,
+        handCount: frameCount === maxContextFrames ? maxHandCountRef.current : handCount,
         ready: frameCount === maxContextFrames,
         error,
       };
@@ -204,9 +207,17 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
                 const sequence = sequenceRef.current;
                 sequence.push(createLandmarkFrame(smoothed));
                 if (sequence.length > maxContextFrames) sequence.shift();
+                if ([30, 60, 90].includes(sequence.length) && frameImagesRef.current.length < 3) {
+                  const snapshot = document.createElement('canvas');
+                  const width = 512;
+                  snapshot.width = width;
+                  snapshot.height = Math.round(width * video.videoHeight / video.videoWidth);
+                  snapshot.getContext('2d')?.drawImage(video, 0, 0, snapshot.width, snapshot.height);
+                  frameImagesRef.current.push(snapshot.toDataURL('image/jpeg', 0.68));
+                }
                 if (sequence.length === maxContextFrames) {
                   contextCapturedRef.current = true;
-                  onContextCapturedRef.current?.(sequence.map((frame) => [...frame]));
+                  onContextCapturedRef.current?.(sequence.map((frame) => [...frame]), [...frameImagesRef.current]);
                 }
               }
               reportContext(smoothed.length);

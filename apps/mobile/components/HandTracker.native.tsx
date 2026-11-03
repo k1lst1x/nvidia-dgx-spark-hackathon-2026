@@ -8,7 +8,7 @@ type SignContextState = {
 
 type HandTrackerProps = {
   onContextChange?: (state: SignContextState) => void;
-  onContextCaptured?: (sequence: number[][]) => void;
+  onContextCaptured?: (sequence: number[][], frames: string[]) => void;
 };
 
 export default function HandTracker(_props: HandTrackerProps) {

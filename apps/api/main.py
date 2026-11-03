@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -51,6 +52,10 @@ class VisionResult(BaseModel):
     task: Literal["scene", "sign"]
 
 
+class SignSequenceRequest(BaseModel):
+    frames: list[str] = Field(min_length=3, max_length=3)
+
+
 VISION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -86,11 +91,11 @@ traits. Keep speech under 25 words. Compare with the previous scene key and set 
 when there is no meaningful navigation change. scene_key must be a short, stable, lowercase
 semantic fingerprint. task must be scene. Output only the requested JSON."""
 
-SIGN_PROMPT = """You are assisting communication with a signer from one still image. Transcribe
-only when a sign is visually clear. A still frame cannot reliably capture motion-based sign language;
-when uncertain say 'Sign not clear—please hold or repeat it.' Never invent a translation. Keep speech
-under 18 words, set objects to an empty array, use a stable scene_key, and set task to sign. Output
-only the requested JSON."""
+SIGN_PROMPT = """You are assisting communication with a signer using three chronological frames
+sampled from a short signing sequence. Interpret only when the complete sign is visually clear.
+Three frames cannot reliably represent every motion-based sign; when uncertain say 'Sign not clear—
+please repeat it slowly.' Never invent a translation. Keep speech under 18 words, set objects to an
+empty array, use a stable scene_key, and set task to sign. Output only the requested JSON."""
 
 
 def _rate_limit(client_id: str) -> None:
@@ -105,21 +110,21 @@ def _rate_limit(client_id: str) -> None:
     bucket.append(now)
 
 
-async def _call_groq(image: bytes, mime: str, previous_scene_key: str, task: str) -> VisionResult:
+async def _call_groq(images: list[tuple[bytes, str]], previous_scene_key: str, task: str) -> VisionResult:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(503, "Vision service is not configured")
-    encoded = base64.b64encode(image).decode("ascii")
+    content = [{"type": "text", "text": f"Previous scene key: {previous_scene_key or 'none'}. Analyze the current {'frame sequence' if task == 'sign' else 'frame'}."}]
+    for image, mime in images:
+        encoded = base64.b64encode(image).decode("ascii")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
     payload = {
         "model": MODEL,
         "messages": [
             {"role": "system", "content": SCENE_PROMPT if task == "scene" else SIGN_PROMPT},
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Previous scene key: {previous_scene_key or 'none'}. Analyze the current frame."},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
-                ],
+                "content": content,
             },
         ],
         "response_format": {
@@ -189,7 +194,7 @@ async def describe(
         raise HTTPException(413, "Image is empty or too large")
     started = time.monotonic()
     async with _slots:
-        result = await _call_groq(body, image.content_type, previous_scene_key[:80], task)
+        result = await _call_groq([(body, image.content_type)], previous_scene_key[:80], task)
     logger.info(
         "vision_complete request_id=%s latency_ms=%d bytes=%d changed=%s urgency=%s",
         request_id,
@@ -197,5 +202,32 @@ async def describe(
         len(body),
         result.changed,
         result.urgency,
+    )
+    return result
+
+
+@app.post("/v1/interpret-sign", response_model=VisionResult)
+async def interpret_sign(request: Request, sequence: SignSequenceRequest):
+    client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
+    _rate_limit(client_id)
+    decoded: list[tuple[bytes, str]] = []
+    for frame in sequence.frames:
+        if not frame.startswith("data:image/jpeg;base64,"):
+            raise HTTPException(415, "Each frame must be a JPEG data URL")
+        try:
+            body = base64.b64decode(frame.split(",", 1)[1], validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(422, "A frame contains invalid base64 data")
+        if not body or len(body) > MAX_IMAGE_BYTES:
+            raise HTTPException(413, "A sign frame is empty or too large")
+        decoded.append((body, "image/jpeg"))
+    started = time.monotonic()
+    async with _slots:
+        result = await _call_groq(decoded, "", "sign")
+    logger.info(
+        "sign_complete latency_ms=%d frame_count=%d total_bytes=%d",
+        int((time.monotonic() - started) * 1000),
+        len(decoded),
+        sum(len(body) for body, _ in decoded),
     )
     return result

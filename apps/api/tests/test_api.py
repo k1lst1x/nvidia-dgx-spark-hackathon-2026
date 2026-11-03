@@ -34,3 +34,12 @@ def test_missing_provider_configuration_fails_closed():
     )
     assert response.status_code == 503
     assert response.json()["detail"] == "Vision service is not configured"
+
+
+def test_sign_sequence_requires_three_jpeg_frames():
+    response = client.post(
+        "/v1/interpret-sign",
+        headers={"X-Session-ID": "invalid-sign-sequence-test"},
+        json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="]},
+    )
+    assert response.status_code == 422
