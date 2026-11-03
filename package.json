@@ -1,1 +1,17 @@
-{"name":"guidelens","version":"0.1.0","private":true,"workspaces":["apps/mobile"],"scripts":{"dev":"npm --workspace apps/mobile run start","web":"npm --workspace apps/mobile run web","build:web":"npm --workspace apps/mobile run build:web","typecheck":"npm --workspace apps/mobile run typecheck"},"engines":{"node":">=22.13.0"}}
+{
+  "name": "guidelens",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/mobile"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/mobile run start",
+    "web": "npm --workspace apps/mobile run web",
+    "build:web": "npm --workspace apps/mobile run build:web",
+    "typecheck": "npm --workspace apps/mobile run typecheck"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

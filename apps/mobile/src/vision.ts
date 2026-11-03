@@ -1,5 +1,7 @@
 import type { CameraView } from 'expo-camera';
 import { RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import { detectObjects } from './detector';
+import type { LocalDetection } from './detector.types';
 
 export type AssistMode = 'scene' | 'sign';
 
@@ -49,11 +51,14 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const [result, setResult] = useState<VisionResult | null>(null);
   const [state, setState] = useState<VisionState>('starting');
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [detections, setDetections] = useState<LocalDetection[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controller = useRef<AbortController | null>(null);
   const generation = useRef(0);
   const failures = useRef(0);
   const sceneKey = useRef('');
+  const localSignature = useRef('');
+  const lastCloudAnalysis = useRef(0);
 
   const stop = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -70,10 +75,27 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     try {
       const picture = await camera.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
+      const local = await detectObjects(picture.uri);
+      setDetections(local.detections);
+      const signature = local.detections
+        .filter((item) => item.confidence >= 0.5)
+        .map((item) => item.label)
+        .sort()
+        .join('|');
+      const now = Date.now();
+      const shouldUseCloud = !local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000;
+      localSignature.current = signature;
+      if (!shouldUseCloud) {
+        failures.current = 0;
+        setState('live');
+        nextDelay = 900;
+        return;
+      }
       const next = await analyzeFrame(picture.uri, mode, sceneKey.current, controller.current.signal);
       if (runGeneration !== generation.current) return;
       failures.current = 0;
       sceneKey.current = next.scene_key;
+      lastCloudAnalysis.current = Date.now();
       setResult(next);
       setLastUpdated(Date.now());
       setState('live');
@@ -102,6 +124,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     stop();
     generation.current += 1;
     sceneKey.current = '';
+    localSignature.current = '';
+    lastCloudAnalysis.current = 0;
     failures.current = 0;
     setResult(null);
     if (!enabled) {
@@ -113,5 +137,5 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     return stop;
   }, [enabled, mode, run, stop]);
 
-  return { result, state, lastUpdated, scanNow };
+  return { result, state, lastUpdated, detections, scanNow };
 }

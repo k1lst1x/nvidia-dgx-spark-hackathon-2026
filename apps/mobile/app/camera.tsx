@@ -96,7 +96,7 @@ export default function CameraScreen() {
   const [speaking, setSpeaking] = useState(true);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const cameraRef = useRef<CameraView>(null);
-  const { result: vision, state: visionState, scanNow } = useVisionLoop(cameraRef, mode, Boolean(permission?.granted));
+  const { result: vision, state: visionState, detections, scanNow } = useVisionLoop(cameraRef, mode, Boolean(permission?.granted));
 
   const frames = mode === 'scene' ? sceneFrames : signFrames;
   const fallback = frames[frameIndex % frames.length];
@@ -105,7 +105,13 @@ export default function CameraScreen() {
     detail: vision.speech,
     speech: vision.speech,
     icon: mode === 'sign' ? 'hand-left' : vision.urgency === 'high' ? 'warning' : 'navigate',
-    boxes: [],
+    boxes: detections.map((item) => ({
+      l: `${Math.round(item.x * 100)}%` as `${number}%`,
+      t: `${Math.round(item.y * 100)}%` as `${number}%`,
+      w: `${Math.round(item.width * 100)}%` as `${number}%`,
+      h: `${Math.round(item.height * 100)}%` as `${number}%`,
+      label: `${item.label} · ${Math.round(item.confidence * 100)}%`,
+    })),
   } : fallback;
   const isSignMode = mode === 'sign';
 

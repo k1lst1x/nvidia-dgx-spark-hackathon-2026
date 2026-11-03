@@ -10,6 +10,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: npm install
+      - run: echo "c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d  apps/mobile/assets/models/yolox_nano.onnx" | sha256sum --check
       - run: npm run typecheck
       - run: npm run build:web
       - run: pip install -r apps/api/requirements-dev.txt

@@ -10,6 +10,7 @@ It also includes **VisionMate**, a native SwiftUI iPhone client for the first ph
 
 - Expo SDK 58 + React Native 0.88 + TypeScript for iOS, Android and web/PWA.
 - `expo-camera` + `expo-speech` for camera preview and native text-to-speech.
+- YOLOX Nano + ONNX Runtime for private on-device object detection on iOS and Android.
 - FastAPI on Python 3.12 in Docker as a secure Groq Vision gateway.
 - NVIDIA DGX Spark as the intended inference host using NIM/Triton or TensorRT.
 - GitHub Actions + Pages for automatic web delivery.
@@ -18,14 +19,16 @@ Expo/React Native has no LTS line. We pin a stable Expo SDK and upgrade one SDK 
 
 ## Run the Expo MVP
 
-Install Node.js 22.13+ and Expo Go on the phone.
+Install Node.js 22.13+. Because GuideLens includes ONNX Runtime native code, use an Expo development build rather than Expo Go.
 
 ```bash
 npm install
+npx eas-cli build --platform android --profile development
+npx eas-cli build --platform ios --profile development
 npm run dev
 ```
 
-Scan the QR with Expo Go (Android) or the iPhone Camera app. Run web with `npm run web`.
+Install the development build from its EAS link, then scan the development-server QR. Run the browser-only fallback with `npm run web`; web uses Groq without the native YOLO detector.
 
 ```bash
 cp .env.example .env
@@ -63,8 +66,8 @@ For a local HTTP address, add an App Transport Security exception appropriate to
 | Target | Hackathon path | Public release |
 |---|---|---|
 | Web/PWA | GitHub Pages URL | Same URL; install from browser where supported |
-| iPhone/iPad | Expo Go QR or VisionMate development build | TestFlight / App Store via EAS Build or Xcode |
-| Android | Expo Go QR or preview APK | Google Play via EAS Build |
+| iPhone/iPad | Signed EAS development build or VisionMate | TestFlight / App Store via EAS Build or Xcode |
+| Android | EAS preview APK | Google Play via EAS Build |
 
 GitHub Pages hosts the web app and download links, but cannot distribute a generally installable unsigned iOS app. iOS builds must be signed and normally delivered through TestFlight/App Store. Android APKs can be attached to GitHub Releases. HarmonyOS and KaiOS exist, but are not sensible MVP targets; the PWA is the practical fallback.
 
@@ -82,7 +85,33 @@ Before replacing mocks, validate camera → API → speech on SFBU Wi-Fi. A phon
 
 The app never receives the Groq key. It sends a compressed JPEG to `POST /v1/describe`; the backend validates size and media type, rate-limits sessions, bounds concurrency, and calls `qwen/qwen3.8-27b` with strict structured output. Only meaningful scene changes are spoken. Frames and model responses are not persisted or logged.
 
-Groq bills each image as input tokens, so this is intentionally near-real-time rather than video streaming: one request is allowed in flight, unchanged scenes slow to roughly 4.5 seconds, changed scenes use roughly 2.4 seconds, and high-urgency scenes use roughly 1.4 seconds. For higher-frequency obstacle detection, add an on-device detector and reserve Groq for semantic descriptions.
+Groq bills each image as input tokens, so cloud analysis is intentionally near-real-time rather than video streaming: one request is allowed in flight and the on-device detector decides when Groq is needed.
+
+## On-device detection
+
+The native app bundles the official Apache-2.0 YOLOX Nano ONNX model (3.5 MB). ONNX Runtime performs local detection; no object-detection frames leave the phone. A compact COCO object signature triggers Groq only when objects change or when the eight-second semantic-description refresh expires. The browser build gracefully falls back to Groq-only analysis.
+
+The model is intentionally YOLOX Nano rather than an Ultralytics checkpoint: YOLOX is Apache-2.0 compatible with this MIT project, while current Ultralytics models require AGPL-3.0 compliance or a commercial license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The bundled detector recognizes the 80 COCO classes and is a prototype aid, not a safety-certified navigation system. It cannot detect every curb, stair, hole, glass surface, or unusual obstacle.
+
+### Installable builds
+
+Source code and build configuration are ready, but GitHub Pages does not produce native binaries. Create an Android APK with:
+
+```bash
+npx eas-cli login
+npx eas-cli build --platform android --profile preview
+```
+
+EAS returns an installable APK URL. For iPhone, an Apple Developer account and signing are required:
+
+```bash
+npx eas-cli build --platform ios --profile production
+npx eas-cli submit --platform ios
+```
+
+The submitted iOS build is distributed to testers through TestFlight.
 
 If a Groq key is ever pasted into chat, an issue, a commit, or a client bundle, revoke it immediately and create a new one. Never reuse an exposed key.
 
