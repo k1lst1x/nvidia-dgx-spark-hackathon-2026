@@ -3,9 +3,12 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import HandTracker, { type SignContextState } from '../components/HandTracker';
 import { AssistMode, useVisionLoop } from '../src/vision';
+
+const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 90, handCount: 0, ready: false };
 
 type DetectionBox = {
   l: `${number}%`;
@@ -53,52 +56,29 @@ const sceneFrames: AssistFrame[] = [
   },
 ];
 
-const signFrames: AssistFrame[] = [
-  {
-    title: 'Hello, nice to meet you.',
-    detail: 'Text interpretation · Sign language demo',
-    speech: 'Hello, nice to meet you.',
-    icon: 'hand-left',
-    boxes: [
-      { l: '35%', t: '13%', w: '29%', h: '57%', label: 'signer · framed' },
-      { l: '23%', t: '43%', w: '18%', h: '22%', label: 'left hand' },
-      { l: '61%', t: '43%', w: '17%', h: '22%', label: 'right hand' },
-    ],
-  },
-  {
-    title: 'Please speak more slowly.',
-    detail: 'Text interpretation · Sign language demo',
-    speech: 'Please speak more slowly.',
-    icon: 'chatbox-ellipses',
-    boxes: [
-      { l: '36%', t: '14%', w: '28%', h: '56%', label: 'signer · framed' },
-      { l: '25%', t: '39%', w: '18%', h: '23%', label: 'left hand' },
-      { l: '58%', t: '35%', w: '18%', h: '23%', label: 'right hand' },
-    ],
-  },
-  {
-    title: 'Thank you for your help.',
-    detail: 'Text interpretation · Sign language demo',
-    speech: 'Thank you for your help.',
-    icon: 'heart',
-    boxes: [
-      { l: '37%', t: '13%', w: '28%', h: '57%', label: 'signer · framed' },
-      { l: '26%', t: '42%', w: '17%', h: '23%', label: 'left hand' },
-      { l: '59%', t: '42%', w: '17%', h: '23%', label: 'right hand' },
-    ],
-  },
-];
-
 export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<AssistMode>('scene');
   const [frameIndex, setFrameIndex] = useState(0);
   const [speaking, setSpeaking] = useState(true);
   const [torchEnabled, setTorchEnabled] = useState(false);
+  const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
+  const [isAnalysingContext, setIsAnalysingContext] = useState(false);
+  const [contextMessage, setContextMessage] = useState('');
+  const [captureVersion, setCaptureVersion] = useState(0);
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const analysisTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const capturedSequence = useRef<number[][]>([]);
   const cameraRef = useRef<CameraView>(null);
-  const { result: vision, state: visionState, detections, scanNow } = useVisionLoop(cameraRef, mode, Boolean(permission?.granted));
 
-  const frames = mode === 'scene' ? sceneFrames : signFrames;
+  const isSignMode = mode === 'sign';
+  const usesBrowserHandTracking = isSignMode && Platform.OS === 'web';
+  const { result: vision, state: visionState, detections, scanNow } = useVisionLoop(
+    cameraRef,
+    mode,
+    Boolean(permission?.granted) && !usesBrowserHandTracking,
+  );
+  const frames = sceneFrames;
   const fallback = frames[frameIndex % frames.length];
   const current: AssistFrame = vision ? {
     title: vision.summary,
@@ -113,7 +93,22 @@ export default function CameraScreen() {
       label: `${item.label} · ${Math.round(item.confidence * 100)}%`,
     })),
   } : fallback;
-  const isSignMode = mode === 'sign';
+  const browserSignHeading = signContext.error
+    ? 'Hand tracking needs attention.'
+    : isAnalysingContext
+      ? 'Reviewing the full signing sequence…'
+      : contextMessage || (signContext.ready ? 'Context window ready to analyze.' : 'Building context from continuous signing…');
+  const browserSignDetail = signContext.error
+    ? signContext.error
+    : signContext.ready
+      ? `${signContext.handCount} hands tracked across ${signContext.maxFrames} frames. Analyze the whole sequence, not one gesture.`
+      : `${signContext.handCount} hands tracked · ${signContext.frameCount}/${signContext.maxFrames} contextual frames`;
+  const signHeading = usesBrowserHandTracking
+    ? browserSignHeading
+    : vision?.summary || (visionState === 'offline' ? 'Sign interpretation is reconnecting…' : 'Looking for a signed message…');
+  const signDetail = usesBrowserHandTracking
+    ? browserSignDetail
+    : vision?.speech || 'Keep both hands clearly in the camera frame.';
 
   const speak = (text = current.speech) => {
     if (!speaking) return;
@@ -126,13 +121,51 @@ export default function CameraScreen() {
     Speech.stop();
     setMode(nextMode);
     setFrameIndex(0);
+    setSignContext(emptySignContext);
+    capturedSequence.current = [];
+    setContextMessage('');
+    setIsAnalysingContext(false);
+    setCaptureVersion((value) => value + 1);
+  };
+
+  const restartContextCapture = () => {
+    if (!usesBrowserHandTracking) {
+      scanNow();
+      return;
+    }
+    if (analysisTimer.current) clearTimeout(analysisTimer.current);
+    setSignContext(emptySignContext);
+    capturedSequence.current = [];
+    setContextMessage('');
+    setIsAnalysingContext(false);
+    setCaptureVersion((value) => value + 1);
+  };
+
+  const analyzeSignContext = () => {
+    if (!signContext.ready || capturedSequence.current.length !== signContext.maxFrames || isAnalysingContext) return;
+    setIsAnalysingContext(true);
+    setContextMessage('');
+    analysisTimer.current = setTimeout(() => {
+      setIsAnalysingContext(false);
+      setContextMessage('Context captured. Ready for a temporal sign-language model to interpret the full signed thought.');
+    }, 900);
   };
 
   useEffect(() => {
-    if (vision?.changed || vision?.urgency === 'high') speak(vision.speech);
-  }, [vision?.scene_key]);
+    if (mode === 'scene') timer.current = setInterval(() => setFrameIndex((value) => (value + 1) % frames.length), 5500);
+    return () => {
+      if (timer.current) clearInterval(timer.current);
+    };
+  }, [mode, frames.length]);
 
-  useEffect(() => () => { void Speech.stop(); }, []);
+  useEffect(() => {
+    if (!usesBrowserHandTracking && vision && (vision.changed || vision.urgency === 'high')) speak(vision.speech);
+  }, [usesBrowserHandTracking, vision?.scene_key]);
+
+  useEffect(() => () => {
+    if (analysisTimer.current) clearTimeout(analysisTimer.current);
+    void Speech.stop();
+  }, []);
 
   if (!permission) return <View style={c.fallback} />;
 
@@ -141,7 +174,7 @@ export default function CameraScreen() {
       <SafeAreaView style={c.permission}>
         <View style={c.permissionIcon}><Ionicons name="camera" size={34} color="#B7FF56" /></View>
         <Text style={c.permissionTitle}>Let your camera help communicate</Text>
-        <Text style={c.permissionText}>GuideLens needs camera access for scene assistance and the sign language demo. This prototype does not save video.</Text>
+        <Text style={c.permissionText}>GuideLens needs camera access for scene assistance and sign-context capture. This prototype does not save video.</Text>
         <Pressable onPress={requestPermission} style={c.allow}><Text style={c.allowText}>Allow camera access</Text></Pressable>
         <Pressable onPress={() => router.back()}><Text style={c.backText}>Go back</Text></Pressable>
       </SafeAreaView>
@@ -150,7 +183,7 @@ export default function CameraScreen() {
 
   return (
     <View style={c.root}>
-      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />
+      {usesBrowserHandTracking ? <HandTracker key={captureVersion} onContextChange={setSignContext} onContextCaptured={(sequence) => { capturedSequence.current = sequence; }} /> : <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />}
       <View style={c.shade} />
       <SafeAreaView style={c.overlay}>
         <View style={c.top}>
@@ -159,7 +192,7 @@ export default function CameraScreen() {
           </Pressable>
           <View style={c.modeIndicator}>
             <View style={c.greenDot} />
-            <Text style={c.modeText}>{visionState === 'offline' ? 'VISION · RECONNECTING' : visionState === 'analyzing' ? 'VISION · ANALYZING' : isSignMode ? 'SIGN INTERPRETATION · LIVE' : 'GROQ VISION · LIVE'}</Text>
+            <Text style={c.modeText}>{usesBrowserHandTracking ? 'SIGN CONTEXT' : visionState === 'offline' ? 'VISION · RECONNECTING' : visionState === 'analyzing' ? 'VISION · ANALYZING' : isSignMode ? 'SIGN INTERPRETATION · LIVE' : 'GROQ VISION · LIVE'}</Text>
           </View>
           <Pressable accessibilityLabel="Toggle spoken output" onPress={() => { setSpeaking((value) => !value); Speech.stop(); }} style={c.round}>
             <Ionicons name={speaking ? 'volume-high' : 'volume-mute'} size={21} color="#fff" />
@@ -177,15 +210,8 @@ export default function CameraScreen() {
           </Pressable>
         </View>
 
-        {isSignMode && (
-          <View style={c.signGuide}>
-            <Ionicons name="scan-outline" size={16} color="#C8FF72" />
-            <Text style={c.signGuideText}>Keep hands, face, and upper body in frame.</Text>
-          </View>
-        )}
-
         <View style={c.reticle}>
-          {current.boxes.map((box, index) => (
+          {!usesBrowserHandTracking && current.boxes.map((box, index) => (
             <View key={`${mode}-${index}`} style={[c.box, { left: box.l, top: box.t, width: box.w, height: box.h }, isSignMode && c.signBox]}>
               <Text style={c.boxLabel}>{box.label}</Text>
             </View>
@@ -194,35 +220,27 @@ export default function CameraScreen() {
 
         <View style={c.bottom}>
           <View style={[c.answer, isSignMode && c.signAnswer]}>
-            <View style={[c.answerIcon, isSignMode && c.signAnswerIcon]}><Ionicons name={current.icon} size={25} color="#07110F" /></View>
+            <View style={[c.answerIcon, isSignMode && c.signAnswerIcon]}><Ionicons name={isSignMode ? 'hand-left' : current.icon} size={25} color="#07110F" /></View>
             <View style={c.answerCopy}>
-              <Text style={isSignMode ? c.translationLabel : c.answerTitle}>{isSignMode ? 'SIGN TO TEXT · DEMO' : current.title}</Text>
-              <Text style={isSignMode ? c.translationText : c.answerText}>{isSignMode ? current.title : current.detail}</Text>
-              {isSignMode && <Text style={c.translationDetail}>{current.detail}</Text>}
+              <Text style={isSignMode ? c.translationText : c.answerTitle}>{isSignMode ? signHeading : current.title}</Text>
+              <Text style={isSignMode ? c.translationDetail : c.answerText}>{isSignMode ? signDetail : current.detail}</Text>
             </View>
           </View>
 
-          {isSignMode && (
-            <View style={c.confirmation}>
-              <Ionicons name="information-circle-outline" size={14} color="#D3E0DA" />
-              <Text style={c.confirmationText}>Confirm the meaning with the signer before relying on this interpretation.</Text>
-            </View>
-          )}
-
           <View style={c.controls}>
-            <Pressable onPress={scanNow} style={c.control}>
+            <Pressable onPress={restartContextCapture} style={c.control}>
               <Ionicons name="refresh" size={22} color="#EAF6F0" />
-              <Text style={c.controlText}>{isSignMode ? 'Read again' : 'Scan again'}</Text>
+              <Text style={c.controlText}>{usesBrowserHandTracking ? 'New context' : isSignMode ? 'Read again' : 'Scan again'}</Text>
             </Pressable>
-            <Pressable accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'} onPress={() => speak()} style={c.speak}>
-              <Ionicons name={isSignMode ? 'megaphone' : 'volume-high'} size={24} color="#07110F" />
+            <Pressable accessibilityLabel={usesBrowserHandTracking ? 'Analyze sign language context' : isSignMode ? 'Speak translation' : 'Repeat description'} onPress={usesBrowserHandTracking ? analyzeSignContext : () => speak()} disabled={usesBrowserHandTracking && (!signContext.ready || isAnalysingContext)} style={[c.speak, usesBrowserHandTracking && (!signContext.ready || isAnalysingContext) && c.speakDisabled]}>
+              <Ionicons name={usesBrowserHandTracking ? 'sparkles' : isSignMode ? 'megaphone' : 'volume-high'} size={24} color="#07110F" />
             </Pressable>
             <Pressable accessibilityLabel={torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on'} onPress={() => setTorchEnabled((value) => !value)} style={c.control}>
               <Ionicons name={torchEnabled ? 'flash' : 'flash-off'} size={22} color={torchEnabled ? '#C8FF72' : '#EAF6F0'} />
               <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
             </Pressable>
           </View>
-          <Text style={c.hint}>{isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
+          <Text style={c.hint}>{usesBrowserHandTracking ? (signContext.ready ? 'Tap the center button to analyze the full context window' : 'Build a complete context window before analysis') : isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
         </View>
       </SafeAreaView>
     </View>
@@ -244,8 +262,6 @@ const c = StyleSheet.create({
   modeTabActive: { backgroundColor: '#B7FF56' },
   modeTabText: { color: '#DDE9E4', fontSize: 12, fontWeight: '800' },
   modeTabTextActive: { color: '#09130D' },
-  signGuide: { alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 7, borderRadius: 99, paddingHorizontal: 12, paddingVertical: 8, marginTop: 11, backgroundColor: 'rgba(5,20,14,.8)', borderWidth: 1, borderColor: 'rgba(183,255,86,.35)' },
-  signGuideText: { color: '#E5F0E9', fontSize: 11, fontWeight: '700' },
   reticle: { flex: 1, marginVertical: 12, position: 'relative' },
   box: { position: 'absolute', borderWidth: 2, borderColor: '#B7FF56', borderRadius: 10 },
   signBox: { borderColor: '#C8FF72' },
@@ -258,16 +274,14 @@ const c = StyleSheet.create({
   answerCopy: { flex: 1 },
   answerTitle: { color: '#F7FBF8', fontSize: 18, fontWeight: '800' },
   answerText: { color: '#AFC1BA', fontSize: 13, lineHeight: 19, marginTop: 4 },
-  translationLabel: { color: '#C8FF72', fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
   translationText: { color: '#F7FBF8', fontSize: 20, lineHeight: 26, fontWeight: '800', marginTop: 5 },
   translationDetail: { color: '#AFC1BA', fontSize: 11, lineHeight: 16, marginTop: 5 },
-  confirmation: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, paddingHorizontal: 8, marginTop: 9 },
-  confirmationText: { flex: 1, color: '#D3E0DA', fontSize: 10, lineHeight: 14 },
   controls: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginTop: 17 },
   control: { alignItems: 'center', width: 90, gap: 5 },
   controlText: { color: '#DDE9E4', fontSize: 10, fontWeight: '700' },
   controlTextActive: { color: '#C8FF72' },
   speak: { width: 66, height: 66, borderRadius: 33, backgroundColor: '#B7FF56', alignItems: 'center', justifyContent: 'center', borderWidth: 5, borderColor: 'rgba(183,255,86,.25)' },
+  speakDisabled: { opacity: 0.42 },
   hint: { color: 'rgba(255,255,255,.62)', textAlign: 'center', fontSize: 10, marginTop: 12 },
   permission: { flex: 1, backgroundColor: '#07110F', alignItems: 'center', justifyContent: 'center', padding: 30 },
   permissionIcon: { width: 76, height: 76, borderRadius: 24, backgroundColor: '#142D24', alignItems: 'center', justifyContent: 'center' },
