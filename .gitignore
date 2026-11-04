@@ -1,6 +1,9 @@
 node_modules/
 .expo/
 dist/
+apps/mobile/public/
+apps/desktop/web/
+apps/desktop/release/
 web-build/
 .DS_Store
 *.log

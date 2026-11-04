@@ -8,7 +8,8 @@
     "ios": "expo run:ios",
     "android": "expo run:android",
     "web": "expo start --web",
-    "build:web": "expo export --platform web",
+    "prepare:web-assets": "node scripts/prepare-web-assets.mjs",
+    "build:web": "npm run prepare:web-assets && expo export --platform web",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -27,6 +28,7 @@
     "expo-status-bar": "~58.0.4",
     "jpeg-js": "^0.4.4",
     "onnxruntime-react-native": "^1.24.3",
+    "onnxruntime-web": "^1.31.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-native": "0.88.1",

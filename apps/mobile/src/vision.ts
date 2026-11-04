@@ -99,7 +99,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         .sort()
         .join('|');
       const now = Date.now();
-      const shouldUseCloud = !local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000;
+      const shouldUseCloud = Boolean(API_URL) && (!local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000);
       localSignature.current = signature;
       if (!shouldUseCloud) {
         failures.current = 0;

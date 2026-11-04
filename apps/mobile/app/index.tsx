@@ -179,6 +179,15 @@ export default function Landing() {
               <Ionicons name="logo-github" size={19} color="#DDE9E2" />
               <Text style={s.secondaryText}>View project</Text>
             </Pressable>
+            <Pressable
+              accessibilityRole="link"
+              accessibilityLabel="Download GuideLens applications"
+              onPress={() => Platform.OS === 'web' && window.open('https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest', '_blank')}
+              style={s.secondary}
+            >
+              <Ionicons name="download-outline" size={19} color="#DDE9E2" />
+              <Text style={s.secondaryText}>Download apps</Text>
+            </Pressable>
           </View>
         </View>
 

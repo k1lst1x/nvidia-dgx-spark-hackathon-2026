@@ -13,11 +13,15 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm install
+      - name: Configure GitHub Pages base path
+        run: echo "EXPO_PUBLIC_BASE_URL=/${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
       - run: npm run typecheck
       - run: npm run build:web
       - uses: actions/configure-pages@v5

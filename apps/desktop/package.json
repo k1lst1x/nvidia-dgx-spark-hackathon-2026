@@ -1,0 +1,35 @@
+{
+  "name": "@guidelens/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "author": "GuideLens Hackathon Team",
+  "description": "GuideLens desktop camera and local YOLOX client",
+  "main": "main.cjs",
+  "scripts": {
+    "prepare": "node scripts/prepare.mjs",
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "45.2.2",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "edu.sfbu.guidelens.desktop",
+    "productName": "GuideLens",
+    "asar": true,
+    "files": ["main.cjs", "web/**/*"],
+    "directories": { "output": "release" },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.healthcare-fitness",
+      "extendInfo": {
+        "NSCameraUsageDescription": "GuideLens uses the camera for private on-device object detection."
+      }
+    },
+    "win": { "target": ["nsis", "portable"] },
+    "linux": { "target": ["AppImage", "deb"], "category": "Utility" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
+    "artifactName": "GuideLens-${version}-${os}-${arch}.${ext}"
+  }
+}

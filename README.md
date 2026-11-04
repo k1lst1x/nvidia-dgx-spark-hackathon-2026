@@ -8,9 +8,10 @@ It also includes **VisionMate**, a native SwiftUI iPhone client for the first ph
 
 ## Stack
 
-- Expo SDK 58 + React Native 0.88 + TypeScript for iOS, Android and web/PWA.
+- Expo SDK 58 + React Native 0.88 + TypeScript for iOS and Android.
+- Electron for signed-or-local desktop installers on Windows, macOS and Linux.
 - `expo-camera` + `expo-speech` for camera preview and native text-to-speech.
-- YOLOX Nano + ONNX Runtime for private on-device object detection on iOS and Android.
+- YOLOX Nano + ONNX Runtime for private on-device object detection on iOS, Android and desktop.
 - FastAPI on Python 3.12 in Docker as a secure Groq Vision gateway.
 - NVIDIA DGX Spark as the intended inference host using NIM/Triton or TensorRT.
 - GitHub Actions + Pages for automatic web delivery.
@@ -65,9 +66,12 @@ For a local HTTP address, add an App Transport Security exception appropriate to
 
 | Target | Hackathon path | Public release |
 |---|---|---|
-| Web/PWA | GitHub Pages URL | Same URL; install from browser where supported |
+| Web | GitHub Pages URL | Same URL in a browser |
 | iPhone/iPad | Signed EAS development build or VisionMate | TestFlight / App Store via EAS Build or Xcode |
-| Android | EAS preview APK | Google Play via EAS Build |
+| Android | Installable APK from GitHub Releases | Google Play via EAS Build |
+| Windows | Portable `.exe` or installer | Code-sign and distribute the installer |
+| macOS | `.dmg` or `.zip` application | Sign and notarize with an Apple Developer account |
+| Linux | AppImage or `.deb` | GitHub Releases or a package repository |
 
 GitHub Pages hosts the web app and download links, but cannot distribute a generally installable unsigned iOS app. iOS builds must be signed and normally delivered through TestFlight/App Store. Android APKs can be attached to GitHub Releases. HarmonyOS and KaiOS exist, but are not sensible MVP targets; the PWA is the practical fallback.
 
@@ -89,7 +93,20 @@ Groq bills each image as input tokens, so cloud analysis is intentionally near-r
 
 ## On-device detection
 
-The native app bundles the official Apache-2.0 YOLOX Nano ONNX model (3.5 MB). ONNX Runtime performs local detection; no object-detection frames leave the phone. A compact COCO object signature triggers Groq only when objects change or when the eight-second semantic-description refresh expires. The browser build gracefully falls back to Groq-only analysis.
+The native and desktop apps bundle the official Apache-2.0 YOLOX Nano ONNX model (3.5 MB). ONNX Runtime performs local detection; no object-detection frames leave the device. A compact COCO object signature triggers Groq only when objects change or when the eight-second semantic-description refresh expires. Desktop uses ONNX Runtime WebAssembly inside an Electron sandbox, so it continues detecting objects even without a configured backend.
+
+## Desktop and Android downloads
+
+The `Native release builds` GitHub Actions workflow produces real installable artifacts:
+
+- Windows: NSIS installer and portable `.exe`;
+- macOS: `.dmg` and `.zip` application;
+- Linux: AppImage and `.deb`;
+- Android: installable debug APK for hackathon testing.
+
+Run the workflow manually from **Actions**, or create a tag such as `v0.1.0` to build and attach every artifact to a GitHub Release. Set the repository Actions variable `EXPO_PUBLIC_API_URL` to the public HTTPS backend URL before building. YOLOX works offline; Groq scene descriptions require that backend.
+
+Desktop artifacts are intentionally unsigned hackathon builds. Windows SmartScreen and macOS Gatekeeper may warn users. Public distribution should use Windows code signing and Apple signing/notarization. The Android debug APK is appropriate for direct testing, not a Play Store production release.
 
 The model is intentionally YOLOX Nano rather than an Ultralytics checkpoint: YOLOX is Apache-2.0 compatible with this MIT project, while current Ultralytics models require AGPL-3.0 compliance or a commercial license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

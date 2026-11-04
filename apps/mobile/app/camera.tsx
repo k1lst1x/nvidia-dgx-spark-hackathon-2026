@@ -81,11 +81,14 @@ export default function CameraScreen() {
   );
   const frames = sceneFrames;
   const fallback = frames[frameIndex % frames.length];
-  const current: AssistFrame = vision ? {
-    title: vision.summary,
-    detail: vision.speech,
-    speech: vision.speech,
-    icon: mode === 'sign' ? 'hand-left' : vision.urgency === 'high' ? 'warning' : 'navigate',
+  const localSummary = detections.length
+    ? `Detected ${detections.slice(0, 3).map((item) => item.label).join(', ')}`
+    : 'Looking for nearby objects…';
+  const current: AssistFrame = vision || detections.length ? {
+    title: vision?.summary || localSummary,
+    detail: vision?.speech || 'Object detection is running privately on this device.',
+    speech: vision?.speech || localSummary,
+    icon: mode === 'sign' ? 'hand-left' : vision?.urgency === 'high' ? 'warning' : 'navigate',
     boxes: detections.map((item) => ({
       l: `${Math.round(item.x * 100)}%` as `${number}%`,
       t: `${Math.round(item.y * 100)}%` as `${number}%`,
