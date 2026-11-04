@@ -4,9 +4,10 @@ const { readFile, stat } = require('node:fs/promises');
 const { extname, join, normalize } = require('node:path');
 
 const root = join(__dirname, 'web');
+if (process.env.GUIDELENS_DEVTOOLS === '1') app.commandLine.appendSwitch('remote-debugging-port', '9222');
 const mime = {
-  '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json',
-  '.onnx': 'application/octet-stream', '.png': 'image/png', '.svg': 'image/svg+xml',
+  '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json',
+  '.onnx': 'application/octet-stream', '.png': 'image/png', '.svg': 'image/svg+xml', '.wasm': 'application/wasm',
 };
 
 async function serve(request, response) {
@@ -24,7 +25,8 @@ async function serve(request, response) {
       'Content-Type': mime[extname(file)] || 'application/octet-stream',
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: http:; worker-src 'self' blob: https://cdn.jsdelivr.net",
+      'Access-Control-Allow-Origin': '*',
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' http://assets; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: http:; worker-src 'self' blob: https://cdn.jsdelivr.net",
     });
     response.end(body);
   } catch {
@@ -38,6 +40,9 @@ app.whenReady().then(() => {
     const address = server.address();
     const origin = `http://127.0.0.1:${address.port}`;
     const isTrusted = (url) => url.startsWith(`${origin}/`) || url === origin;
+    session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://assets/*'] }, (details, callback) => {
+      callback({ redirectURL: `${origin}/assets${new URL(details.url).pathname}` });
+    });
     session.defaultSession.setPermissionCheckHandler((contents, permission) => permission === 'media' && isTrusted(contents.getURL()));
     session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => callback(permission === 'media' && isTrusted(contents.getURL())));
     const window = new BrowserWindow({
@@ -50,10 +55,14 @@ app.whenReady().then(() => {
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    window.webContents.on('console-message', (event) => {
+      console.log(`[renderer:${event.level}] ${event.message}`);
+    });
     window.webContents.on('will-navigate', (event, url) => {
       if (!isTrusted(url)) event.preventDefault();
     });
-    window.loadURL(origin);
+    window.loadURL(`${origin}${process.env.GUIDELENS_START_PATH || ''}`);
+    if (process.env.GUIDELENS_DEVTOOLS === '1') window.webContents.openDevTools({ mode: 'detach' });
   });
   app.on('before-quit', () => server.close());
 });

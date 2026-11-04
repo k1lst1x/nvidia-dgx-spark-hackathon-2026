@@ -1,5 +1,12 @@
-import * as ort from 'onnxruntime-web/webgl';
 import type { DetectionResult, LocalDetection } from './detector.types';
+
+type OrtTensor = { data: Float32Array };
+type OrtSession = { run: (feeds: Record<string, unknown>) => Promise<Record<string, OrtTensor>> };
+type OrtRuntime = {
+  env: { wasm: { wasmPaths: string; numThreads: number } };
+  InferenceSession: { create: (url: string, options: object) => Promise<OrtSession> };
+  Tensor: new (type: string, data: Float32Array, dimensions: number[]) => unknown;
+};
 
 const INPUT_SIZE = 416;
 const SCORE_THRESHOLD = 0.42;
@@ -20,13 +27,37 @@ function assetUrl(path: string) {
   return `${base}/${path}`.replace(/([^:]\/)\/+/, '$1');
 }
 
-let sessionPromise: Promise<ort.InferenceSession> | null = null;
+let runtimePromise: Promise<OrtRuntime> | null = null;
+let sessionPromise: Promise<OrtSession> | null = null;
+
+function getRuntime() {
+  if (!runtimePromise) {
+    runtimePromise = new Promise((resolve, reject) => {
+      const existing = (globalThis as typeof globalThis & { ort?: OrtRuntime }).ort;
+      if (existing) return resolve(existing);
+      const script = document.createElement('script');
+      script.src = assetUrl('ort/ort.wasm.min.js');
+      script.onload = () => {
+        const loaded = (globalThis as typeof globalThis & { ort?: OrtRuntime }).ort;
+        if (loaded) resolve(loaded);
+        else reject(new Error('ONNX Runtime did not initialise'));
+      };
+      script.onerror = () => reject(new Error('ONNX Runtime could not be loaded'));
+      document.head.appendChild(script);
+    });
+  }
+  return runtimePromise;
+}
 
 function getSession() {
   if (!sessionPromise) {
-    sessionPromise = ort.InferenceSession.create(assetUrl('models/yolox_nano.onnx'), {
-      executionProviders: ['webgl'],
-      graphOptimizationLevel: 'all',
+    sessionPromise = getRuntime().then((ort) => {
+      ort.env.wasm.wasmPaths = assetUrl('ort/');
+      ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+      return ort.InferenceSession.create(assetUrl('models/yolox_nano.onnx'), {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+      });
     });
   }
   return sessionPromise;
@@ -63,7 +94,7 @@ function suppressOverlaps(items: LocalDetection[]) {
 
 export async function detectObjects(uri: string): Promise<DetectionResult> {
   try {
-    const [session, image] = await Promise.all([getSession(), loadImage(uri)]);
+    const [ort, session, image] = await Promise.all([getRuntime(), getSession(), loadImage(uri)]);
     const canvas = document.createElement('canvas');
     canvas.width = INPUT_SIZE;
     canvas.height = INPUT_SIZE;

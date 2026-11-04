@@ -195,16 +195,16 @@ export default function Landing() {
           <View style={s.briefingHeader}>
             <View style={s.briefingLabel}>
               <View style={s.liveDot} />
-              <Text style={s.briefingLabelText}>LIVE SCENE BRIEFING</Text>
+              <Text style={s.briefingLabelText}>INTERFACE PREVIEW</Text>
             </View>
-            <Text style={s.briefingTime}>JUST NOW</Text>
+            <Text style={s.briefingTime}>ILLUSTRATIVE</Text>
           </View>
           <View style={s.briefingBody}>
             <View style={s.scenePane}>
               <View style={s.sceneGrid} />
               <View style={s.scanLine} />
               <View style={s.sceneTopline}>
-                <Text style={s.frameLabel}>CAMERA INPUT</Text>
+                <Text style={s.frameLabel}>EXAMPLE CAMERA INPUT</Text>
                 <Text style={s.frameLabel}>1 STILL FRAME</Text>
               </View>
               <View style={s.objectDoor}>
@@ -215,11 +215,11 @@ export default function Landing() {
               </View>
               <View style={s.sceneFooter}>
                 <Ionicons name="locate-outline" size={15} color="#C8FF72" />
-                <Text style={s.sceneFooterText}>SCENE RECOGNISED</Text>
+                <Text style={s.sceneFooterText}>EXAMPLE OUTPUT</Text>
               </View>
             </View>
             <View style={s.responsePane}>
-              <Text style={s.responseEyebrow}>SPOKEN RESPONSE</Text>
+              <Text style={s.responseEyebrow}>EXAMPLE SPOKEN RESPONSE</Text>
               <Text style={s.responseTitle}>A clear route through the room.</Text>
               <Text style={s.responseText}>A doorway is ahead. A chair is on your right, about two steps away.</Text>
               <View style={s.waveRow} accessibilityLabel="Audio response waveform">
@@ -290,7 +290,7 @@ export default function Landing() {
 
           <View style={s.architectureFooter}>
             <Ionicons name="information-circle-outline" size={19} color="#A7BDB1" />
-            <Text style={s.architectureFooterText}>The hackathon app currently uses a mocked inference response. The API contract is ready to point at a DGX Spark-hosted vision-language model.</Text>
+            <Text style={s.architectureFooterText}>YOLOX Nano performs real local object detection. A configured private backend adds concise vision-language descriptions without exposing its API key to the app.</Text>
           </View>
         </Reveal>
 

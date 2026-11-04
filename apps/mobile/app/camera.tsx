@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
-import { AssistMode, interpretSignSequence, useVisionLoop } from '../src/vision';
+import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 90, handCount: 0, ready: false };
 
@@ -80,9 +80,19 @@ export default function CameraScreen() {
     Boolean(permission?.granted) && !usesBrowserHandTracking,
   );
   const frames = sceneFrames;
-  const fallback = frames[frameIndex % frames.length];
+  const fallback: AssistFrame = {
+    title: visionState === 'offline' ? 'Local vision is reconnecting…' : 'Looking for nearby objects…',
+    detail: 'Point the camera at an object and keep it steady for a moment.',
+    speech: 'No objects detected yet.',
+    icon: visionState === 'offline' ? 'cloud-offline-outline' : 'scan-outline',
+    boxes: [],
+  };
+  const objectCounts = detections.reduce<Record<string, number>>((counts, item) => {
+    counts[item.label] = (counts[item.label] || 0) + 1;
+    return counts;
+  }, {});
   const localSummary = detections.length
-    ? `Detected ${detections.slice(0, 3).map((item) => item.label).join(', ')}`
+    ? `Detected ${Object.entries(objectCounts).slice(0, 3).map(([label, count]) => count > 1 ? `${count} ${label}s` : label).join(', ')}`
     : 'Looking for nearby objects…';
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
@@ -101,11 +111,15 @@ export default function CameraScreen() {
     ? 'Hand tracking needs attention.'
     : isAnalysingContext
       ? 'Reviewing the full signing sequence…'
-      : contextMessage || (signContext.ready ? 'Context window ready to analyze.' : 'Building context from continuous signing…');
+      : contextMessage || (signContext.ready
+        ? hasVisionBackend ? 'Context window ready to analyze.' : 'Live hand tracking complete.'
+        : 'Building context from continuous signing…');
   const browserSignDetail = signContext.error
     ? signContext.error
     : signContext.ready
-      ? `${signContext.handCount} hands tracked across ${signContext.maxFrames} frames. Analyze the whole sequence, not one gesture.`
+      ? hasVisionBackend
+        ? `${signContext.handCount} hands tracked across ${signContext.maxFrames} frames. Analyze the whole sequence, not one gesture.`
+        : `${signContext.handCount} hands tracked across ${signContext.maxFrames} frames. Configure the private vision backend to translate.`
       : `${signContext.handCount} hands tracked · ${signContext.frameCount}/${signContext.maxFrames} contextual frames`;
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
@@ -203,7 +217,7 @@ export default function CameraScreen() {
           </Pressable>
           <View style={c.modeIndicator}>
             <View style={c.greenDot} />
-            <Text style={c.modeText}>{usesBrowserHandTracking ? 'SIGN CONTEXT' : visionState === 'offline' ? 'VISION · RECONNECTING' : visionState === 'analyzing' ? 'VISION · ANALYZING' : isSignMode ? 'SIGN INTERPRETATION · LIVE' : 'GROQ VISION · LIVE'}</Text>
+            <Text style={c.modeText}>{usesBrowserHandTracking ? 'SIGN TRACKING · LIVE' : visionState === 'offline' ? 'VISION · RECONNECTING' : visionState === 'analyzing' ? 'VISION · ANALYZING' : isSignMode ? 'SIGN INTERPRETATION · LIVE' : hasVisionBackend ? 'HYBRID VISION · LIVE' : 'LOCAL YOLO · LIVE'}</Text>
           </View>
           <Pressable accessibilityLabel="Toggle spoken output" onPress={() => { setSpeaking((value) => !value); Speech.stop(); }} style={c.round}>
             <Ionicons name={speaking ? 'volume-high' : 'volume-mute'} size={21} color="#fff" />
@@ -243,7 +257,7 @@ export default function CameraScreen() {
               <Ionicons name="refresh" size={22} color="#EAF6F0" />
               <Text style={c.controlText}>{usesBrowserHandTracking ? 'New context' : isSignMode ? 'Read again' : 'Scan again'}</Text>
             </Pressable>
-            <Pressable accessibilityLabel={usesBrowserHandTracking ? 'Analyze sign language context' : isSignMode ? 'Speak translation' : 'Repeat description'} onPress={usesBrowserHandTracking ? analyzeSignContext : () => speak()} disabled={usesBrowserHandTracking && (!signContext.ready || isAnalysingContext)} style={[c.speak, usesBrowserHandTracking && (!signContext.ready || isAnalysingContext) && c.speakDisabled]}>
+            <Pressable accessibilityLabel={usesBrowserHandTracking ? 'Analyze sign language context' : isSignMode ? 'Speak translation' : 'Repeat description'} onPress={usesBrowserHandTracking ? analyzeSignContext : () => speak()} disabled={usesBrowserHandTracking && (!signContext.ready || isAnalysingContext || !hasVisionBackend)} style={[c.speak, usesBrowserHandTracking && (!signContext.ready || isAnalysingContext || !hasVisionBackend) && c.speakDisabled]}>
               <Ionicons name={usesBrowserHandTracking ? 'sparkles' : isSignMode ? 'megaphone' : 'volume-high'} size={24} color="#07110F" />
             </Pressable>
             <Pressable accessibilityLabel={torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on'} onPress={() => setTorchEnabled((value) => !value)} style={c.control}>
@@ -251,7 +265,7 @@ export default function CameraScreen() {
               <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
             </Pressable>
           </View>
-          <Text style={c.hint}>{usesBrowserHandTracking ? (signContext.ready ? 'Tap the center button to analyze the full context window' : 'Build a complete context window before analysis') : isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
+          <Text style={c.hint}>{usesBrowserHandTracking ? (signContext.ready ? hasVisionBackend ? 'Tap the center button to analyze the full context window' : 'Translation requires the configured private backend' : 'Build a complete context window before analysis') : isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
         </View>
       </SafeAreaView>
     </View>

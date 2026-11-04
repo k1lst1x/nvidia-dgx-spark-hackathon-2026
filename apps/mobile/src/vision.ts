@@ -24,6 +24,7 @@ export type VisionResult = {
 type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+export const hasVisionBackend = Boolean(API_URL);
 const sessionId = `gl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
 async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: string, signal: AbortSignal) {
