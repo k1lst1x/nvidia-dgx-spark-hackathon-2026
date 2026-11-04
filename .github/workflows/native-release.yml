@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            target: --mac
+            target: --mac --universal
             artifact: macOS
           - os: windows-latest
             target: --win

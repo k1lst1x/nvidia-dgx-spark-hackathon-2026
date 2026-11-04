@@ -99,7 +99,7 @@ The native and desktop apps bundle the official Apache-2.0 YOLOX Nano ONNX model
 
 The `Native release builds` GitHub Actions workflow produces real installable artifacts:
 
-- Windows: NSIS installer and portable `.exe`;
+- Windows: NSIS `.exe` installer;
 - macOS: `.dmg` and `.zip` application;
 - Linux: AppImage and `.deb`;
 - Android: installable debug APK for hackathon testing.
