@@ -4,7 +4,12 @@ const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/was
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const visionModule = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs';
 const framesPerGesture = 30;
-const maxContextFrames = framesPerGesture * 3;
+const contextGestures = 6;
+const maxContextFrames = framesPerGesture * contextGestures;
+const minimumFramesForTranslation = framesPerGesture;
+const snapshotCount = 3;
+const snapshotIntervalFrames = minimumFramesForTranslation / snapshotCount;
+const liveUpdateIntervalMs = 2000;
 
 type Landmark = { x: number; y: number; z?: number };
 type HandDetector = {
@@ -113,9 +118,9 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sequenceRef = useRef<number[][]>([]);
   const frameImagesRef = useRef<string[]>([]);
-  const maxHandCountRef = useRef(0);
   const smoothedHandsRef = useRef<Landmark[][]>([]);
-  const contextCapturedRef = useRef(false);
+  const totalTrackedFramesRef = useRef(0);
+  const lastLiveUpdateAtRef = useRef(-Infinity);
   const onContextChangeRef = useRef(onContextChange);
   const onContextCapturedRef = useRef(onContextCaptured);
 
@@ -135,13 +140,12 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
     let lastContextState = '';
 
     const reportContext = (handCount: number, error?: string) => {
-      maxHandCountRef.current = Math.max(maxHandCountRef.current, handCount);
       const frameCount = sequenceRef.current.length;
       const next: SignContextState = {
         frameCount,
         maxFrames: maxContextFrames,
-        handCount: frameCount === maxContextFrames ? maxHandCountRef.current : handCount,
-        ready: frameCount === maxContextFrames,
+        handCount,
+        ready: frameCount >= minimumFramesForTranslation,
         error,
       };
       const key = `${frameCount}:${handCount}:${error ?? ''}`;
@@ -203,20 +207,27 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
 
               if (smoothed.length === 0) {
                 smoothedHandsRef.current = [];
-              } else if (!contextCapturedRef.current) {
+              } else {
                 const sequence = sequenceRef.current;
                 sequence.push(createLandmarkFrame(smoothed));
                 if (sequence.length > maxContextFrames) sequence.shift();
-                if ([30, 60, 90].includes(sequence.length) && frameImagesRef.current.length < 3) {
+                totalTrackedFramesRef.current += 1;
+                if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {
                   const snapshot = document.createElement('canvas');
                   const width = 512;
                   snapshot.width = width;
                   snapshot.height = Math.round(width * video.videoHeight / video.videoWidth);
                   snapshot.getContext('2d')?.drawImage(video, 0, 0, snapshot.width, snapshot.height);
                   frameImagesRef.current.push(snapshot.toDataURL('image/jpeg', 0.68));
+                  if (frameImagesRef.current.length > snapshotCount) frameImagesRef.current.shift();
                 }
-                if (sequence.length === maxContextFrames) {
-                  contextCapturedRef.current = true;
+                const now = performance.now();
+                if (
+                  sequence.length >= minimumFramesForTranslation
+                  && frameImagesRef.current.length === snapshotCount
+                  && now - lastLiveUpdateAtRef.current >= liveUpdateIntervalMs
+                ) {
+                  lastLiveUpdateAtRef.current = now;
                   onContextCapturedRef.current?.(sequence.map((frame) => [...frame]), [...frameImagesRef.current]);
                 }
               }

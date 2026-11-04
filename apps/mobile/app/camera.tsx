@@ -8,7 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
 import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
-const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 90, handCount: 0, ready: false };
+const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
 
 type DetectionBox = {
   l: `${number}%`;
@@ -64,10 +64,12 @@ export default function CameraScreen() {
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
   const [isAnalysingContext, setIsAnalysingContext] = useState(false);
-  const [contextMessage, setContextMessage] = useState('');
+  const [translation, setTranslation] = useState('');
+  const [translationError, setTranslationError] = useState('');
   const [captureVersion, setCaptureVersion] = useState(0);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const analysisTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const translationInFlight = useRef(false);
+  const lastTranslation = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -109,18 +111,14 @@ export default function CameraScreen() {
   } : fallback;
   const browserSignHeading = signContext.error
     ? 'Hand tracking needs attention.'
-    : isAnalysingContext
-      ? 'Reviewing the full signing sequence…'
-      : contextMessage || (signContext.ready
-        ? hasVisionBackend ? 'Context window ready to analyze.' : 'Live hand tracking complete.'
-        : 'Building context from continuous signing…');
+    : translation || isAnalysingContext
+      ? translation || 'Interpreting your signed context…'
+      : signContext.ready
+        ? 'Listening and translating continuously…'
+        : 'Warming up live sign translation…';
   const browserSignDetail = signContext.error
     ? signContext.error
-    : signContext.ready
-      ? hasVisionBackend
-        ? `${signContext.handCount} hands tracked across ${signContext.maxFrames} frames. Analyze the whole sequence, not one gesture.`
-        : `${signContext.handCount} hands tracked across ${signContext.maxFrames} frames. Configure the private vision backend to translate.`
-      : `${signContext.handCount} hands tracked · ${signContext.frameCount}/${signContext.maxFrames} contextual frames`;
+    : translationError || `${signContext.handCount > 0 ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} visible` : 'Hands out of frame'} · ${signContext.frameCount}/${signContext.maxFrames} rolling context frames · live updates every 2 seconds`;
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
     : vision?.summary || (visionState === 'offline' ? 'Sign interpretation is reconnecting…' : 'Looking for a signed message…');
@@ -142,8 +140,11 @@ export default function CameraScreen() {
     setSignContext(emptySignContext);
     capturedSequence.current = [];
     capturedFrames.current = [];
-    setContextMessage('');
+    setTranslation('');
+    setTranslationError('');
     setIsAnalysingContext(false);
+    translationInFlight.current = false;
+    lastTranslation.current = '';
     setCaptureVersion((value) => value + 1);
   };
 
@@ -152,27 +153,36 @@ export default function CameraScreen() {
       scanNow();
       return;
     }
-    if (analysisTimer.current) clearTimeout(analysisTimer.current);
     setSignContext(emptySignContext);
     capturedSequence.current = [];
     capturedFrames.current = [];
-    setContextMessage('');
+    setTranslation('');
+    setTranslationError('');
     setIsAnalysingContext(false);
+    translationInFlight.current = false;
+    lastTranslation.current = '';
     setCaptureVersion((value) => value + 1);
   };
 
-  const analyzeSignContext = async () => {
-    if (!signContext.ready || capturedSequence.current.length !== signContext.maxFrames || capturedFrames.current.length !== 3 || isAnalysingContext) return;
+  const interpretLiveContext = async (sequence: number[][], frames: string[]) => {
+    capturedSequence.current = sequence;
+    capturedFrames.current = frames;
+    if (frames.length !== 3 || translationInFlight.current) return;
+    translationInFlight.current = true;
     setIsAnalysingContext(true);
-    setContextMessage('');
+    setTranslationError('');
     try {
-      const interpreted = await interpretSignSequence(capturedFrames.current);
-      setContextMessage(interpreted.speech);
-      speak(interpreted.speech);
+      const interpreted = await interpretSignSequence(frames);
+      setTranslation(interpreted.speech);
+      if (interpreted.speech !== lastTranslation.current) {
+        lastTranslation.current = interpreted.speech;
+        speak(interpreted.speech);
+      }
     } catch (error) {
-      setContextMessage(error instanceof Error ? error.message : 'Sign interpretation failed.');
+      setTranslationError(error instanceof Error ? error.message : 'Live sign interpretation failed.');
     } finally {
       setIsAnalysingContext(false);
+      translationInFlight.current = false;
     }
   };
 
@@ -187,10 +197,7 @@ export default function CameraScreen() {
     if (!usesBrowserHandTracking && vision && (vision.changed || vision.urgency === 'high')) speak(vision.speech);
   }, [usesBrowserHandTracking, vision?.scene_key]);
 
-  useEffect(() => () => {
-    if (analysisTimer.current) clearTimeout(analysisTimer.current);
-    void Speech.stop();
-  }, []);
+  useEffect(() => () => { void Speech.stop(); }, []);
 
   if (!permission) return <View style={c.fallback} />;
 
@@ -208,7 +215,7 @@ export default function CameraScreen() {
 
   return (
     <View style={c.root}>
-      {usesBrowserHandTracking ? <HandTracker key={captureVersion} onContextChange={setSignContext} onContextCaptured={(sequence, frames) => { capturedSequence.current = sequence; capturedFrames.current = frames; }} /> : <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />}
+      {usesBrowserHandTracking ? <HandTracker key={captureVersion} onContextChange={setSignContext} onContextCaptured={interpretLiveContext} /> : <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />}
       <View style={c.shade} />
       <SafeAreaView style={c.overlay}>
         <View style={c.top}>
@@ -255,17 +262,17 @@ export default function CameraScreen() {
           <View style={c.controls}>
             <Pressable onPress={restartContextCapture} style={c.control}>
               <Ionicons name="refresh" size={22} color="#EAF6F0" />
-              <Text style={c.controlText}>{usesBrowserHandTracking ? 'New context' : isSignMode ? 'Read again' : 'Scan again'}</Text>
+              <Text style={c.controlText}>{usesBrowserHandTracking ? 'Restart context' : isSignMode ? 'Read again' : 'Scan again'}</Text>
             </Pressable>
-            <Pressable accessibilityLabel={usesBrowserHandTracking ? 'Analyze sign language context' : isSignMode ? 'Speak translation' : 'Repeat description'} onPress={usesBrowserHandTracking ? analyzeSignContext : () => speak()} disabled={usesBrowserHandTracking && (!signContext.ready || isAnalysingContext || !hasVisionBackend)} style={[c.speak, usesBrowserHandTracking && (!signContext.ready || isAnalysingContext || !hasVisionBackend) && c.speakDisabled]}>
-              <Ionicons name={usesBrowserHandTracking ? 'sparkles' : isSignMode ? 'megaphone' : 'volume-high'} size={24} color="#07110F" />
+            <Pressable accessibilityLabel={usesBrowserHandTracking ? 'Speak live sign translation' : isSignMode ? 'Speak translation' : 'Repeat description'} onPress={usesBrowserHandTracking ? () => speak(translation) : () => speak()} disabled={usesBrowserHandTracking && !translation} style={[c.speak, usesBrowserHandTracking && !translation && c.speakDisabled]}>
+              <Ionicons name={usesBrowserHandTracking ? 'volume-high' : isSignMode ? 'megaphone' : 'volume-high'} size={24} color="#07110F" />
             </Pressable>
             <Pressable accessibilityLabel={torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on'} onPress={() => setTorchEnabled((value) => !value)} style={c.control}>
               <Ionicons name={torchEnabled ? 'flash' : 'flash-off'} size={22} color={torchEnabled ? '#C8FF72' : '#EAF6F0'} />
               <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
             </Pressable>
           </View>
-          <Text style={c.hint}>{usesBrowserHandTracking ? (signContext.ready ? hasVisionBackend ? 'Tap the center button to analyze the full context window' : 'Translation requires the configured private backend' : 'Build a complete context window before analysis') : isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
+          <Text style={c.hint}>{usesBrowserHandTracking ? (translation ? 'The center button repeats the latest live translation' : 'Translation starts after a short warm-up and continues automatically') : isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
         </View>
       </SafeAreaView>
     </View>

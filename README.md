@@ -91,6 +91,20 @@ The app never receives the Groq key. It sends a compressed JPEG to `POST /v1/des
 
 Groq bills each image as input tokens, so cloud analysis is intentionally near-real-time rather than video streaming: one request is allowed in flight and the on-device detector decides when Groq is needed.
 
+## ASL fingerspelling training
+
+The supplied ASL dataset trains a **static fingerspelling** model for A–I and K–Y. It does not contain full sentence meanings, and J and Z are excluded because they require motion. The trainer streams the archive directly, extracts the same MediaPipe hand-landmark representation used by the web app, and exports a portable softmax classifier.
+
+```bash
+uv venv --python 3.12 /private/tmp/asl-fingerspelling-venv
+uv pip install --python /private/tmp/asl-fingerspelling-venv/bin/python -r apps/api/requirements-train.txt
+/private/tmp/asl-fingerspelling-venv/bin/python apps/api/training/train_asl_fingerspelling.py \
+  --dataset "/path/to/American Sign Language Image Dataset (figerspelling original + keypoints + evaluation).zip" \
+  --output apps/api/models/asl_fingerspelling_landmarks.json
+```
+
+The live sign feature keeps a longer temporal context and asks the vision model to interpret complete signing phrases. The static fingerspelling classifier complements that flow; it is not a replacement for a trained continuous-ASL or multilingual sign-language model.
+
 ## On-device detection
 
 The native and desktop apps bundle the official Apache-2.0 YOLOX Nano ONNX model (3.5 MB). ONNX Runtime performs local detection; no object-detection frames leave the device. A compact COCO object signature triggers Groq only when objects change or when the eight-second semantic-description refresh expires. Desktop uses ONNX Runtime WebAssembly inside an Electron sandbox, so it continues detecting objects even without a configured backend.

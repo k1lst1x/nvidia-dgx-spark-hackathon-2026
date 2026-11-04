@@ -40,6 +40,6 @@ def test_sign_sequence_requires_three_jpeg_frames():
     response = client.post(
         "/v1/interpret-sign",
         headers={"X-Session-ID": "invalid-sign-sequence-test"},
-        json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="]},
+        json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 2},
     )
     assert response.status_code == 422

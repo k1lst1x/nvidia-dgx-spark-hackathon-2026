@@ -23,22 +23,34 @@ export type VisionResult = {
 
 type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+const API_URL = configuredApiUrl || (
+  typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
+    ? 'http://localhost:8000'
+    : ''
+);
 export const hasVisionBackend = Boolean(API_URL);
 const sessionId = `gl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
-async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: string, signal: AbortSignal) {
+function requireApiUrl() {
   if (!API_URL) throw new Error('EXPO_PUBLIC_API_URL is not configured');
+  return API_URL;
+}
+
+async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: string, signal: AbortSignal) {
+  const apiUrl = requireApiUrl();
   const data = new FormData();
   data.append('image', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
   data.append('task', mode);
   data.append('previous_scene_key', previousSceneKey);
-  const response = await fetch(`${API_URL}/v1/describe`, {
-    method: 'POST',
-    body: data,
-    headers: { 'X-Session-ID': sessionId },
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${apiUrl}/v1/describe`, {
+      method: 'POST', body: data, headers: { 'X-Session-ID': sessionId }, signal,
+    });
+  } catch {
+    throw new Error(`Vision server is unavailable at ${apiUrl}. Start the API server and try again.`);
+  }
   if (!response.ok) {
     const retryAfter = Number(response.headers.get('retry-after') || 0);
     const error = new Error(`Vision request failed: ${response.status}`) as Error & { retryAfter?: number };
@@ -49,14 +61,17 @@ async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: str
 }
 
 export async function interpretSignSequence(frames: string[], signal?: AbortSignal) {
-  if (!API_URL) throw new Error('EXPO_PUBLIC_API_URL is not configured');
+  const apiUrl = requireApiUrl();
   if (frames.length !== 3) throw new Error('Three sign-language context frames are required');
-  const response = await fetch(`${API_URL}/v1/interpret-sign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
-    body: JSON.stringify({ frames }),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${apiUrl}/v1/interpret-sign`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+      body: JSON.stringify({ frames }), signal,
+    });
+  } catch {
+    throw new Error(`Translation server is unavailable at ${apiUrl}. Start the API server and try again.`);
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { detail?: string } | null;
     throw new Error(body?.detail || `Sign interpretation failed: ${response.status}`);
