@@ -30,6 +30,6 @@
     "win": { "target": ["nsis"] },
     "linux": { "target": ["AppImage", "deb"], "category": "Utility" },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
-    "artifactName": "GuideLens-${version}-${os}-${arch}.${ext}"
+    "artifactName": "GuideLens-${os}-${arch}.${ext}"
   }
 }

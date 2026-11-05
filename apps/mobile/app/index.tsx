@@ -5,6 +5,7 @@ import {
   AccessibilityInfo,
   Animated,
   LayoutChangeEvent,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -69,6 +70,33 @@ const pipeline = [
     title: 'A calm spoken brief',
     text: 'The result is available as readable text and a concise voice response in the mobile app.',
     meta: 'Text + speech',
+  },
+];
+
+const releaseDownloads = [
+  {
+    label: 'Android APK',
+    detail: 'Phones and tablets',
+    icon: 'logo-android' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-Android.apk',
+  },
+  {
+    label: 'Windows',
+    detail: '64-bit installer',
+    icon: 'logo-windows' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.exe',
+  },
+  {
+    label: 'macOS',
+    detail: 'Universal DMG',
+    icon: 'logo-apple' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-mac-universal.dmg',
+  },
+  {
+    label: 'Linux',
+    detail: '64-bit AppImage',
+    icon: 'logo-tux' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x64.AppImage',
   },
 ];
 
@@ -189,6 +217,35 @@ export default function Landing() {
               <Text style={s.secondaryText}>Download apps</Text>
             </Pressable>
           </View>
+        </View>
+
+        <View style={s.downloadSection}>
+          <View style={s.downloadHeading}>
+            <View>
+              <Text style={s.sectionOverline}>DOWNLOAD THE NATIVE APP</Text>
+              <Text style={s.downloadTitle}>Run GuideLens on your device.</Text>
+            </View>
+            <Text style={s.downloadLead}>Local YOLOX object detection is bundled in every native build. Choose your platform.</Text>
+          </View>
+          <View style={s.downloadGrid}>
+            {releaseDownloads.map((release) => (
+              <Pressable
+                key={release.label}
+                accessibilityRole="link"
+                accessibilityLabel={`Download GuideLens for ${release.label}`}
+                onPress={() => void Linking.openURL(release.url)}
+                style={s.downloadCard}
+              >
+                <View style={s.downloadIcon}><Ionicons name={release.icon} size={22} color="#C8FF72" /></View>
+                <View style={s.downloadCopy}>
+                  <Text style={s.downloadLabel}>{release.label}</Text>
+                  <Text style={s.downloadDetail}>{release.detail}</Text>
+                </View>
+                <Ionicons name="download-outline" size={20} color="#DDE9E2" />
+              </Pressable>
+            ))}
+          </View>
+          <Text style={s.downloadNote}>Hackathon preview builds may trigger an unsigned-app warning. Android users must allow installation from their browser.</Text>
         </View>
 
         <View style={s.briefing}>
@@ -331,6 +388,17 @@ const s = StyleSheet.create({
   primaryText: { color: '#0A120D', fontSize: 15, fontWeight: '800', flexGrow: 1 },
   secondary: { minHeight: 53, flexDirection: 'row', alignItems: 'center', gap: 9, borderWidth: 1, borderColor: '#355147', borderRadius: 15, paddingHorizontal: 18, backgroundColor: 'rgba(20,40,30,.45)' },
   secondaryText: { color: '#DDE9E2', fontSize: 15, fontWeight: '700' },
+  downloadSection: { marginBottom: 32, padding: Platform.OS === 'web' ? 28 : 20, borderWidth: 1, borderColor: '#365448', borderRadius: 26, backgroundColor: '#0B1914' },
+  downloadHeading: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', alignItems: Platform.OS === 'web' ? 'flex-end' : 'flex-start', justifyContent: 'space-between', gap: 18 },
+  downloadTitle: { color: '#F0F7F1', fontSize: Platform.OS === 'web' ? 32 : 28, lineHeight: Platform.OS === 'web' ? 38 : 34, fontWeight: '800', letterSpacing: -1, marginTop: 10 },
+  downloadLead: { color: '#93AA9F', fontSize: 14, lineHeight: 21, maxWidth: 390 },
+  downloadGrid: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', flexWrap: 'wrap', gap: 10, marginTop: 24 },
+  downloadCard: { flexGrow: 1, flexBasis: Platform.OS === 'web' ? 240 : undefined, minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 15, borderWidth: 1, borderColor: '#315043', borderRadius: 17, backgroundColor: '#10231B' },
+  downloadIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#173226' },
+  downloadCopy: { flex: 1 },
+  downloadLabel: { color: '#EFF6F0', fontSize: 15, fontWeight: '800' },
+  downloadDetail: { color: '#829A8E', fontSize: 11, marginTop: 3 },
+  downloadNote: { color: '#71887D', fontSize: 10, lineHeight: 15, marginTop: 15 },
   briefing: { borderWidth: 1, borderColor: '#365448', borderRadius: 28, overflow: 'hidden', backgroundColor: '#0B1914' },
   briefingHeader: { minHeight: 54, paddingHorizontal: 21, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#294237', backgroundColor: 'rgba(17,40,29,.64)' },
   briefingLabel: { flexDirection: 'row', alignItems: 'center', gap: 8 },

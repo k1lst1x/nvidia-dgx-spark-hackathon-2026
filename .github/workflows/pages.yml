@@ -16,10 +16,12 @@ jobs:
     env:
       EXPO_PUBLIC_API_URL: ${{ vars.EXPO_PUBLIC_API_URL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: 22, cache: npm }
-      - run: npm install
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - name: Configure GitHub Pages base path
         run: echo "EXPO_PUBLIC_BASE_URL=/${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
       - run: npm run typecheck

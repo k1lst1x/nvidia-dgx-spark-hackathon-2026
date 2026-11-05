@@ -18,23 +18,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
             target: --mac --universal
             artifact: macOS
-          - os: windows-latest
+          - os: windows-2025
             target: --win
             artifact: Windows
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: --linux
             artifact: Linux
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - run: npm run typecheck
       - run: npm run build:desktop
       - name: Package desktop application
@@ -58,32 +60,33 @@ jobs:
             apps/desktop/release/*.deb
 
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - run: npx expo prebuild --platform android --no-install
         working-directory: apps/mobile
       - run: ./gradlew assembleDebug
         working-directory: apps/mobile/android
       - name: Name installable APK
-        run: cp apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk GuideLens-0.1.0-Android.apk
+        run: cp apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk GuideLens-Android.apk
       - uses: actions/upload-artifact@v4
         with:
           name: GuideLens-Android
-          path: GuideLens-0.1.0-Android.apk
+          path: GuideLens-Android.apk
           if-no-files-found: error
       - name: Attach APK to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: GuideLens-0.1.0-Android.apk
+          files: GuideLens-Android.apk
