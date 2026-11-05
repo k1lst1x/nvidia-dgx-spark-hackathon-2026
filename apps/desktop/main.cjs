@@ -8,6 +8,7 @@ if (process.env.GUIDELENS_DEVTOOLS === '1') app.commandLine.appendSwitch('remote
 const mime = {
   '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json',
   '.onnx': 'application/octet-stream', '.png': 'image/png', '.svg': 'image/svg+xml', '.wasm': 'application/wasm',
+  '.ico': 'image/x-icon',
 };
 
 async function serve(request, response) {
@@ -52,6 +53,7 @@ app.whenReady().then(() => {
       minHeight: 680,
       backgroundColor: '#07110F',
       title: 'GuideLens',
+      icon: join(root, 'favicon.png'),
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

@@ -15,3 +15,22 @@ await cp(join(mobile, 'assets', 'models', 'yolox_nano.onnx'), join(publicDir, 'm
 for (const name of ['ort.wasm.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm']) {
   await cp(join(ortDist, name), join(publicDir, 'ort', name));
 }
+
+const faviconFiles = [
+  'favicon.ico',
+  'favicon.svg',
+  'favicon.png',
+  'favicon-32x32.png',
+  'favicon-16x16.png',
+  'apple-touch-icon.png',
+];
+
+for (const name of faviconFiles) {
+  await cp(join(mobile, 'assets', name), join(publicDir, name));
+}
+
+await cp(
+  join(mobile, 'assets', 'index.template.html'),
+  join(publicDir, 'index.html'),
+);
+

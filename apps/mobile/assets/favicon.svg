@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="gl-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#142B22" />
+      <stop offset="100%" stop-color="#0A1813" />
+    </linearGradient>
+    <linearGradient id="gl-lime" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D9FF9B" />
+      <stop offset="100%" stop-color="#B7FF56" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background squircle -->
+  <rect x="18" y="18" width="476" height="476" rx="124" fill="url(#gl-bg)" stroke="#315043" stroke-width="12" />
+
+  <!-- Subtle optic radar ring -->
+  <circle cx="256" cy="256" r="190" fill="none" stroke="#C8FF72" stroke-width="4" stroke-opacity="0.18" stroke-dasharray="16 12" />
+
+  <!-- Outer stylized eye contour -->
+  <path d="M 88 256 C 180 120, 332 120, 424 256 C 332 392, 180 392, 88 256 Z" 
+        fill="none" 
+        stroke="url(#gl-lime)" 
+        stroke-width="32" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" />
+
+  <!-- Iris ring -->
+  <circle cx="256" cy="256" r="78" fill="#0A1813" stroke="url(#gl-lime)" stroke-width="22" />
+
+  <!-- Core pupil sensor -->
+  <circle cx="256" cy="256" r="40" fill="#B7FF56" />
+
+  <!-- Optic lens glint -->
+  <circle cx="273" cy="238" r="12" fill="#FFFFFF" opacity="0.85" />
+</svg>

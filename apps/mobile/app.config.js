@@ -8,6 +8,7 @@ module.exports = {
     orientation: 'portrait',
     scheme: 'guidelens',
     userInterfaceStyle: 'dark',
+    icon: './assets/icon.png',
     ios: {
       supportsTablet: true,
       bundleIdentifier: 'edu.sfbu.guidelens',
@@ -24,6 +25,7 @@ module.exports = {
       bundler: 'metro',
       output: 'single',
       name: 'GuideLens — AI vision companion',
+      favicon: './assets/favicon.png',
     },
     plugins: [
       'expo-router',
