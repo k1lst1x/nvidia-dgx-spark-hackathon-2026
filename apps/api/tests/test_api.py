@@ -43,3 +43,28 @@ def test_sign_sequence_requires_three_jpeg_frames():
         json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 2},
     )
     assert response.status_code == 422
+
+
+def test_sign_sequence_rejects_unbounded_transcript():
+    response = client.post(
+        "/v1/interpret-sign",
+        headers={"X-Session-ID": "oversized-sign-transcript-test"},
+        json={
+            "frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 3,
+            "previous_transcript": "x" * 601,
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_sign_sequence_fails_closed_without_provider_key():
+    response = client.post(
+        "/v1/interpret-sign",
+        headers={"X-Session-ID": "missing-sign-key-test"},
+        json={
+            "frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 3,
+            "previous_transcript": "Hello",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Vision service is not configured"

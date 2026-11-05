@@ -19,6 +19,15 @@ export type VisionResult = {
   changed: boolean;
   objects: VisionObject[];
   task: AssistMode;
+  should_speak?: boolean;
+};
+
+export type SignTranslation = {
+  transcript: string;
+  segment: string;
+  confidence: number;
+  is_final: boolean;
+  should_speak: boolean;
 };
 
 type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
@@ -73,14 +82,14 @@ async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: str
   return (await response.json()) as VisionResult;
 }
 
-export async function interpretSignSequence(frames: string[], signal?: AbortSignal) {
+export async function interpretSignSequence(frames: string[], previousTranscript = '', signal?: AbortSignal) {
   const apiUrl = requireApiUrl();
   if (frames.length !== 3) throw new Error('Three sign-language context frames are required');
   let response: Response;
   try {
     response = await fetch(`${apiUrl}/v1/interpret-sign`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
-      body: JSON.stringify({ frames }), signal,
+      body: JSON.stringify({ frames, previous_transcript: previousTranscript.slice(-600) }), signal,
     });
   } catch {
     throw new Error(`Translation server is unavailable at ${apiUrl}. Start the API server and try again.`);
@@ -89,7 +98,23 @@ export async function interpretSignSequence(frames: string[], signal?: AbortSign
     const body = await response.json().catch(() => null) as { detail?: string } | null;
     throw new Error(body?.detail || `Sign interpretation failed: ${response.status}`);
   }
-  return (await response.json()) as VisionResult;
+  return (await response.json()) as SignTranslation;
+}
+
+async function imageUriToDataUrl(uri: string) {
+  if (uri.startsWith('data:image/jpeg;base64,')) return uri;
+  const response = await fetch(uri);
+  if (!response.ok) throw new Error('Camera frame could not be prepared for sign translation');
+  const blob = await response.blob();
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Camera frame could not be encoded'));
+    reader.onload = () => {
+      const encoded = String(reader.result);
+      resolve(encoded.replace(/^data:[^;]*;base64,/, 'data:image/jpeg;base64,'));
+    };
+    reader.readAsDataURL(blob);
+  });
 }
 
 export function useVisionLoop(camera: RefObject<CameraView | null>, mode: AssistMode, enabled: boolean) {
@@ -105,6 +130,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const sceneKey = useRef('');
   const localSignature = useRef('');
   const lastCloudAnalysis = useRef(0);
+  const signFrames = useRef<string[]>([]);
+  const signTranscript = useRef('');
 
   const stop = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -117,10 +144,54 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const run = useCallback(async (runGeneration: number) => {
     if (!enabled || !camera.current || runGeneration !== generation.current) return;
     setState((current) => current === 'offline' ? 'analyzing' : current);
-    let nextDelay = LOCAL_SCAN_INTERVAL_MS;
+    let nextDelay = mode === 'sign' ? 700 : LOCAL_SCAN_INTERVAL_MS;
     try {
       const picture = await camera.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
+      if (mode === 'sign') {
+        if (!API_URL) {
+          setState('offline');
+          return;
+        }
+        const frame = await imageUriToDataUrl(picture.uri);
+        signFrames.current.push(frame);
+        if (signFrames.current.length > 3) signFrames.current.shift();
+        failures.current = 0;
+        setState(signFrames.current.length === 3 ? 'live' : 'analyzing');
+        if (signFrames.current.length === 3 && !cloudInFlight.current) {
+          const cloudController = new AbortController();
+          controller.current = cloudController;
+          cloudInFlight.current = true;
+          const windowFrames = [...signFrames.current];
+          // Retain one boundary frame so consecutive windows overlap without
+          // resending an entire window or creating gaps between phrases.
+          signFrames.current = [signFrames.current[2]];
+          void interpretSignSequence(windowFrames, signTranscript.current, cloudController.signal)
+            .then((next) => {
+              if (cloudController.signal.aborted || runGeneration !== generation.current) return;
+              signTranscript.current = next.transcript;
+              setResult({
+                summary: next.transcript || 'Watching for an ASL phrase…',
+                speech: next.segment || next.transcript || 'No clear sign yet.',
+                scene_key: next.transcript,
+                urgency: 'low',
+                changed: Boolean(next.segment),
+                objects: [],
+                task: 'sign',
+                should_speak: next.should_speak,
+              });
+              setLastUpdated(Date.now());
+            })
+            .catch((error) => {
+              if (!cloudController.signal.aborted) console.warn('Sign translation unavailable', error);
+            })
+            .finally(() => {
+              if (controller.current === cloudController) controller.current = null;
+              cloudInFlight.current = false;
+            });
+        }
+        return;
+      }
       const local = await detectObjects(picture.uri);
       if (runGeneration !== generation.current) return;
       setDetections(local.detections);
@@ -186,6 +257,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     sceneKey.current = '';
     localSignature.current = '';
     lastCloudAnalysis.current = 0;
+    signFrames.current = [];
+    signTranscript.current = '';
     failures.current = 0;
     setResult(null);
     if (!enabled) {

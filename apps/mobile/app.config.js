@@ -4,7 +4,7 @@ module.exports = {
   expo: {
     name: 'GuideLens',
     slug: 'guidelens',
-    version: '0.1.2',
+    version: '0.1.3',
     orientation: 'portrait',
     scheme: 'guidelens',
     userInterfaceStyle: 'dark',

@@ -54,6 +54,15 @@ class VisionResult(BaseModel):
 
 class SignSequenceRequest(BaseModel):
     frames: list[str] = Field(min_length=3, max_length=3)
+    previous_transcript: str = Field(default="", max_length=600)
+
+
+class SignTranslation(BaseModel):
+    transcript: str = Field(max_length=600)
+    segment: str = Field(max_length=180)
+    confidence: float = Field(ge=0, le=1)
+    is_final: bool
+    should_speak: bool
 
 
 VISION_SCHEMA = {
@@ -83,6 +92,19 @@ VISION_SCHEMA = {
     "additionalProperties": False,
 }
 
+SIGN_TRANSLATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "transcript": {"type": "string"},
+        "segment": {"type": "string"},
+        "confidence": {"type": "number"},
+        "is_final": {"type": "boolean"},
+        "should_speak": {"type": "boolean"},
+    },
+    "required": ["transcript", "segment", "confidence", "is_final", "should_speak"],
+    "additionalProperties": False,
+}
+
 SCENE_PROMPT = """You are GuideLens, a visual accessibility assistant for a blind user.
 Describe only useful facts visible in the current image. First look for a clearly foregrounded or
 hand-held object and identify it if visually supported; do not let the camera holder's face or body
@@ -94,11 +116,18 @@ sensitive traits. Keep speech under 25 words. Compare with the previous scene ke
 changed=false when there is no meaningful navigation change. scene_key must be a short, stable,
 lowercase semantic fingerprint. task must be scene. Output only the requested JSON."""
 
-SIGN_PROMPT = """You are assisting communication with a signer using three chronological frames
-sampled from a short signing sequence. Interpret only when the complete sign is visually clear.
-Three frames cannot reliably represent every motion-based sign; when uncertain say 'Sign not clear—
-please repeat it slowly.' Never invent a translation. Keep speech under 18 words, set objects to an
-empty array, use a stable scene_key, and set task to sign. Output only the requested JSON."""
+SIGN_PROMPT = """You are the conservative temporal decoder in an experimental American Sign
+Language (ASL) communication aid. You receive three chronological frames sampled across one
+overlapping video window and the transcript accepted from earlier windows. Consider both hands,
+motion between frames, body pose, facial grammar, and fingerspelling. Translate only visually
+supported ASL; do not treat arbitrary gestures as signs and never invent missing words.
+
+Return transcript as the complete previous transcript plus only a genuinely new continuation.
+Return segment as only that new continuation, or an empty string when the window is unclear,
+duplicated, transitional, or contains no signing. Preserve an already accepted transcript verbatim.
+Set confidence conservatively. is_final means a phrase boundary is visible (pause or hands lowered),
+not merely that one window ended. should_speak is true only for a non-empty, confident, final new
+segment. Output only the requested JSON."""
 
 
 def _rate_limit(client_id: str) -> None:
@@ -167,6 +196,94 @@ async def _call_groq(images: list[tuple[bytes, str]], previous_scene_key: str, t
     raise HTTPException(502, "Vision provider request failed")
 
 
+async def _call_groq_sign(
+    images: list[tuple[bytes, str]], previous_transcript: str
+) -> SignTranslation:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "Vision service is not configured")
+    content = [{
+        "type": "text",
+        "text": (
+            "Previously accepted transcript (preserve exactly): "
+            f"{json.dumps(previous_transcript or '[empty]')}. Decode the next chronological window."
+        ),
+    }]
+    for image, mime in images:
+        encoded = base64.b64encode(image).decode("ascii")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{encoded}"},
+        })
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": SIGN_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "sign_translation",
+                "strict": True,
+                "schema": SIGN_TRANSLATION_SCHEMA,
+            },
+        },
+        "reasoning_effort": "none",
+        "temperature": 0.1,
+        "max_completion_tokens": 260,
+        "stream": False,
+    }
+    timeout = httpx.Timeout(12.0, connect=4.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    GROQ_URL,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < 2:
+                        retry = float(response.headers.get("retry-after", 0))
+                        await asyncio.sleep(max(retry, min(0.5 * (2**attempt) + random.random(), 4)))
+                        continue
+                response.raise_for_status()
+                raw = response.json()["choices"][0]["message"]["content"]
+                result = SignTranslation.model_validate(json.loads(raw))
+                # The model may only append to an accepted transcript. Enforce that contract
+                # server-side so a noisy window cannot rewrite a user's conversation.
+                if previous_transcript and not result.transcript.startswith(previous_transcript):
+                    return SignTranslation(
+                        transcript=previous_transcript,
+                        segment="",
+                        confidence=0,
+                        is_final=False,
+                        should_speak=False,
+                    )
+                continuation = result.transcript[len(previous_transcript):].strip()
+                result.segment = continuation
+                if result.confidence < 0.68 or not result.segment.strip():
+                    return SignTranslation(
+                        transcript=previous_transcript,
+                        segment="",
+                        confidence=result.confidence,
+                        is_final=False,
+                        should_speak=False,
+                    )
+                return result
+            except (httpx.TimeoutException, httpx.NetworkError):
+                if attempt == 2:
+                    raise HTTPException(504, "Vision provider timed out")
+                await asyncio.sleep(0.5 * (2**attempt) + random.random())
+            except (KeyError, json.JSONDecodeError, ValidationError):
+                raise HTTPException(502, "Vision provider returned an invalid response")
+            except httpx.HTTPStatusError as exc:
+                logger.warning("groq_sign_error status=%s", exc.response.status_code)
+                raise HTTPException(502, "Vision provider request failed")
+    raise HTTPException(502, "Vision provider request failed")
+
+
 @app.get("/health")
 def health():
     return {
@@ -209,7 +326,7 @@ async def describe(
     return result
 
 
-@app.post("/v1/interpret-sign", response_model=VisionResult)
+@app.post("/v1/interpret-sign", response_model=SignTranslation)
 async def interpret_sign(request: Request, sequence: SignSequenceRequest):
     client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
     _rate_limit(client_id)
@@ -226,7 +343,7 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         decoded.append((body, "image/jpeg"))
     started = time.monotonic()
     async with _slots:
-        result = await _call_groq(decoded, "", "sign")
+        result = await _call_groq_sign(decoded, sequence.previous_transcript.strip())
     logger.info(
         "sign_complete latency_ms=%d frame_count=%d total_bytes=%d",
         int((time.monotonic() - started) * 1000),

@@ -26,40 +26,9 @@ type AssistFrame = {
   boxes: DetectionBox[];
 };
 
-const sceneFrames: AssistFrame[] = [
-  {
-    title: 'Clear path ahead',
-    detail: 'Door 13 feet ahead. Chair to your right.',
-    speech: 'Door 13 feet ahead. Chair to your right.',
-    icon: 'navigate',
-    boxes: [
-      { l: '12%', t: '25%', w: '22%', h: '32%', label: 'chair · 93%' },
-      { l: '61%', t: '18%', w: '25%', h: '49%', label: 'door · 97%' },
-    ],
-  },
-  {
-    title: 'Person approaching',
-    detail: 'A person is about 10 feet ahead.',
-    speech: 'A person is about 10 feet ahead.',
-    icon: 'person',
-    boxes: [{ l: '38%', t: '19%', w: '26%', h: '55%', label: 'person · 96%' }],
-  },
-  {
-    title: 'Table ahead',
-    detail: 'A table is 5 feet ahead. A cup is on top.',
-    speech: 'A table is 5 feet ahead. A cup is on top.',
-    icon: 'cafe',
-    boxes: [
-      { l: '15%', t: '44%', w: '70%', h: '31%', label: 'table · 95%' },
-      { l: '57%', t: '35%', w: '12%', h: '12%', label: 'cup · 89%' },
-    ],
-  },
-];
-
 export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<AssistMode>('scene');
-  const [frameIndex, setFrameIndex] = useState(0);
   const [speaking, setSpeaking] = useState(true);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
@@ -67,7 +36,6 @@ export default function CameraScreen() {
   const [translation, setTranslation] = useState('');
   const [translationError, setTranslationError] = useState('');
   const [captureVersion, setCaptureVersion] = useState(0);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
   const capturedSequence = useRef<number[][]>([]);
@@ -86,7 +54,6 @@ export default function CameraScreen() {
     mode,
     Boolean(permission?.granted) && !usesBrowserHandTracking,
   );
-  const frames = sceneFrames;
   const fallback: AssistFrame = {
     title: visionState === 'offline' ? 'Local vision is reconnecting…' : 'Looking for nearby objects…',
     detail: 'Point the camera at an object and keep it steady for a moment.',
@@ -155,7 +122,6 @@ export default function CameraScreen() {
     if (nextMode === mode) return;
     Speech.stop();
     setMode(nextMode);
-    setFrameIndex(0);
     setSignContext(emptySignContext);
     setTranslation('');
     setTranslationError('');
@@ -190,12 +156,12 @@ export default function CameraScreen() {
     setIsAnalysingContext(true);
     setTranslationError('');
     try {
-      const interpreted = await interpretSignSequence(frames);
-      setTranslation(interpreted.speech);
-      if (interpreted.speech !== lastTranslation.current) {
-        lastTranslation.current = interpreted.speech;
-        speak(interpreted.speech);
+      const interpreted = await interpretSignSequence(frames, lastTranslation.current);
+      setTranslation(interpreted.transcript);
+      if (interpreted.should_speak && interpreted.segment && interpreted.transcript !== lastTranslation.current) {
+        speak(interpreted.segment);
       }
+      lastTranslation.current = interpreted.transcript;
     } catch (error) {
       if (hasVisionBackend) {
         setTranslationError(error instanceof Error ? error.message : 'Live sign interpretation failed.');
@@ -206,14 +172,16 @@ export default function CameraScreen() {
     }
   };
 
-  useEffect(() => {
-    if (mode === 'scene') timer.current = setInterval(() => setFrameIndex((value) => (value + 1) % frames.length), 5500);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
-  }, [mode, frames.length]);
-
   useEffect(() => () => { void Speech.stop(); }, []);
+
+  useEffect(() => {
+    if (!usesBrowserHandTracking && isSignMode && vision?.should_speak && vision.speech) {
+      if (vision.scene_key !== lastTranslation.current) {
+        lastTranslation.current = vision.scene_key;
+        speak(vision.speech);
+      }
+    }
+  }, [isSignMode, usesBrowserHandTracking, vision]);
 
   if (!permission) return <View style={c.fallback} />;
 

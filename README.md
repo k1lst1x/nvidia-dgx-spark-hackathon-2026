@@ -103,7 +103,7 @@ uv pip install --python /private/tmp/asl-fingerspelling-venv/bin/python -r apps/
   --output apps/api/models/asl_fingerspelling_landmarks.json
 ```
 
-The live sign feature keeps a longer temporal context and asks the vision model to interpret complete signing phrases. The static fingerspelling classifier complements that flow; it is not a replacement for a trained continuous-ASL or multilingual sign-language model.
+The live sign feature samples overlapping temporal windows, preserves an accepted transcript across windows, suppresses uncertain/repeated segments, and speaks only confident phrase boundaries. Desktop/web additionally tracks both hands, upper-body pose, and facial cues locally. Android samples camera windows for the same backend decoder. The static fingerspelling classifier complements that flow; this remains an experimental ASL phrase decoder, not a validated replacement for a trained continuous-ASL interpreter.
 
 ## On-device detection
 
