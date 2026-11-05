@@ -6,7 +6,7 @@
   "description": "GuideLens desktop camera and local YOLOX client",
   "main": "main.cjs",
   "scripts": {
-    "prepare": "node scripts/prepare.mjs",
+    "sync-web": "node scripts/prepare.mjs",
     "start": "electron .",
     "dist": "electron-builder"
   },

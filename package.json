@@ -11,7 +11,7 @@
     "web": "npm --workspace apps/mobile run web",
     "build:web": "npm --workspace apps/mobile run build:web",
     "typecheck": "npm --workspace apps/mobile run typecheck",
-    "build:desktop": "npm run build:web && npm --workspace apps/desktop run prepare"
+    "build:desktop": "npm run build:web && npm --workspace apps/desktop run sync-web"
   },
   "engines": {
     "node": ">=22.13.0"
