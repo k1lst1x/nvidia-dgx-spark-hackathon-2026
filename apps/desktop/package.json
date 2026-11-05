@@ -17,6 +17,7 @@
   "build": {
     "appId": "edu.sfbu.guidelens.desktop",
     "productName": "GuideLens",
+    "executableName": "GuideLens",
     "asar": true,
     "files": ["main.cjs", "web/**/*"],
     "directories": { "output": "release" },

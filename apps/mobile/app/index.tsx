@@ -96,7 +96,7 @@ const releaseDownloads = [
     label: 'Linux',
     detail: '64-bit AppImage',
     icon: 'logo-tux' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x64.AppImage',
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x86_64.AppImage',
   },
 ];
 
