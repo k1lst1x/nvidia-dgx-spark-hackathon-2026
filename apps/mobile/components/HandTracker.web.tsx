@@ -1,4 +1,5 @@
 import { CSSProperties, useEffect, useRef } from 'react';
+import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
 
 const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
@@ -13,7 +14,11 @@ const liveUpdateIntervalMs = 2000;
 
 type Landmark = { x: number; y: number; z?: number };
 type HandDetector = {
-  detectForVideo: (video: HTMLVideoElement, timestamp: number) => { landmarks: Landmark[][] };
+  detectForVideo: (video: HTMLVideoElement, timestamp: number) => {
+    landmarks: Landmark[][];
+    handednesses?: Array<Array<{ categoryName?: string; displayName?: string; score?: number }>>;
+    handedness?: Array<Array<{ categoryName?: string; displayName?: string; score?: number }>>;
+  };
   close: () => void;
 };
 
@@ -35,11 +40,18 @@ export type SignContextState = {
   handCount: number;
   ready: boolean;
   error?: string;
+  aslState?: ASLSessionState;
 };
 
 type HandTrackerProps = {
   onContextChange?: (state: SignContextState) => void;
   onContextCaptured?: (sequence: number[][], frames: string[]) => void;
+  onAslStateChange?: (state: ASLSessionState) => void;
+  aslEngineRef?: React.MutableRefObject<{
+    backspace: () => string;
+    addSpace: () => string;
+    clearText: () => void;
+  } | null>;
 };
 
 async function createHandDetector(runtime: VisionRuntime, vision: unknown): Promise<HandDetector> {
@@ -113,7 +125,12 @@ function smoothLandmarks(current: Landmark[][], previous: Landmark[][], alpha = 
   }));
 }
 
-export default function HandTracker({ onContextChange, onContextCaptured }: HandTrackerProps) {
+export default function HandTracker({
+  onContextChange,
+  onContextCaptured,
+  onAslStateChange,
+  aslEngineRef,
+}: HandTrackerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sequenceRef = useRef<number[][]>([]);
@@ -123,6 +140,29 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
   const lastLiveUpdateAtRef = useRef(-Infinity);
   const onContextChangeRef = useRef(onContextChange);
   const onContextCapturedRef = useRef(onContextCaptured);
+  const onAslStateChangeRef = useRef(onAslStateChange);
+
+  // Initialize ASL Gesture Engine for zero-latency on-device processing
+  const aslEngine = useRef<ASLGestureEngine>(
+    new ASLGestureEngine({
+      minConfidence: 0.62,
+      holdFramesRequired: 7,
+      onStateChange: (state) => {
+        onAslStateChangeRef.current?.(state);
+      },
+    }),
+  ).current;
+
+  // Expose controller methods to parent via ref
+  useEffect(() => {
+    if (aslEngineRef) {
+      aslEngineRef.current = {
+        backspace: () => aslEngine.backspace(),
+        addSpace: () => aslEngine.addSpace(),
+        clearText: () => aslEngine.clearText(),
+      };
+    }
+  }, [aslEngineRef, aslEngine]);
 
   useEffect(() => {
     onContextChangeRef.current = onContextChange;
@@ -133,13 +173,17 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
   }, [onContextCaptured]);
 
   useEffect(() => {
+    onAslStateChangeRef.current = onAslStateChange;
+  }, [onAslStateChange]);
+
+  useEffect(() => {
     let active = true;
     let stream: MediaStream | undefined;
     let animationFrame: number | undefined;
     let detector: HandDetector | undefined;
     let lastContextState = '';
 
-    const reportContext = (handCount: number, error?: string) => {
+    const reportContext = (handCount: number, error?: string, aslState?: ASLSessionState) => {
       const frameCount = sequenceRef.current.length;
       const next: SignContextState = {
         frameCount,
@@ -147,8 +191,9 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
         handCount,
         ready: frameCount >= minimumFramesForTranslation,
         error,
+        aslState,
       };
-      const key = `${frameCount}:${handCount}:${error ?? ''}`;
+      const key = `${frameCount}:${handCount}:${error ?? ''}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}`;
       if (key !== lastContextState) {
         lastContextState = key;
         onContextChangeRef.current?.(next);
@@ -205,9 +250,21 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
               const smoothed = smoothLandmarks(results.landmarks, smoothedHandsRef.current);
               smoothedHandsRef.current = smoothed;
 
+              let currentAslState: ASLSessionState | undefined;
+
               if (smoothed.length === 0) {
                 smoothedHandsRef.current = [];
+                currentAslState = aslEngine.processFrame(undefined);
               } else {
+                // Perform instant on-device ASL classification (<0.2ms)
+                const primaryHand = smoothed[0];
+                const handednessCategory =
+                  results.handednesses?.[0]?.[0]?.categoryName ??
+                  results.handedness?.[0]?.[0]?.categoryName ??
+                  'Right';
+
+                currentAslState = aslEngine.processFrame(primaryHand, handednessCategory);
+
                 const sequence = sequenceRef.current;
                 sequence.push(createLandmarkFrame(smoothed));
                 if (sequence.length > maxContextFrames) sequence.shift();
@@ -231,8 +288,10 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
                   onContextCapturedRef.current?.(sequence.map((frame) => [...frame]), [...frameImagesRef.current]);
                 }
               }
-              reportContext(smoothed.length);
 
+              reportContext(smoothed.length, undefined, currentAslState);
+
+              // Render landmark connections & joints
               for (const landmarks of smoothed) {
                 drawingUtils.drawConnectors(landmarks, runtime.HandLandmarker.HAND_CONNECTIONS, {
                   color: 'rgba(2, 18, 10, 0.94)',
@@ -250,6 +309,20 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
                   color: '#FF826F',
                   radius: 3.25,
                 });
+              }
+
+              // Render interactive targeting ring around wrist
+              if (currentAslState && currentAslState.currentLetter && smoothed.length > 0) {
+                const wrist = smoothed[0][0];
+                if (wrist) {
+                  const wx = wrist.x * canvas.width;
+                  const wy = wrist.y * canvas.height;
+                  context.beginPath();
+                  context.arc(wx, wy, 24 + currentAslState.holdProgress * 12, 0, 2 * Math.PI);
+                  context.strokeStyle = currentAslState.isHolding ? '#C8FF72' : 'rgba(200, 255, 114, 0.45)';
+                  context.lineWidth = 3.5;
+                  context.stroke();
+                }
               }
             }
           }
@@ -274,7 +347,7 @@ export default function HandTracker({ onContextChange, onContextCaptured }: Hand
       stream?.getTracks().forEach((track) => track.stop());
       detector?.close();
     };
-  }, []);
+  }, [aslEngine]);
 
   return (
     <div aria-label="Live sign language hand tracking" style={styles.container}>
