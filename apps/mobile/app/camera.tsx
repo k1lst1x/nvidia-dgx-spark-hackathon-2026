@@ -239,7 +239,7 @@ export default function CameraScreen() {
           onContextCaptured={interpretLiveContext}
         />
       ) : (
-        <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" enableTorch={torchEnabled} />
+        <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" zoom={0} enableTorch={torchEnabled} />
       )}
       <View style={c.shade} />
       <SafeAreaView style={c.overlay}>
@@ -318,88 +318,72 @@ export default function CameraScreen() {
                 </View>
               )}
 
-              {Boolean(spelledText) && (
-                <View style={c.aslWordCard}>
-                  <View style={c.aslWordHeader}>
-                    <Text style={c.aslWordLabel}>WORD BUFFER</Text>
-                    <Pressable
-                      onPress={() => speak(spelledText)}
-                      style={c.aslSpeakMiniBtn}
-                      accessibilityLabel="Speak word buffer"
-                    >
-                      <Ionicons name="volume-high" size={12} color="#07110F" />
-                      <Text style={c.aslSpeakMiniText}>Speak</Text>
-                    </Pressable>
-                  </View>
-                  <Text style={c.aslWordText}>
-                    {spelledText}
-                    <Text style={c.aslCursor}>_</Text>
-                  </Text>
-                  <View style={c.aslWordActions}>
-                    <Pressable
-                      onPress={() => aslEngineRef.current?.addSpace()}
-                      style={c.aslActionBtn}
-                      accessibilityLabel="Add space"
-                    >
-                      <Ionicons name="return-down-forward-outline" size={14} color="#DDE9E4" />
-                      <Text style={c.aslActionText}>Space</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => aslEngineRef.current?.backspace()}
-                      style={c.aslActionBtn}
-                      accessibilityLabel="Delete last letter"
-                    >
-                      <Ionicons name="backspace-outline" size={14} color="#DDE9E4" />
-                      <Text style={c.aslActionText}>Del</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => aslEngineRef.current?.clearText()}
-                      style={[c.aslActionBtn, c.aslActionClearBtn]}
-                      accessibilityLabel="Clear word buffer"
-                    >
-                      <Ionicons name="trash-outline" size={13} color="#FF826F" />
-                      <Text style={[c.aslActionText, { color: '#FF826F' }]}>Clear</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              )}
             </View>
           )}
         </View>
 
         <View style={c.bottom}>
-          <View style={[c.answer, isSignMode && c.signAnswer]}>
-            <View style={[c.answerIcon, isSignMode && c.signAnswerIcon]}><Ionicons name={isSignMode ? 'hand-left' : current.icon} size={25} color="#07110F" /></View>
-            <View style={c.answerCopy}>
-              <Text style={isSignMode ? c.translationText : c.answerTitle}>{isSignMode ? signHeading : current.title}</Text>
-              <Text style={isSignMode ? c.translationDetail : c.answerText}>{isSignMode ? signDetail : current.detail}</Text>
+          {usesBrowserHandTracking ? (
+            <View style={[c.aslWordCard, c.aslWordCardPanel]}>
+              <View style={c.aslWordHeader}>
+                <Text style={c.aslWordLabel}>WORD BUFFER</Text>
+                <Pressable
+                  onPress={() => speak(spelledText)}
+                  disabled={!spelledText}
+                  style={[c.aslSpeakMiniBtn, !spelledText && c.aslSpeakMiniBtnDisabled]}
+                  accessibilityLabel="Speak word buffer"
+                >
+                  <Ionicons name="volume-high" size={15} color="#07110F" />
+                  <Text style={c.aslSpeakMiniText}>Speak</Text>
+                </Pressable>
+              </View>
+              <Text style={[c.aslWordText, !spelledText && c.aslWordTextEmpty]}>
+                {spelledText || 'Start signing'}
+                <Text style={c.aslCursor}>_</Text>
+              </Text>
+              <View style={c.aslWordActions}>
+                <Pressable onPress={() => aslEngineRef.current?.addSpace()} style={c.aslActionBtn} accessibilityLabel="Add space">
+                  <Ionicons name="return-down-forward-outline" size={16} color="#DDE9E4" />
+                  <Text style={c.aslActionText}>Space</Text>
+                </Pressable>
+                <Pressable onPress={() => aslEngineRef.current?.backspace()} style={c.aslActionBtn} accessibilityLabel="Delete last letter">
+                  <Ionicons name="backspace-outline" size={16} color="#DDE9E4" />
+                  <Text style={c.aslActionText}>Del</Text>
+                </Pressable>
+                <Pressable onPress={() => aslEngineRef.current?.clearText()} style={[c.aslActionBtn, c.aslActionClearBtn]} accessibilityLabel="Clear word buffer">
+                  <Ionicons name="trash-outline" size={15} color="#FF826F" />
+                  <Text style={[c.aslActionText, c.aslActionClearText]}>Clear</Text>
+                </Pressable>
+              </View>
             </View>
-          </View>
+          ) : (
+            <View style={[c.answer, isSignMode && c.signAnswer]}>
+              <View style={[c.answerIcon, isSignMode && c.signAnswerIcon]}><Ionicons name={isSignMode ? 'hand-left' : current.icon} size={25} color="#07110F" /></View>
+              <View style={c.answerCopy}>
+                <Text style={isSignMode ? c.translationText : c.answerTitle}>{isSignMode ? signHeading : current.title}</Text>
+                <Text style={isSignMode ? c.translationDetail : c.answerText}>{isSignMode ? signDetail : current.detail}</Text>
+              </View>
+            </View>
+          )}
 
-          <View style={c.controls}>
-            <Pressable onPress={restartContextCapture} style={c.control}>
-              <Ionicons name="refresh" size={22} color="#EAF6F0" />
-              <Text style={c.controlText}>{usesBrowserHandTracking ? 'Reset buffer' : isSignMode ? 'Read again' : 'Scan again'}</Text>
-            </Pressable>
-            <Pressable
-              accessibilityLabel={usesBrowserHandTracking ? 'Speak spelled text' : isSignMode ? 'Speak translation' : 'Repeat description'}
-              onPress={() => speak(spelledText || translation || current.speech)}
-              style={c.speak}
-            >
-              <Ionicons name="volume-high" size={24} color="#07110F" />
-            </Pressable>
-            <Pressable accessibilityLabel={torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on'} onPress={() => setTorchEnabled((value) => !value)} style={c.control}>
-              <Ionicons name={torchEnabled ? 'flash' : 'flash-off'} size={22} color={torchEnabled ? '#C8FF72' : '#EAF6F0'} />
-              <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
-            </Pressable>
-          </View>
-          <Text style={c.hint}>
-            {usesBrowserHandTracking
-              ? 'On-device ASL fingerspelling: letters lock automatically into the word buffer and can be spoken aloud.'
-              : isSignMode
-                ? 'Tap the megaphone to speak the interpreted text aloud'
-                : 'Tap the speaker button to repeat the description'}
-          </Text>
+          {!usesBrowserHandTracking && (
+            <>
+              <View style={c.controls}>
+                <Pressable onPress={restartContextCapture} style={c.control}>
+                  <Ionicons name="refresh" size={22} color="#EAF6F0" />
+                  <Text style={c.controlText}>{isSignMode ? 'Read again' : 'Scan again'}</Text>
+                </Pressable>
+                <Pressable accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'} onPress={() => speak(translation || current.speech)} style={c.speak}>
+                  <Ionicons name="volume-high" size={24} color="#07110F" />
+                </Pressable>
+                <Pressable accessibilityLabel={torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on'} onPress={() => setTorchEnabled((value) => !value)} style={c.control}>
+                  <Ionicons name={torchEnabled ? 'flash' : 'flash-off'} size={22} color={torchEnabled ? '#C8FF72' : '#EAF6F0'} />
+                  <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
+                </Pressable>
+              </View>
+              <Text style={c.hint}>{isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
+            </>
+          )}
         </View>
       </SafeAreaView>
     </View>
@@ -550,8 +534,14 @@ const c = StyleSheet.create({
     borderRadius: 16,
     padding: 12,
     width: '100%',
-    maxWidth: 360,
     alignSelf: 'center',
+  },
+  aslWordCardPanel: {
+    width: '100%',
+    padding: 14,
+    borderRadius: 20,
+    borderColor: 'rgba(200, 255, 114, 0.62)',
+    backgroundColor: 'rgba(5, 26, 17, 0.95)',
   },
   aslWordHeader: {
     flexDirection: 'row',
@@ -570,23 +560,25 @@ const c = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     backgroundColor: '#C8FF72',
-    borderRadius: 7,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
+    borderRadius: 9,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
   },
+  aslSpeakMiniBtnDisabled: { opacity: 0.45 },
   aslSpeakMiniText: {
     color: '#07110F',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '800',
   },
   aslWordText: {
     color: '#F7FBF8',
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: '800',
     letterSpacing: 1.2,
-    marginVertical: 4,
-    minHeight: 26,
+    marginVertical: 8,
+    minHeight: 32,
   },
+  aslWordTextEmpty: { color: '#8DA39A', fontWeight: '700' },
   aslCursor: {
     color: '#C8FF72',
     fontWeight: '400',
@@ -594,10 +586,10 @@ const c = StyleSheet.create({
   aslWordActions: {
     flexDirection: 'row',
     gap: 6,
-    marginTop: 6,
+    marginTop: 8,
     borderTopWidth: 1,
     borderTopColor: 'rgba(255, 255, 255, 0.08)',
-    paddingTop: 6,
+    paddingTop: 9,
   },
   aslActionBtn: {
     flex: 1,
@@ -606,15 +598,16 @@ const c = StyleSheet.create({
     justifyContent: 'center',
     gap: 4,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderRadius: 8,
-    paddingVertical: 5,
+    borderRadius: 10,
+    paddingVertical: 9,
   },
   aslActionClearBtn: {
     backgroundColor: 'rgba(255, 130, 111, 0.12)',
   },
   aslActionText: {
     color: '#DCEAE4',
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
   },
+  aslActionClearText: { color: '#FF826F' },
 });

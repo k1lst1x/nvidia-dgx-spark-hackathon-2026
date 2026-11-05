@@ -9,9 +9,16 @@ type OrtRuntime = {
 };
 
 const INPUT_SIZE = 416;
-const SCORE_THRESHOLD = 0.42;
+const SCORE_THRESHOLD = 0.5;
 const IOU_THRESHOLD = 0.45;
 const MAX_RESULTS = 12;
+const MAX_FRAME_COVERAGE = 0.82;
+const LABEL_CONFIDENCE_FLOORS: Record<string, number> = {
+  // These rounded COCO classes are frequent false positives for glasses, cans,
+  // lids, and other objects held close to a face.
+  frisbee: 0.72,
+  'sports ball': 0.66,
+};
 const COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'];
 
 const GRID: Array<{ x: number; y: number; stride: number }> = [];
@@ -92,6 +99,44 @@ function suppressOverlaps(items: LocalDetection[]) {
   return kept;
 }
 
+function isLikelySelfPerson(item: LocalDetection) {
+  return item.label === 'person' && item.width >= 0.7 && item.x <= 0.16 && item.y <= 0.28;
+}
+
+function focusOnObjects(items: LocalDetection[]) {
+  const reliable = items.filter((item) => item.confidence >= (LABEL_CONFIDENCE_FLOORS[item.label] ?? SCORE_THRESHOLD));
+  const nonSelf = reliable.filter((item) => !isLikelySelfPerson(item));
+  // When another object is confidently visible, do not let a selfie-sized person
+  // box take over the assistive UI.
+  const nonPeople = nonSelf.filter((item) => item.label !== 'person');
+  return suppressOverlaps(nonPeople.length ? nonPeople : nonSelf);
+}
+
+function mapBoxToSource(
+  centerX: number,
+  centerY: number,
+  boxWidth: number,
+  boxHeight: number,
+  scale: number,
+  padX: number,
+  padY: number,
+  sourceWidth: number,
+  sourceHeight: number,
+): Omit<LocalDetection, 'label' | 'confidence'> | null {
+  const renderedWidth = sourceWidth * scale;
+  const renderedHeight = sourceHeight * scale;
+  const left = (centerX - boxWidth / 2 - padX) / renderedWidth;
+  const top = (centerY - boxHeight / 2 - padY) / renderedHeight;
+  const right = (centerX + boxWidth / 2 - padX) / renderedWidth;
+  const bottom = (centerY + boxHeight / 2 - padY) / renderedHeight;
+  const x = Math.max(0, left);
+  const y = Math.max(0, top);
+  const width = Math.min(1, right) - x;
+  const height = Math.min(1, bottom) - y;
+  if (width < 0.025 || height < 0.025 || width * height > MAX_FRAME_COVERAGE) return null;
+  return { x, y, width, height };
+}
+
 export async function detectObjects(uri: string): Promise<DetectionResult> {
   try {
     const [ort, session, image] = await Promise.all([getRuntime(), getSession(), loadImage(uri)]);
@@ -100,7 +145,16 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
     canvas.height = INPUT_SIZE;
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) throw new Error('Image preprocessing is unavailable');
-    context.drawImage(image, 0, 0, INPUT_SIZE, INPUT_SIZE);
+    // Preserve the camera's aspect ratio. Stretching a portrait/landscape frame
+    // into a square makes YOLOX predict broad, inaccurate boxes.
+    const scale = Math.min(INPUT_SIZE / image.naturalWidth, INPUT_SIZE / image.naturalHeight);
+    const renderedWidth = image.naturalWidth * scale;
+    const renderedHeight = image.naturalHeight * scale;
+    const padX = (INPUT_SIZE - renderedWidth) / 2;
+    const padY = (INPUT_SIZE - renderedHeight) / 2;
+    context.fillStyle = 'rgb(114, 114, 114)';
+    context.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+    context.drawImage(image, padX, padY, renderedWidth, renderedHeight);
     const rgba = context.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
     const plane = INPUT_SIZE * INPUT_SIZE;
     const input = new Float32Array(plane * 3);
@@ -130,16 +184,17 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
       const grid = GRID[row];
       const centerX = (values[offset] + grid.x) * grid.stride;
       const centerY = (values[offset + 1] + grid.y) * grid.stride;
-      const width = Math.exp(values[offset + 2]) * grid.stride / INPUT_SIZE;
-      const height = Math.exp(values[offset + 3]) * grid.stride / INPUT_SIZE;
-      const x = Math.min(1, Math.max(0, centerX / INPUT_SIZE - width / 2));
-      const y = Math.min(1, Math.max(0, centerY / INPUT_SIZE - height / 2));
+      const width = Math.exp(values[offset + 2]) * grid.stride;
+      const height = Math.exp(values[offset + 3]) * grid.stride;
+      const box = mapBoxToSource(
+        centerX, centerY, width, height, scale, padX, padY, image.naturalWidth, image.naturalHeight,
+      );
+      if (!box) continue;
       detections.push({
-        label: COCO[classIndex], confidence, x, y,
-        width: Math.min(1 - x, width), height: Math.min(1 - y, height),
+        label: COCO[classIndex], confidence, ...box,
       });
     }
-    return { available: true, detections: suppressOverlaps(detections) };
+    return { available: true, detections: focusOnObjects(detections) };
   } catch (error) {
     console.warn('Local YOLOX inference unavailable', error);
     return { available: false, detections: [] };

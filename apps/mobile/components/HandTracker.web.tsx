@@ -3,6 +3,8 @@ import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
 
 const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+const faceModelPath = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const poseModelPath = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
 const visionModule = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs';
 const framesPerGesture = 30;
 const contextGestures = 6;
@@ -11,14 +13,30 @@ const minimumFramesForTranslation = framesPerGesture;
 const snapshotCount = 3;
 const snapshotIntervalFrames = minimumFramesForTranslation / snapshotCount;
 const liveUpdateIntervalMs = 2000;
+// Preserve the entire front-camera frame so signing can include hands, face,
+// and upper body. Both layers use the same fit to keep landmarks aligned.
 
 type Landmark = { x: number; y: number; z?: number };
+type Handedness = Array<Array<{ categoryName?: string; displayName?: string; score?: number }>>;
 type HandDetector = {
   detectForVideo: (video: HTMLVideoElement, timestamp: number) => {
     landmarks: Landmark[][];
-    handednesses?: Array<Array<{ categoryName?: string; displayName?: string; score?: number }>>;
-    handedness?: Array<Array<{ categoryName?: string; displayName?: string; score?: number }>>;
+    handednesses?: Handedness;
+    handedness?: Handedness;
   };
+  close: () => void;
+};
+
+type FaceDetector = {
+  detectForVideo: (video: HTMLVideoElement, timestamp: number) => {
+    faceLandmarks: Landmark[][];
+    faceBlendshapes?: Array<{ categories: Array<{ categoryName: string; score: number }> }>;
+  };
+  close: () => void;
+};
+
+type PoseDetector = {
+  detectForVideo: (video: HTMLVideoElement, timestamp: number) => { landmarks: Landmark[][] };
   close: () => void;
 };
 
@@ -27,6 +45,14 @@ type VisionRuntime = {
   HandLandmarker: {
     HAND_CONNECTIONS: unknown;
     createFromOptions: (vision: unknown, options: object) => Promise<HandDetector>;
+  };
+  FaceLandmarker: {
+    FACE_LANDMARKS_CONTOURS: unknown;
+    createFromOptions: (vision: unknown, options: object) => Promise<FaceDetector>;
+  };
+  PoseLandmarker: {
+    POSE_CONNECTIONS: unknown;
+    createFromOptions: (vision: unknown, options: object) => Promise<PoseDetector>;
   };
   DrawingUtils: new (context: CanvasRenderingContext2D) => {
     drawConnectors: (landmarks: Landmark[], connections: unknown, style: object) => void;
@@ -41,6 +67,8 @@ export type SignContextState = {
   ready: boolean;
   error?: string;
   aslState?: ASLSessionState;
+  faceTracked?: boolean;
+  poseTracked?: boolean;
 };
 
 type HandTrackerProps = {
@@ -71,6 +99,33 @@ async function createHandDetector(runtime: VisionRuntime, vision: unknown): Prom
   }
 }
 
+async function createFaceDetector(runtime: VisionRuntime, vision: unknown): Promise<FaceDetector> {
+  const options = (delegate: 'GPU' | 'CPU') => ({
+    baseOptions: { modelAssetPath: faceModelPath, delegate },
+    runningMode: 'VIDEO',
+    numFaces: 1,
+    outputFaceBlendshapes: true,
+  });
+  try {
+    return await runtime.FaceLandmarker.createFromOptions(vision, options('GPU'));
+  } catch {
+    return runtime.FaceLandmarker.createFromOptions(vision, options('CPU'));
+  }
+}
+
+async function createPoseDetector(runtime: VisionRuntime, vision: unknown): Promise<PoseDetector> {
+  const options = (delegate: 'GPU' | 'CPU') => ({
+    baseOptions: { modelAssetPath: poseModelPath, delegate },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+  });
+  try {
+    return await runtime.PoseLandmarker.createFromOptions(vision, options('GPU'));
+  } catch {
+    return runtime.PoseLandmarker.createFromOptions(vision, options('CPU'));
+  }
+}
+
 let visionRuntimePromise: Promise<VisionRuntime> | undefined;
 
 function getVisionRuntime(): Promise<VisionRuntime> {
@@ -81,21 +136,53 @@ function getVisionRuntime(): Promise<VisionRuntime> {
   return visionRuntimePromise;
 }
 
-function createLandmarkFrame(hands: Landmark[][]) {
-  const frame = Array<number>(126).fill(0);
+function flattenLandmarks(points: Landmark[] | null, expectedCount: number) {
+  const output = Array<number>(expectedCount * 3).fill(0);
+  points?.slice(0, expectedCount).forEach((point, index) => {
+    output[index * 3] = point.x;
+    output[index * 3 + 1] = point.y;
+    output[index * 3 + 2] = point.z ?? 0;
+  });
+  return output;
+}
 
-  hands.forEach((hand, handIndex) => {
-    if (handIndex >= 2) return;
-
-    hand.forEach((point, landmarkIndex) => {
-      const offset = handIndex * 63 + landmarkIndex * 3;
-      frame[offset] = point.x;
-      frame[offset + 1] = point.y;
-      frame[offset + 2] = point.z ?? 0;
-    });
+function createMultimodalFrame(
+  hands: Landmark[][],
+  handednesses: Handedness | undefined,
+  face: ReturnType<FaceDetector['detectForVideo']> | undefined,
+  pose: ReturnType<PoseDetector['detectForVideo']> | undefined,
+) {
+  let left: Landmark[] | null = null;
+  let right: Landmark[] | null = null;
+  hands.forEach((points, index) => {
+    const label = handednesses?.[index]?.[0]?.categoryName;
+    if (label === 'Left') left = points;
+    else if (label === 'Right') right = points;
+    else if (!right) right = points;
+    else if (!left) left = points;
   });
 
-  return frame;
+  const facePoints = face?.faceLandmarks[0] ?? null;
+  const posePoints = pose?.landmarks[0] ?? null;
+  const blendshapes = Array<number>(52).fill(0);
+  face?.faceBlendshapes?.[0]?.categories
+    .slice()
+    .sort((a, b) => a.categoryName.localeCompare(b.categoryName))
+    .slice(0, 52)
+    .forEach((shape, index) => { blendshapes[index] = shape.score; });
+
+  // Stable 281-value feature vector: two hands, upper-body pose, facial cues,
+  // and presence masks. Missing trackers are zero-filled rather than shifting data.
+  return [
+    ...flattenLandmarks(left, 21),
+    ...flattenLandmarks(right, 21),
+    ...flattenLandmarks(posePoints, 33),
+    ...blendshapes,
+    left ? 1 : 0,
+    right ? 1 : 0,
+    facePoints ? 1 : 0,
+    posePoints ? 1 : 0,
+  ];
 }
 
 function distanceBetweenWrist(a: Landmark[], b: Landmark[]) {
@@ -181,9 +268,17 @@ export default function HandTracker({
     let stream: MediaStream | undefined;
     let animationFrame: number | undefined;
     let detector: HandDetector | undefined;
+    let faceDetector: FaceDetector | undefined;
+    let poseDetector: PoseDetector | undefined;
     let lastContextState = '';
 
-    const reportContext = (handCount: number, error?: string, aslState?: ASLSessionState) => {
+    const reportContext = (
+      handCount: number,
+      error?: string,
+      aslState?: ASLSessionState,
+      faceTracked = false,
+      poseTracked = false,
+    ) => {
       const frameCount = sequenceRef.current.length;
       const next: SignContextState = {
         frameCount,
@@ -192,8 +287,10 @@ export default function HandTracker({
         ready: frameCount >= minimumFramesForTranslation,
         error,
         aslState,
+        faceTracked,
+        poseTracked,
       };
-      const key = `${frameCount}:${handCount}:${error ?? ''}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}`;
+      const key = `${frameCount}:${handCount}:${error ?? ''}:${faceTracked}:${poseTracked}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}`;
       if (key !== lastContextState) {
         lastContextState = key;
         onContextChangeRef.current?.(next);
@@ -205,6 +302,12 @@ export default function HandTracker({
         const runtime = await getVisionRuntime();
         const vision = await runtime.FilesetResolver.forVisionTasks(wasmRoot);
         detector = await createHandDetector(runtime, vision);
+        const [face, pose] = await Promise.allSettled([
+          createFaceDetector(runtime, vision),
+          createPoseDetector(runtime, vision),
+        ]);
+        faceDetector = face.status === 'fulfilled' ? face.value : undefined;
+        poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
 
         if (!active) return;
 
@@ -244,7 +347,10 @@ export default function HandTracker({
 
             if (video.currentTime !== lastVideoTime) {
               lastVideoTime = video.currentTime;
-              const results = detector.detectForVideo(video, performance.now());
+              const timestamp = performance.now();
+              const results = detector.detectForVideo(video, timestamp);
+              const face = faceDetector?.detectForVideo(video, timestamp);
+              const pose = poseDetector?.detectForVideo(video, timestamp);
               context.clearRect(0, 0, canvas.width, canvas.height);
 
               const smoothed = smoothLandmarks(results.landmarks, smoothedHandsRef.current);
@@ -266,7 +372,7 @@ export default function HandTracker({
                 currentAslState = aslEngine.processFrame(primaryHand, handednessCategory);
 
                 const sequence = sequenceRef.current;
-                sequence.push(createLandmarkFrame(smoothed));
+                sequence.push(createMultimodalFrame(smoothed, results.handednesses, face, pose));
                 if (sequence.length > maxContextFrames) sequence.shift();
                 totalTrackedFramesRef.current += 1;
                 if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {
@@ -289,7 +395,33 @@ export default function HandTracker({
                 }
               }
 
-              reportContext(smoothed.length, undefined, currentAslState);
+              const faceLandmarks = face?.faceLandmarks[0];
+              const poseLandmarks = pose?.landmarks[0];
+              reportContext(smoothed.length, undefined, currentAslState, Boolean(faceLandmarks), Boolean(poseLandmarks));
+
+              // Face and upper-body cues make temporal signing models more
+              // expressive. Keep their rendering lightweight so hand landmarks
+              // remain the primary visual focus.
+              if (faceLandmarks) {
+                drawingUtils.drawConnectors(faceLandmarks, runtime.FaceLandmarker.FACE_LANDMARKS_CONTOURS, {
+                  color: 'rgba(108, 212, 255, 0.88)',
+                  lineWidth: 1.4,
+                });
+                drawingUtils.drawLandmarks(faceLandmarks, {
+                  color: 'rgba(174, 235, 255, 0.75)',
+                  radius: 1.15,
+                });
+              }
+              if (poseLandmarks) {
+                drawingUtils.drawConnectors(poseLandmarks, runtime.PoseLandmarker.POSE_CONNECTIONS, {
+                  color: 'rgba(255, 190, 92, 0.95)',
+                  lineWidth: 3.25,
+                });
+                drawingUtils.drawLandmarks(poseLandmarks, {
+                  color: '#FFD28A',
+                  radius: 2.4,
+                });
+              }
 
               // Render landmark connections & joints
               for (const landmarks of smoothed) {
@@ -346,6 +478,8 @@ export default function HandTracker({
       if (animationFrame !== undefined) cancelAnimationFrame(animationFrame);
       stream?.getTracks().forEach((track) => track.stop());
       detector?.close();
+      faceDetector?.close();
+      poseDetector?.close();
     };
   }, [aslEngine]);
 
@@ -368,16 +502,18 @@ const styles: Record<string, CSSProperties> = {
     width: '100%',
     height: '100%',
     display: 'block',
-    objectFit: 'cover',
+    objectFit: 'contain',
     transform: 'scaleX(-1)',
+    transformOrigin: 'center',
   },
   canvas: {
     position: 'absolute',
     inset: 0,
     width: '100%',
     height: '100%',
-    objectFit: 'cover',
+    objectFit: 'contain',
     transform: 'scaleX(-1)',
+    transformOrigin: 'center',
     filter: 'drop-shadow(0 0 5px rgba(200,255,114,.68))',
     pointerEvents: 'none',
   },

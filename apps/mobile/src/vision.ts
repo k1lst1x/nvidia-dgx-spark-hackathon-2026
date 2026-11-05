@@ -23,6 +23,9 @@ export type VisionResult = {
 
 type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
 
+// Local object frames should follow camera movement; cloud narration can update less often.
+const LOCAL_SCAN_INTERVAL_MS = 450;
+
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const API_URL = configuredApiUrl || (
   typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
@@ -40,7 +43,17 @@ function requireApiUrl() {
 async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: string, signal: AbortSignal) {
   const apiUrl = requireApiUrl();
   const data = new FormData();
-  data.append('image', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
+  // Browsers require a real Blob in multipart form data; the React Native
+  // `{ uri, name, type }` object otherwise becomes a text field and FastAPI
+  // returns 422 before the vision model ever sees the image.
+  if (typeof window !== 'undefined') {
+    const imageResponse = await fetch(uri);
+    if (!imageResponse.ok) throw new Error('Camera frame could not be prepared for analysis');
+    const image = await imageResponse.blob();
+    data.append('image', image, 'frame.jpg');
+  } else {
+    data.append('image', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
+  }
   data.append('task', mode);
   data.append('previous_scene_key', previousSceneKey);
   let response: Response;
@@ -86,6 +99,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const [detections, setDetections] = useState<LocalDetection[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controller = useRef<AbortController | null>(null);
+  const cloudInFlight = useRef(false);
   const generation = useRef(0);
   const failures = useRef(0);
   const sceneKey = useRef('');
@@ -97,17 +111,18 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     controller.current?.abort();
     timer.current = null;
     controller.current = null;
+    cloudInFlight.current = false;
   }, []);
 
   const run = useCallback(async (runGeneration: number) => {
     if (!enabled || !camera.current || runGeneration !== generation.current) return;
-    setState('analyzing');
-    controller.current = new AbortController();
-    let nextDelay = 2800;
+    setState((current) => current === 'offline' ? 'analyzing' : current);
+    let nextDelay = LOCAL_SCAN_INTERVAL_MS;
     try {
       const picture = await camera.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
       const local = await detectObjects(picture.uri);
+      if (runGeneration !== generation.current) return;
       setDetections(local.detections);
       const signature = local.detections
         .filter((item) => item.confidence >= 0.5)
@@ -117,23 +132,36 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       const now = Date.now();
       const shouldUseCloud = Boolean(API_URL) && (!local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000);
       localSignature.current = signature;
-      if (!shouldUseCloud) {
-        failures.current = 0;
-        setState('live');
-        nextDelay = 900;
-        return;
-      }
-      const next = await analyzeFrame(picture.uri, mode, sceneKey.current, controller.current.signal);
-      if (runGeneration !== generation.current) return;
       failures.current = 0;
-      sceneKey.current = next.scene_key;
-      lastCloudAnalysis.current = Date.now();
-      setResult(next);
-      setLastUpdated(Date.now());
       setState('live');
-      nextDelay = next.urgency === 'high' ? 1400 : next.changed ? 2400 : 4500;
+
+      // Never make the bounding boxes wait for a network request. The previous
+      // implementation paused local updates while the cloud description ran,
+      // leaving frames behind when the user turned the camera.
+      if (shouldUseCloud && !cloudInFlight.current) {
+        const cloudController = new AbortController();
+        controller.current = cloudController;
+        cloudInFlight.current = true;
+        void analyzeFrame(picture.uri, mode, sceneKey.current, cloudController.signal)
+          .then((next) => {
+            if (cloudController.signal.aborted || runGeneration !== generation.current) return;
+            sceneKey.current = next.scene_key;
+            lastCloudAnalysis.current = Date.now();
+            setResult(next);
+            setLastUpdated(Date.now());
+          })
+          .catch((error) => {
+            if (cloudController.signal.aborted || runGeneration !== generation.current) return;
+            // Local detection remains live even when optional cloud narration is unavailable.
+            console.warn('Cloud scene description unavailable', error);
+          })
+          .finally(() => {
+            if (controller.current === cloudController) controller.current = null;
+            cloudInFlight.current = false;
+          });
+      }
     } catch (error) {
-      if (controller.current?.signal.aborted || runGeneration !== generation.current) return;
+      if (runGeneration !== generation.current) return;
       failures.current += 1;
       setState('offline');
       const retryAfter = (error as Error & { retryAfter?: number }).retryAfter || 0;
