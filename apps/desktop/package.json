@@ -2,7 +2,11 @@
   "name": "@guidelens/desktop",
   "version": "0.1.0",
   "private": true,
-  "author": "GuideLens Hackathon Team",
+  "author": {
+    "name": "GuideLens Hackathon Team",
+    "email": "guidelens@users.noreply.github.com"
+  },
+  "homepage": "https://k1lst1x.github.io/nvidia-dgx-spark-hackathon-2026/",
   "description": "GuideLens desktop camera and local YOLOX client",
   "main": "main.cjs",
   "scripts": {
@@ -29,7 +33,11 @@
       }
     },
     "win": { "target": ["nsis"] },
-    "linux": { "target": ["AppImage", "deb"], "category": "Utility" },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Utility",
+      "maintainer": "GuideLens Hackathon Team <guidelens@users.noreply.github.com>"
+    },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
     "artifactName": "GuideLens-${os}-${arch}.${ext}"
   }
