@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
+import { offlinePhraseCount, resolveOfflinePhrase } from '../src/offlinePhrasebook';
 import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
@@ -38,6 +39,7 @@ export default function CameraScreen() {
   const [captureVersion, setCaptureVersion] = useState(0);
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
+  const lastOfflinePhrase = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -86,19 +88,24 @@ export default function CameraScreen() {
   const spelledText = aslState?.spelledText || '';
   const currentLetter = aslState?.currentLetter || '';
   const currentConfidence = aslState?.currentConfidence || 0;
+  const offlinePhrase = resolveOfflinePhrase(spelledText);
 
   const browserSignHeading = signContext.error
     ? 'Hand tracking needs attention.'
-    : spelledText
-      ? `Spelled: "${spelledText}"`
+    : offlinePhrase
+      ? offlinePhrase.speech
+      : spelledText
+        ? `Spelled: "${spelledText}"`
       : currentLetter
         ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
         : translation || (isAnalysingContext ? 'Interpreting your signed context…' : 'Ready for ASL gestures');
 
   const browserSignDetail = signContext.error
     ? signContext.error
-    : spelledText
-      ? `Hold a letter steady to append · On-Device Model (${aslState?.accuracyScore || 88}% acc) · 0ms latency`
+    : offlinePhrase
+      ? `Offline phrase · ${offlinePhrase.trigger} · no network required`
+      : spelledText
+        ? `Fingerspell one of ${offlinePhraseCount} offline phrases or any word · On-device model (${aslState?.accuracyScore || 88}% test accuracy)`
       : currentLetter
         ? `Hold steady to lock "${currentLetter}" into word buffer`
         : signContext.handCount > 0
@@ -183,6 +190,17 @@ export default function CameraScreen() {
     }
   }, [isSignMode, usesBrowserHandTracking, vision]);
 
+  useEffect(() => {
+    if (!offlinePhrase) {
+      lastOfflinePhrase.current = '';
+      return;
+    }
+    if (offlinePhrase.trigger !== lastOfflinePhrase.current) {
+      lastOfflinePhrase.current = offlinePhrase.trigger;
+      speak(offlinePhrase.speech);
+    }
+  }, [offlinePhrase?.trigger]);
+
   if (!permission) return <View style={c.fallback} />;
 
   if (!permission.granted) {
@@ -219,7 +237,9 @@ export default function CameraScreen() {
             <View style={c.greenDot} />
             <Text style={c.modeText}>
               {usesBrowserHandTracking
-                ? 'ON-DEVICE ASL · 60 FPS (88% ACC)'
+                ? hasVisionBackend
+                  ? 'HYBRID ASL · OFFLINE + CLOUD'
+                  : 'OFFLINE ASL FINGERSPELLING'
                 : visionState === 'offline'
                   ? 'VISION · RECONNECTING'
                   : visionState === 'analyzing'
@@ -296,7 +316,7 @@ export default function CameraScreen() {
               <View style={c.aslWordHeader}>
                 <Text style={c.aslWordLabel}>WORD BUFFER</Text>
                 <Pressable
-                  onPress={() => speak(spelledText)}
+                  onPress={() => speak(offlinePhrase?.speech || spelledText)}
                   disabled={!spelledText}
                   style={[c.aslSpeakMiniBtn, !spelledText && c.aslSpeakMiniBtnDisabled]}
                   accessibilityLabel="Speak word buffer"
