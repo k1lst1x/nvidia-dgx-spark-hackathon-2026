@@ -387,20 +387,13 @@ export default function HandTracker({
       try {
         const runtime = await getVisionRuntime();
         const vision = await runtime.FilesetResolver.forVisionTasks(wasmRoot);
-        // Holistic produces all modalities from one synchronized inference graph,
-        // preventing hand/face/pose timing drift during rapid signs. Older or
-        // constrained browsers keep the previous three-task fallback.
-        try {
-          holisticDetector = await createHolisticDetector(runtime, vision);
-        } catch {
-          detector = await createHandDetector(runtime, vision);
-          const [face, pose] = await Promise.allSettled([
-            createFaceDetector(runtime, vision),
-            createPoseDetector(runtime, vision),
-          ]);
-          faceDetector = face.status === 'fulfilled' ? face.value : undefined;
-          poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
-        }
+        detector = await createHandDetector(runtime, vision);
+        const [face, pose] = await Promise.allSettled([
+          createFaceDetector(runtime, vision),
+          createPoseDetector(runtime, vision),
+        ]);
+        faceDetector = face.status === 'fulfilled' ? face.value : undefined;
+        poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
 
         if (!active) return;
 
@@ -441,28 +434,37 @@ export default function HandTracker({
             if (video.currentTime !== lastVideoTime) {
               lastVideoTime = video.currentTime;
               const timestamp = performance.now();
-              const holistic = holisticDetector?.detectForVideo(video, timestamp);
-              const results = holistic
-                ? {
-                    landmarks: [
-                      ...(holistic.leftHandLandmarks ? [holistic.leftHandLandmarks] : []),
-                      ...(holistic.rightHandLandmarks ? [holistic.rightHandLandmarks] : []),
-                    ],
-                    handednesses: [
-                      ...(holistic.leftHandLandmarks ? [[{ categoryName: 'Left' }]] : []),
-                      ...(holistic.rightHandLandmarks ? [[{ categoryName: 'Right' }]] : []),
-                    ],
-                  }
-                : detector!.detectForVideo(video, timestamp);
-              const face = holistic
-                ? {
-                    faceLandmarks: holistic.faceLandmarks ? [holistic.faceLandmarks] : [],
-                    faceBlendshapes: holistic.faceBlendshapes ? [holistic.faceBlendshapes] : [],
-                  }
-                : faceDetector?.detectForVideo(video, timestamp);
-              const pose = holistic
-                ? { landmarks: holistic.poseLandmarks ? [holistic.poseLandmarks] : [] }
-                : poseDetector?.detectForVideo(video, timestamp);
+              let results: { landmarks: Landmark[][]; handednesses?: Handedness; handedness?: Handedness };
+              let face: ReturnType<FaceDetector['detectForVideo']> | undefined;
+              let pose: ReturnType<PoseDetector['detectForVideo']> | undefined;
+
+              if (detector) {
+                results = detector.detectForVideo(video, timestamp);
+                face = faceDetector?.detectForVideo(video, timestamp);
+                pose = poseDetector?.detectForVideo(video, timestamp);
+              } else if (holisticDetector) {
+                const holistic = holisticDetector.detectForVideo(video, timestamp);
+                const landmarks: Landmark[][] = [];
+                const handednesses: Handedness = [];
+                if (holistic.leftHandLandmarks && holistic.leftHandLandmarks.length > 0) {
+                  landmarks.push(holistic.leftHandLandmarks);
+                  handednesses.push([{ categoryName: 'Left', score: 1 }]);
+                }
+                if (holistic.rightHandLandmarks && holistic.rightHandLandmarks.length > 0) {
+                  landmarks.push(holistic.rightHandLandmarks);
+                  handednesses.push([{ categoryName: 'Right', score: 1 }]);
+                }
+                results = { landmarks, handednesses, handedness: handednesses };
+                face = {
+                  faceLandmarks: holistic.faceLandmarks && holistic.faceLandmarks.length > 0 ? [holistic.faceLandmarks] : [],
+                  faceBlendshapes: holistic.faceBlendshapes ? [holistic.faceBlendshapes] : [],
+                };
+                pose = {
+                  landmarks: holistic.poseLandmarks && holistic.poseLandmarks.length > 0 ? [holistic.poseLandmarks] : [],
+                };
+              } else {
+                return;
+              }
               context.clearRect(0, 0, canvas.width, canvas.height);
 
               const smoothed = smoothLandmarks(results.landmarks, smoothedHandsRef.current);
@@ -489,11 +491,10 @@ export default function HandTracker({
                 wordEngine.processFrame(multimodalFrame, smoothed);
                 const sequence = sequenceRef.current;
                 const temporalFrame = createCtcFeatureFrame(smoothed, handednessesArray, face, pose);
-                if (temporalFrame.length !== TEMPORAL_FEATURE_COUNT) {
-                  throw new Error(`Expected ${TEMPORAL_FEATURE_COUNT} temporal features`);
-                }
                 sequence.push(temporalFrame);
-                trainingRecorder?.addFrame(temporalFrame, timestamp);
+                if (trainingRecorder && temporalFrame.length === TEMPORAL_FEATURE_COUNT) {
+                  trainingRecorder.addFrame(temporalFrame, timestamp);
+                }
                 if (sequence.length > maxContextFrames) sequence.shift();
                 totalTrackedFramesRef.current += 1;
                 if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -44,8 +44,9 @@ function formatAslWord(word: string): string {
 }
 
 export default function CameraScreen() {
+  const { initialMode } = useLocalSearchParams<{ initialMode?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
-  const [mode, setMode] = useState<AssistMode>('scene');
+  const [mode, setMode] = useState<AssistMode>(initialMode === 'sign' ? 'sign' : 'scene');
   const [speaking, setSpeaking] = useState(true);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
@@ -290,7 +291,18 @@ export default function CameraScreen() {
           onContextCaptured={interpretLiveContext}
         />
       ) : (
-        <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" zoom={0} enableTorch={torchEnabled} />
+        <>
+          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" zoom={0} enableTorch={torchEnabled} />
+          <View style={c.boxesLayer} pointerEvents="none">
+            {current.boxes.map((box, index) => (
+              <View key={`${mode}-${index}`} style={[c.box, { left: box.l, top: box.t, width: box.w, height: box.h }, isSignMode && c.signBox]}>
+                <View style={c.boxLabelContainer}>
+                  <Text style={c.boxLabel}>{box.label}</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        </>
       )}
       <View style={c.shade} />
       <SafeAreaView style={c.overlay}>
@@ -333,12 +345,6 @@ export default function CameraScreen() {
         </View>
 
         <View style={c.reticle}>
-          {!usesBrowserHandTracking && current.boxes.map((box, index) => (
-            <View key={`${mode}-${index}`} style={[c.box, { left: box.l, top: box.t, width: box.w, height: box.h }, isSignMode && c.signBox]}>
-              <Text style={c.boxLabel}>{box.label}</Text>
-            </View>
-          ))}
-
           {usesBrowserHandTracking && isSignMode && (
             <View style={c.aslHudContainer}>
               {currentLetter ? (
@@ -458,10 +464,36 @@ const c = StyleSheet.create({
   modeTabActive: { backgroundColor: '#B7FF56' },
   modeTabText: { color: '#DDE9E4', fontSize: 12, fontWeight: '800' },
   modeTabTextActive: { color: '#09130D' },
+  boxesLayer: { ...StyleSheet.absoluteFill, zIndex: 1 },
   reticle: { flex: 1, marginVertical: 12, position: 'relative' },
-  box: { position: 'absolute', borderWidth: 2, borderColor: '#B7FF56', borderRadius: 10 },
-  signBox: { borderColor: '#C8FF72' },
-  boxLabel: { position: 'absolute', top: -24, left: -2, backgroundColor: '#B7FF56', color: '#07110F', fontWeight: '800', fontSize: 10, paddingHorizontal: 7, paddingVertical: 4, borderRadius: 5 },
+  box: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: '#B7FF56',
+    borderRadius: 8,
+    shadowColor: '#B7FF56',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+  },
+  signBox: { borderColor: '#C8FF72', shadowColor: '#C8FF72' },
+  boxLabelContainer: {
+    position: 'absolute',
+    top: -24,
+    left: -2,
+    backgroundColor: 'rgba(7, 24, 18, 0.94)',
+    borderWidth: 1,
+    borderColor: '#B7FF56',
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  boxLabel: {
+    color: '#B7FF56',
+    fontWeight: '800',
+    fontSize: 10,
+    letterSpacing: 0.3,
+  },
   bottom: { paddingBottom: 10 },
   answer: { flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: 'rgba(5,18,14,.9)', borderWidth: 1, borderColor: 'rgba(183,255,86,.28)', borderRadius: 20, padding: 16 },
   signAnswer: { borderColor: 'rgba(200,255,114,.62)', backgroundColor: 'rgba(5,26,17,.94)' },

@@ -41,7 +41,7 @@ export type SignTranslation = {
 type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
 
 // Local object frames should follow camera movement; cloud narration can update less often.
-const LOCAL_SCAN_INTERVAL_MS = 450;
+const LOCAL_SCAN_INTERVAL_MS = 200;
 
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const API_URL = configuredApiUrl || (

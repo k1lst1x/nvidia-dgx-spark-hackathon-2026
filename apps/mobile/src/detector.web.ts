@@ -9,15 +9,15 @@ type OrtRuntime = {
 };
 
 const INPUT_SIZE = 416;
-const SCORE_THRESHOLD = 0.5;
+const SCORE_THRESHOLD = 0.35;
 const IOU_THRESHOLD = 0.45;
 const MAX_RESULTS = 12;
-const MAX_FRAME_COVERAGE = 0.82;
+const MAX_FRAME_COVERAGE = 0.88;
 const LABEL_CONFIDENCE_FLOORS: Record<string, number> = {
   // These rounded COCO classes are frequent false positives for glasses, cans,
   // lids, and other objects held close to a face.
-  frisbee: 0.72,
-  'sports ball': 0.66,
+  frisbee: 0.75,
+  'sports ball': 0.70,
 };
 const COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'];
 
@@ -91,7 +91,13 @@ function iou(a: LocalDetection, b: LocalDetection) {
 function suppressOverlaps(items: LocalDetection[]) {
   const kept: LocalDetection[] = [];
   for (const candidate of [...items].sort((a, b) => b.confidence - a.confidence)) {
-    if (kept.every((existing) => existing.label !== candidate.label || iou(existing, candidate) < IOU_THRESHOLD)) {
+    const overlaps = kept.some((existing) => {
+      const overlap = iou(existing, candidate);
+      if (existing.label === candidate.label && overlap >= IOU_THRESHOLD) return true;
+      if (overlap >= 0.78) return true;
+      return false;
+    });
+    if (!overlaps) {
       kept.push(candidate);
       if (kept.length === MAX_RESULTS) break;
     }
@@ -100,16 +106,13 @@ function suppressOverlaps(items: LocalDetection[]) {
 }
 
 function isLikelySelfPerson(item: LocalDetection) {
-  return item.label === 'person' && item.width >= 0.7 && item.x <= 0.16 && item.y <= 0.28;
+  return item.label === 'person' && item.width >= 0.85 && item.height >= 0.85;
 }
 
 function focusOnObjects(items: LocalDetection[]) {
   const reliable = items.filter((item) => item.confidence >= (LABEL_CONFIDENCE_FLOORS[item.label] ?? SCORE_THRESHOLD));
   const nonSelf = reliable.filter((item) => !isLikelySelfPerson(item));
-  // When another object is confidently visible, do not let a selfie-sized person
-  // box take over the assistive UI.
-  const nonPeople = nonSelf.filter((item) => item.label !== 'person');
-  return suppressOverlaps(nonPeople.length ? nonPeople : nonSelf);
+  return suppressOverlaps(nonSelf);
 }
 
 function mapBoxToSource(

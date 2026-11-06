@@ -46,6 +46,10 @@ app.whenReady().then(() => {
     });
     session.defaultSession.setPermissionCheckHandler((contents, permission) => permission === 'media' && isTrusted(contents.getURL()));
     session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => callback(permission === 'media' && isTrusted(contents.getURL())));
+    const appIcon = join(__dirname, 'assets', 'icon.png');
+    if (process.platform === 'darwin' && app.dock) {
+      try { app.dock.setIcon(appIcon); } catch {}
+    }
     const window = new BrowserWindow({
       width: 1180,
       height: 820,
@@ -53,7 +57,7 @@ app.whenReady().then(() => {
       minHeight: 680,
       backgroundColor: '#07110F',
       title: 'GuideLens',
-      icon: join(root, 'favicon.png'),
+      icon: appIcon,
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

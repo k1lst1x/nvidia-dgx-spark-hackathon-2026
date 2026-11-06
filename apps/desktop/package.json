@@ -23,17 +23,19 @@
     "productName": "GuideLens",
     "executableName": "GuideLens",
     "asar": true,
-    "files": ["main.cjs", "web/**/*"],
+    "files": ["main.cjs", "web/**/*", "assets/**/*"],
     "directories": { "output": "release" },
     "mac": {
+      "icon": "assets/icon.icns",
       "target": ["dmg", "zip"],
       "category": "public.app-category.healthcare-fitness",
       "extendInfo": {
         "NSCameraUsageDescription": "GuideLens uses the camera for private on-device object detection."
       }
     },
-    "win": { "target": ["nsis"] },
+    "win": { "icon": "assets/icon.ico", "target": ["nsis"] },
     "linux": {
+      "icon": "assets/icon.png",
       "target": ["AppImage", "deb"],
       "category": "Utility",
       "maintainer": "GuideLens Hackathon Team <guidelens@users.noreply.github.com>"

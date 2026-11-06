@@ -1,479 +1,1174 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Link } from 'expo-router';
-import { ReactNode, useEffect, useRef, useState } from 'react';
+import { router } from 'expo-router';
+import * as Speech from 'expo-speech';
+import { useEffect, useState } from 'react';
 import {
-  AccessibilityInfo,
-  Animated,
-  LayoutChangeEvent,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
-  StyleProp,
   StyleSheet,
   Text,
+  TextInput,
   View,
-  ViewStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-const benefits = [
-  {
-    icon: 'scan-outline' as const,
-    eyebrow: 'CONTEXT',
-    title: 'Know what is around you',
-    text: 'Ask for a concise scene summary, readable text, or the location of an object in view.',
-  },
-  {
-    icon: 'volume-high-outline' as const,
-    eyebrow: 'CLARITY',
-    title: 'Hear the essential detail',
-    text: 'GuideLens returns a short response designed to be useful when spoken aloud, not a wall of text.',
-  },
-  {
-    icon: 'shield-checkmark-outline' as const,
-    eyebrow: 'CONTROL',
-    title: 'Choose what leaves the phone',
-    text: 'A single still frame and task prompt are sent for analysis. Video is not retained by default.',
-  },
-];
+type ActiveTab = 'hub' | 'settings' | 'telemetry';
+type SelectedMode = 'scene' | 'sign';
 
-const pipeline = [
-  {
-    step: '01',
-    icon: 'camera-outline' as const,
-    label: 'Capture',
-    title: 'One purposeful frame',
-    text: 'The user points the phone at a scene and chooses what they need help with.',
-    meta: 'Camera + task',
-  },
-  {
-    step: '02',
-    icon: 'resize-outline' as const,
-    label: 'Prepare',
-    title: 'A compact request',
-    text: 'The app packages one JPEG with a concise prompt instead of streaming video.',
-    meta: 'JPEG + context',
-  },
-  {
-    step: '03',
-    icon: 'hardware-chip-outline' as const,
-    label: 'Reason',
-    title: 'Vision on DGX Spark',
-    text: 'A vision-language model interprets the image and returns only the requested detail.',
-    meta: 'Qwen3-VL endpoint',
-  },
-  {
-    step: '04',
-    icon: 'chatbubble-ellipses-outline' as const,
-    label: 'Respond',
-    title: 'A calm spoken brief',
-    text: 'The result is available as readable text and a concise voice response in the mobile app.',
-    meta: 'Text + speech',
-  },
-];
+export default function AppHome() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>('hub');
+  const [selectedMode, setSelectedMode] = useState<SelectedMode>('scene');
 
-const releaseDownloads = [
-  {
-    label: 'Android APK',
-    detail: 'Phones and tablets',
-    icon: 'logo-android' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-Android.apk',
-  },
-  {
-    label: 'Windows',
-    detail: '64-bit installer',
-    icon: 'logo-windows' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.exe',
-  },
-  {
-    label: 'macOS',
-    detail: 'Universal DMG',
-    icon: 'logo-apple' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-mac-universal.dmg',
-  },
-  {
-    label: 'Linux',
-    detail: '64-bit AppImage',
-    icon: 'logo-tux' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x86_64.AppImage',
-  },
-];
-
-function useReducedMotion() {
-  const [reducedMotion, setReducedMotion] = useState(false);
+  // Settings State
+  const [speechEnabled, setSpeechEnabled] = useState(true);
+  const [speechRate, setSpeechRate] = useState<'0.9' | '1.0' | '1.2'>('1.0');
+  const [sensitivity, setSensitivity] = useState<'high' | 'balanced' | 'strict'>('balanced');
+  const [apiUrl, setApiUrl] = useState('http://localhost:8000');
+  const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'online' | 'offline'>('idle');
+  const [pingLatency, setPingLatency] = useState<number | null>(null);
 
   useEffect(() => {
-    AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
-    return () => subscription.remove();
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const storedSpeech = window.localStorage.getItem('guidelens_speech');
+      if (storedSpeech !== null) setSpeechEnabled(storedSpeech === 'true');
+
+      const storedRate = window.localStorage.getItem('guidelens_speech_rate');
+      if (storedRate === '0.9' || storedRate === '1.0' || storedRate === '1.2') {
+        setSpeechRate(storedRate);
+      }
+
+      const storedSens = window.localStorage.getItem('guidelens_sensitivity');
+      if (storedSens === 'high' || storedSens === 'balanced' || storedSens === 'strict') {
+        setSensitivity(storedSens);
+      }
+
+      const storedUrl = window.localStorage.getItem('guidelens_api_url');
+      if (storedUrl) setApiUrl(storedUrl);
+    }
   }, []);
 
-  return reducedMotion;
-}
+  const saveSetting = (key: string, value: string) => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(`guidelens_${key}`, value);
+    }
+  };
 
-function Reveal({
-  children,
-  scrollY,
-  reducedMotion,
-  style,
-  delay = 0,
-}: {
-  children: ReactNode;
-  scrollY: Animated.Value;
-  reducedMotion: boolean;
-  style?: StyleProp<ViewStyle>;
-  delay?: number;
-}) {
-  const [top, setTop] = useState(1000);
-  const onLayout = (event: LayoutChangeEvent) => setTop(event.nativeEvent.layout.y);
+  const toggleSpeech = () => {
+    const next = !speechEnabled;
+    setSpeechEnabled(next);
+    saveSetting('speech', String(next));
+    if (next) {
+      Speech.speak('Voice narration enabled', { rate: Number(speechRate) });
+    } else {
+      Speech.stop();
+    }
+  };
 
-  if (reducedMotion) {
-    return <View onLayout={onLayout} style={style}>{children}</View>;
-  }
+  const changeRate = (rate: '0.9' | '1.0' | '1.2') => {
+    setSpeechRate(rate);
+    saveSetting('speech_rate', rate);
+    if (speechEnabled) {
+      Speech.speak(`Speech speed set to ${rate}x`, { rate: Number(rate) });
+    }
+  };
 
-  const start = Math.max(0, top - 640 + delay);
-  const end = start + 230;
-  const opacity = scrollY.interpolate({
-    inputRange: [start, end],
-    outputRange: [0, 1],
-    extrapolate: 'clamp',
-  });
-  const translateY = scrollY.interpolate({
-    inputRange: [start, end],
-    outputRange: [30, 0],
-    extrapolate: 'clamp',
-  });
+  const changeSensitivity = (val: 'high' | 'balanced' | 'strict') => {
+    setSensitivity(val);
+    saveSetting('sensitivity', val);
+  };
 
-  return (
-    <Animated.View onLayout={onLayout} style={[style, { opacity, transform: [{ translateY }] }]}>
-      {children}
-    </Animated.View>
-  );
-}
+  const testConnection = async () => {
+    setPingStatus('testing');
+    setPingLatency(null);
+    const start = performance.now();
+    try {
+      const response = await fetch(`${apiUrl.replace(/\/$/, '')}/healthz`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const duration = Math.round(performance.now() - start);
+      if (response.ok) {
+        setPingStatus('online');
+        setPingLatency(duration);
+      } else {
+        setPingStatus('offline');
+      }
+    } catch {
+      setPingStatus('offline');
+    }
+  };
 
-export default function Landing() {
-  const scrollY = useRef(new Animated.Value(0)).current;
-  const reducedMotion = useReducedMotion();
+  const launchCamera = (modeToLaunch?: SelectedMode) => {
+    const target = modeToLaunch || selectedMode;
+    router.push({
+      pathname: '/camera',
+      params: { initialMode: target },
+    });
+  };
 
   return (
     <SafeAreaView style={s.safe}>
-      <Animated.ScrollView
-        contentContainerStyle={s.page}
-        onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: false })}
-        scrollEventThrottle={16}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={s.nav}>
-          <View style={s.brandLockup}>
-            <View style={s.brandMark}>
-              <View style={s.brandRing} />
-              <Ionicons name="eye-outline" size={19} color="#D9FF9B" />
-            </View>
-            <View>
-              <Text style={s.brand}>GuideLens</Text>
-              <Text style={s.brandSub}>VISUAL ASSISTANCE</Text>
-            </View>
+      {/* Top Header / Brand Bar */}
+      <View style={s.header}>
+        <View style={s.brandGroup}>
+          <View style={s.logoBadge}>
+            <Ionicons name="scan" size={20} color="#07110F" />
           </View>
-          <View style={s.statusPill} accessibilityLabel="Prototype status: ready for demo">
-            <View style={s.statusDot} />
-            <Text style={s.statusText}>DEMO READY</Text>
+          <View>
+            <View style={s.brandTitleRow}>
+              <Text style={s.brandTitle}>GuideLens</Text>
+              <View style={s.versionChip}>
+                <Text style={s.versionText}>v0.1.3</Text>
+              </View>
+            </View>
+            <Text style={s.brandSubtitle}>Spatial Perception & Sign Intelligence</Text>
           </View>
         </View>
 
-        <View style={s.hero}>
-          <View style={s.eyebrow}>
-            <View style={s.eyebrowLine} />
-            <Text style={s.eyebrowText}>SFBU × NVIDIA DGX SPARK 2026</Text>
+        <View style={s.headerRight}>
+          <View style={s.statusPill}>
+            <View style={s.statusGlowDot} />
+            <Text style={s.statusPillText}>ON-DEVICE AI READY</Text>
           </View>
-          <Text style={s.title}>Visual help, delivered with clarity.</Text>
-          <Text style={s.subtitle}>
-            A voice-first companion for everyday visual questions: understand a scene, read a label, or ask about what is in front of you.
+        </View>
+      </View>
+
+      {/* Primary Navigation Tabs */}
+      <View style={s.tabBar} accessibilityRole="tablist">
+        <Pressable
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'hub' }}
+          onPress={() => setActiveTab('hub')}
+          style={[s.tabButton, activeTab === 'hub' && s.tabButtonActive]}
+        >
+          <Ionicons
+            name={activeTab === 'hub' ? 'apps' : 'apps-outline'}
+            size={16}
+            color={activeTab === 'hub' ? '#07110F' : '#9EB5AA'}
+          />
+          <Text style={[s.tabButtonText, activeTab === 'hub' && s.tabButtonTextActive]}>
+            Assistant Hub
           </Text>
-          <View style={s.actions}>
-            <Link href="/camera" asChild>
-              <Pressable accessibilityRole="button" accessibilityLabel="Open the live camera demo" style={s.primary}>
-                <Ionicons name="camera-outline" size={20} color="#0A120D" />
-                <Text style={s.primaryText}>Open live demo</Text>
-                <Ionicons name="arrow-forward" size={17} color="#0A120D" />
-              </Pressable>
-            </Link>
-            <Pressable
-              accessibilityRole="link"
-              accessibilityLabel="Open the project on GitHub"
-              onPress={() => Platform.OS === 'web' && window.open('https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026', '_blank')}
-              style={s.secondary}
-            >
-              <Ionicons name="logo-github" size={19} color="#DDE9E2" />
-              <Text style={s.secondaryText}>View project</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="link"
-              accessibilityLabel="Download GuideLens applications"
-              onPress={() => Platform.OS === 'web' && window.open('https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest', '_blank')}
-              style={s.secondary}
-            >
-              <Ionicons name="download-outline" size={19} color="#DDE9E2" />
-              <Text style={s.secondaryText}>Download apps</Text>
-            </Pressable>
-          </View>
-        </View>
+        </Pressable>
 
-        <View style={s.downloadSection}>
-          <View style={s.downloadHeading}>
-            <View>
-              <Text style={s.sectionOverline}>DOWNLOAD THE NATIVE APP</Text>
-              <Text style={s.downloadTitle}>Run GuideLens on your device.</Text>
-            </View>
-            <Text style={s.downloadLead}>Local YOLOX object detection is bundled in every native build. Choose your platform.</Text>
-          </View>
-          <View style={s.downloadGrid}>
-            {releaseDownloads.map((release) => (
+        <Pressable
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'settings' }}
+          onPress={() => setActiveTab('settings')}
+          style={[s.tabButton, activeTab === 'settings' && s.tabButtonActive]}
+        >
+          <Ionicons
+            name={activeTab === 'settings' ? 'settings' : 'settings-outline'}
+            size={16}
+            color={activeTab === 'settings' ? '#07110F' : '#9EB5AA'}
+          />
+          <Text style={[s.tabButtonText, activeTab === 'settings' && s.tabButtonTextActive]}>
+            Settings
+          </Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'telemetry' }}
+          onPress={() => setActiveTab('telemetry')}
+          style={[s.tabButton, activeTab === 'telemetry' && s.tabButtonActive]}
+        >
+          <Ionicons
+            name={activeTab === 'telemetry' ? 'hardware-chip' : 'hardware-chip-outline'}
+            size={16}
+            color={activeTab === 'telemetry' ? '#07110F' : '#9EB5AA'}
+          />
+          <Text style={[s.tabButtonText, activeTab === 'telemetry' && s.tabButtonTextActive]}>
+            Telemetry
+          </Text>
+        </Pressable>
+      </View>
+
+      <ScrollView contentContainerStyle={s.contentScroll} showsVerticalScrollIndicator={false}>
+        {/* TAB 1: ASSISTANT HUB */}
+        {activeTab === 'hub' && (
+          <View style={s.tabContent}>
+            {/* Hero Launchpad Cockpit Card */}
+            <View style={s.heroCard}>
+              <View style={s.heroGlowCorner} />
+              <View style={s.heroHeader}>
+                <View style={s.heroBadge}>
+                  <Ionicons name="sparkles" size={13} color="#B7FF56" />
+                  <Text style={s.heroBadgeText}>ZERO LATENCY · ON-DEVICE</Text>
+                </View>
+                <Text style={s.heroTitle}>Visual & Sign Intelligence</Text>
+                <Text style={s.heroDesc}>
+                  Private, real-time spatial awareness and ASL translation powered by on-device neural
+                  networks.
+                </Text>
+              </View>
+
+              {/* Mode Select Segment within Hero */}
+              <View style={s.modePickerContainer}>
+                <Text style={s.modePickerLabel}>SELECT STARTING MODE</Text>
+                <View style={s.modePicker}>
+                  <Pressable
+                    onPress={() => setSelectedMode('scene')}
+                    style={[s.modeOption, selectedMode === 'scene' && s.modeOptionActive]}
+                  >
+                    <Ionicons
+                      name="eye"
+                      size={18}
+                      color={selectedMode === 'scene' ? '#B7FF56' : '#88A397'}
+                    />
+                    <View>
+                      <Text
+                        style={[
+                          s.modeOptionTitle,
+                          selectedMode === 'scene' && s.modeOptionTitleActive,
+                        ]}
+                      >
+                        Scene Assist
+                      </Text>
+                      <Text style={s.modeOptionSub}>Objects, obstacles & distance</Text>
+                    </View>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => setSelectedMode('sign')}
+                    style={[s.modeOption, selectedMode === 'sign' && s.modeOptionActive]}
+                  >
+                    <Ionicons
+                      name="hand-left"
+                      size={18}
+                      color={selectedMode === 'sign' ? '#B7FF56' : '#88A397'}
+                    />
+                    <View>
+                      <Text
+                        style={[
+                          s.modeOptionTitle,
+                          selectedMode === 'sign' && s.modeOptionTitleActive,
+                        ]}
+                      >
+                        Sign to Voice
+                      </Text>
+                      <Text style={s.modeOptionSub}>ASL gestures & letters</Text>
+                    </View>
+                  </Pressable>
+                </View>
+              </View>
+
+              {/* Main Launch CTA Button */}
               <Pressable
-                key={release.label}
-                accessibilityRole="link"
-                accessibilityLabel={`Download GuideLens for ${release.label}`}
-                onPress={() => void Linking.openURL(release.url)}
-                style={s.downloadCard}
+                onPress={() => launchCamera()}
+                style={s.launchButton}
+                accessibilityRole="button"
+                accessibilityLabel="Launch Vision Camera"
               >
-                <View style={s.downloadIcon}><Ionicons name={release.icon} size={22} color="#C8FF72" /></View>
-                <View style={s.downloadCopy}>
-                  <Text style={s.downloadLabel}>{release.label}</Text>
-                  <Text style={s.downloadDetail}>{release.detail}</Text>
+                <View style={s.launchButtonIconWrapper}>
+                  <Ionicons name="camera" size={22} color="#07110F" />
                 </View>
-                <Ionicons name="download-outline" size={20} color="#DDE9E2" />
+                <View style={s.launchButtonTextCol}>
+                  <Text style={s.launchButtonMainText}>
+                    Launch {selectedMode === 'scene' ? 'Scene Assist' : 'Sign Interpreter'}
+                  </Text>
+                  <Text style={s.launchButtonSubText}>Opens camera with local neural engine</Text>
+                </View>
+                <Ionicons name="arrow-forward" size={20} color="#07110F" />
               </Pressable>
-            ))}
-          </View>
-          <Text style={s.downloadNote}>Hackathon preview builds may trigger an unsigned-app warning. Android users must allow installation from their browser.</Text>
-        </View>
-
-        <View style={s.briefing}>
-          <View style={s.briefingHeader}>
-            <View style={s.briefingLabel}>
-              <View style={s.liveDot} />
-              <Text style={s.briefingLabelText}>INTERFACE PREVIEW</Text>
             </View>
-            <Text style={s.briefingTime}>ILLUSTRATIVE</Text>
-          </View>
-          <View style={s.briefingBody}>
-            <View style={s.scenePane}>
-              <View style={s.sceneGrid} />
-              <View style={s.scanLine} />
-              <View style={s.sceneTopline}>
-                <Text style={s.frameLabel}>EXAMPLE CAMERA INPUT</Text>
-                <Text style={s.frameLabel}>1 STILL FRAME</Text>
-              </View>
-              <View style={s.objectDoor}>
-                <View style={s.objectTag}><Text style={s.objectTagText}>DOORWAY · 97%</Text></View>
-              </View>
-              <View style={s.objectChair}>
-                <View style={s.objectTag}><Text style={s.objectTagText}>CHAIR · 93%</Text></View>
-              </View>
-              <View style={s.sceneFooter}>
-                <Ionicons name="locate-outline" size={15} color="#C8FF72" />
-                <Text style={s.sceneFooterText}>EXAMPLE OUTPUT</Text>
-              </View>
+
+            {/* Quick Action Mode Cards */}
+            <View style={s.sectionHeader}>
+              <Text style={s.sectionTitle}>Perception Capabilities</Text>
+              <Text style={s.sectionDesc}>Direct access to specialized vision pipelines</Text>
             </View>
-            <View style={s.responsePane}>
-              <Text style={s.responseEyebrow}>EXAMPLE SPOKEN RESPONSE</Text>
-              <Text style={s.responseTitle}>A clear route through the room.</Text>
-              <Text style={s.responseText}>A doorway is ahead. A chair is on your right, about two steps away.</Text>
-              <View style={s.waveRow} accessibilityLabel="Audio response waveform">
-                {[14, 24, 35, 48, 31, 18, 40, 54, 36, 22, 31, 15].map((height, index) => (
-                  <View key={index} style={[s.waveBar, { height }]} />
-                ))}
-              </View>
-              <View style={s.responseMeta}>
-                <View style={s.metaChip}><Ionicons name="volume-high-outline" size={14} color="#C8FF72" /><Text style={s.metaText}>READY TO SPEAK</Text></View>
-                <Text style={s.metaTime}>00:02.4</Text>
-              </View>
-            </View>
-          </View>
-        </View>
 
-        <Reveal scrollY={scrollY} reducedMotion={reducedMotion} style={s.introSection}>
-          <Text style={s.sectionOverline}>BUILT FOR A FOCUSED MOMENT</Text>
-          <Text style={s.sectionTitle}>A useful answer starts with a better question.</Text>
-          <Text style={s.sectionLead}>GuideLens makes its response specific to the task instead of trying to narrate everything at once.</Text>
-        </Reveal>
-
-        <View style={s.cards}>
-          {benefits.map((benefit, index) => (
-            <Reveal key={benefit.title} scrollY={scrollY} reducedMotion={reducedMotion} delay={index * 55} style={s.cardWrap}>
-              <View style={s.card}>
-                <View style={s.cardTopline}>
-                  <View style={s.cardIcon}><Ionicons name={benefit.icon} size={22} color="#C8FF72" /></View>
-                  <Text style={s.cardEyebrow}>{benefit.eyebrow}</Text>
-                </View>
-                <Text style={s.cardTitle}>{benefit.title}</Text>
-                <Text style={s.cardText}>{benefit.text}</Text>
-              </View>
-            </Reveal>
-          ))}
-        </View>
-
-        <Reveal scrollY={scrollY} reducedMotion={reducedMotion} style={s.architecture}>
-          <View style={s.architectureHeading}>
-            <View>
-              <Text style={s.sectionOverline}>THE INFERENCE PATH</Text>
-              <Text style={s.architectureTitle}>From a single frame to a spoken answer.</Text>
-            </View>
-            <Text style={s.architectureSummary}>Designed for deliberate visual tasks, with a small request and an explicit response path.</Text>
-          </View>
-
-          <View style={s.pipeline}>
-            {pipeline.map((item, index) => (
-              <View key={item.step} style={s.pipelineItemWrap}>
-                <View style={s.pipelineItem}>
-                  <View style={s.pipelineTopline}>
-                    <Text style={s.pipelineStep}>{item.step}</Text>
-                    <Ionicons name={item.icon} size={21} color="#C8FF72" />
+            <View style={s.cardsGrid}>
+              {/* Card 1: Scene Assist */}
+              <View style={s.featureCard}>
+                <View style={s.cardTopRow}>
+                  <View style={s.cardIconCircle}>
+                    <Ionicons name="eye-outline" size={22} color="#B7FF56" />
                   </View>
-                  <Text style={s.pipelineLabel}>{item.label}</Text>
-                  <Text style={s.pipelineTitle}>{item.title}</Text>
-                  <Text style={s.pipelineText}>{item.text}</Text>
-                  <View style={s.pipelineMeta}><Text style={s.pipelineMetaText}>{item.meta}</Text></View>
+                  <View style={s.cardTag}>
+                    <Text style={s.cardTagText}>YOLOX-Nano · 3.7 MB</Text>
+                  </View>
                 </View>
-                {index < pipeline.length - 1 && (
-                  <View style={s.connector} accessibilityElementsHidden>
-                    <View style={s.connectorLine} />
-                    <Ionicons name={Platform.OS === 'web' ? 'arrow-forward' : 'arrow-down'} size={18} color="#779186" />
+
+                <Text style={s.cardTitle}>Spatial Scene Awareness</Text>
+                <Text style={s.cardBody}>
+                  Recognizes 80 categories of objects and persons, measures visual distance, and
+                  announces nearby items via synthesized speech.
+                </Text>
+
+                <Pressable
+                  onPress={() => launchCamera('scene')}
+                  style={s.cardActionBtn}
+                  accessibilityLabel="Open Scene Assist"
+                >
+                  <Text style={s.cardActionBtnText}>Open Scene Assist</Text>
+                  <Ionicons name="chevron-forward" size={16} color="#B7FF56" />
+                </Pressable>
+              </View>
+
+              {/* Card 2: Sign to Voice */}
+              <View style={s.featureCard}>
+                <View style={s.cardTopRow}>
+                  <View style={[s.cardIconCircle, s.cardIconCircleSign]}>
+                    <Ionicons name="hand-left-outline" size={22} color="#C8FF72" />
+                  </View>
+                  <View style={[s.cardTag, s.cardTagSign]}>
+                    <Text style={[s.cardTagText, s.cardTagTextSign]}>Transformer + Kinematics</Text>
+                  </View>
+                </View>
+
+                <Text style={s.cardTitle}>ASL Sign to Voice</Text>
+                <Text style={s.cardBody}>
+                  Instant kinematic gesture recognition for conversational phrases (Hello, Yes, No,
+                  Please, Thank You, Water) plus 250-word isolated ASL Transformer.
+                </Text>
+
+                <Pressable
+                  onPress={() => launchCamera('sign')}
+                  style={[s.cardActionBtn, s.cardActionBtnSign]}
+                  accessibilityLabel="Open Sign Interpreter"
+                >
+                  <Text style={[s.cardActionBtnText, s.cardActionBtnTextSign]}>
+                    Open Sign Interpreter
+                  </Text>
+                  <Ionicons name="chevron-forward" size={16} color="#C8FF72" />
+                </Pressable>
+              </View>
+            </View>
+
+            {/* Quick Status Bar */}
+            <View style={s.telemetryPillsRow}>
+              <View style={s.telemetryPill}>
+                <Ionicons name="shield-checkmark-outline" size={15} color="#94A9A0" />
+                <Text style={s.telemetryPillLabel}>100% On-Device Privacy</Text>
+              </View>
+              <View style={s.telemetryPill}>
+                <Ionicons name="flash-outline" size={15} color="#94A9A0" />
+                <Text style={s.telemetryPillLabel}>WASM SIMD Acceleration</Text>
+              </View>
+              <View style={s.telemetryPill}>
+                <Ionicons name="volume-high-outline" size={15} color="#94A9A0" />
+                <Text style={s.telemetryPillLabel}>Native Speech Synthesizer</Text>
+              </View>
+            </View>
+          </View>
+        )}
+
+        {/* TAB 2: SETTINGS */}
+        {activeTab === 'settings' && (
+          <View style={s.tabContent}>
+            <View style={s.settingsContainer}>
+              <View style={s.settingsHeader}>
+                <Text style={s.settingsHeading}>App Preferences</Text>
+                <Text style={s.settingsSub}>
+                  Customize speech audio feedback, neural sensitivity, and optional DGX server.
+                </Text>
+              </View>
+
+              {/* Group 1: Voice & Speech */}
+              <View style={s.settingsCard}>
+                <View style={s.settingsCardHeader}>
+                  <Ionicons name="volume-high-outline" size={18} color="#B7FF56" />
+                  <Text style={s.settingsCardTitle}>Voice & Audio Narration</Text>
+                </View>
+
+                {/* Spoken Voice Toggle */}
+                <View style={s.settingRow}>
+                  <View style={s.settingCol}>
+                    <Text style={s.settingLabel}>Spoken Voice Feedback</Text>
+                    <Text style={s.settingDesc}>
+                      Announces detected objects and translated sign words aloud.
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={toggleSpeech}
+                    style={[s.toggleBtn, speechEnabled && s.toggleBtnActive]}
+                  >
+                    <View style={[s.toggleKnob, speechEnabled && s.toggleKnobActive]} />
+                  </Pressable>
+                </View>
+
+                {/* Speech Speed */}
+                <View style={[s.settingRow, s.settingRowBorder]}>
+                  <View style={s.settingCol}>
+                    <Text style={s.settingLabel}>Speech Rate</Text>
+                    <Text style={s.settingDesc}>Pacing for spoken announcements.</Text>
+                  </View>
+                  <View style={s.segmentedRow}>
+                    {(['0.9', '1.0', '1.2'] as const).map((rate) => (
+                      <Pressable
+                        key={rate}
+                        onPress={() => changeRate(rate)}
+                        style={[s.segmentedOption, speechRate === rate && s.segmentedOptionActive]}
+                      >
+                        <Text
+                          style={[
+                            s.segmentedOptionText,
+                            speechRate === rate && s.segmentedOptionTextActive,
+                          ]}
+                        >
+                          {rate}x
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              </View>
+
+              {/* Group 2: Vision Sensitivity */}
+              <View style={s.settingsCard}>
+                <View style={s.settingsCardHeader}>
+                  <Ionicons name="scan-outline" size={18} color="#B7FF56" />
+                  <Text style={s.settingsCardTitle}>Vision & Neural Confidence</Text>
+                </View>
+
+                <View style={s.settingRow}>
+                  <View style={s.settingCol}>
+                    <Text style={s.settingLabel}>Object Detection Sensitivity</Text>
+                    <Text style={s.settingDesc}>
+                      Confidence threshold for local YOLOX bounding boxes.
+                    </Text>
+                  </View>
+                  <View style={s.segmentedRow}>
+                    {(
+                      [
+                        { key: 'high', label: 'High (0.30)' },
+                        { key: 'balanced', label: 'Balanced (0.38)' },
+                        { key: 'strict', label: 'Strict (0.50)' },
+                      ] as const
+                    ).map((item) => (
+                      <Pressable
+                        key={item.key}
+                        onPress={() => changeSensitivity(item.key)}
+                        style={[
+                          s.segmentedOption,
+                          sensitivity === item.key && s.segmentedOptionActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            s.segmentedOptionText,
+                            sensitivity === item.key && s.segmentedOptionTextActive,
+                          ]}
+                        >
+                          {item.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              </View>
+
+              {/* Group 3: Optional DGX Spark Cloud Endpoint */}
+              <View style={s.settingsCard}>
+                <View style={s.settingsCardHeader}>
+                  <Ionicons name="cloud-outline" size={18} color="#B7FF56" />
+                  <Text style={s.settingsCardTitle}>DGX Spark Vision Server (Optional)</Text>
+                </View>
+                <Text style={s.settingsCardNote}>
+                  GuideLens runs completely offline. You can optionally connect a DGX Spark server for
+                  extended visual Q&A and continuous sign language narration.
+                </Text>
+
+                <View style={s.apiUrlRow}>
+                  <TextInput
+                    value={apiUrl}
+                    onChangeText={(val) => {
+                      setApiUrl(val);
+                      saveSetting('api_url', val);
+                      setPingStatus('idle');
+                    }}
+                    placeholder="http://localhost:8000"
+                    placeholderTextColor="#5C7A6E"
+                    style={s.apiInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  <Pressable
+                    onPress={testConnection}
+                    style={s.pingBtn}
+                    disabled={pingStatus === 'testing'}
+                  >
+                    <Text style={s.pingBtnText}>
+                      {pingStatus === 'testing' ? 'Testing…' : 'Ping Server'}
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {pingStatus !== 'idle' && (
+                  <View style={s.pingResultRow}>
+                    <Ionicons
+                      name={pingStatus === 'online' ? 'checkmark-circle' : 'close-circle'}
+                      size={17}
+                      color={pingStatus === 'online' ? '#B7FF56' : '#FF7865'}
+                    />
+                    <Text
+                      style={[
+                        s.pingResultText,
+                        pingStatus === 'online' ? s.pingResultOnline : s.pingResultOffline,
+                      ]}
+                    >
+                      {pingStatus === 'online'
+                        ? `Connected (${pingLatency}ms latency)`
+                        : 'Server unreachable (Offline mode active)'}
+                    </Text>
                   </View>
                 )}
               </View>
-            ))}
+            </View>
           </View>
+        )}
 
-          <View style={s.architectureFooter}>
-            <Ionicons name="information-circle-outline" size={19} color="#A7BDB1" />
-            <Text style={s.architectureFooterText}>YOLOX Nano performs real local object detection. A configured private backend adds concise vision-language descriptions without exposing its API key to the app.</Text>
+        {/* TAB 3: TELEMETRY & SPECS */}
+        {activeTab === 'telemetry' && (
+          <View style={s.tabContent}>
+            <View style={s.settingsContainer}>
+              <View style={s.settingsHeader}>
+                <Text style={s.settingsHeading}>Neural Engine Telemetry</Text>
+                <Text style={s.settingsSub}>
+                  On-device models, runtime specifications, and pipeline topology.
+                </Text>
+              </View>
+
+              <View style={s.specCard}>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Object Detector</Text>
+                  <Text style={s.specVal}>YOLOX-Nano (ONNX WASM / WebGL)</Text>
+                </View>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Object Model Size</Text>
+                  <Text style={s.specVal}>3.7 MB (416×416 input, 80 COCO classes)</Text>
+                </View>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Sign Language Model</Text>
+                  <Text style={s.specVal}>Google ASL Transformer (64-frame context)</Text>
+                </View>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Sign Vocabulary</Text>
+                  <Text style={s.specVal}>250 isolated ASL signs + 6 instant gestures</Text>
+                </View>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Kinematic Gestures</Text>
+                  <Text style={s.specVal}>Hello, Yes, No, Please, Thank You, Water</Text>
+                </View>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Landmark Engine</Text>
+                  <Text style={s.specVal}>MediaPipe Hands (21 3D pts) + Face + Pose</Text>
+                </View>
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Privacy Level</Text>
+                  <Text style={s.specValHighlight}>100% Zero-Telemetry · Air-Gapped</Text>
+                </View>
+              </View>
+
+              <View style={s.versionFooter}>
+                <Text style={s.versionFooterText}>
+                  GuideLens Native Edition · Built for SFBU × NVIDIA DGX Hackathon 2026
+                </Text>
+              </View>
+            </View>
           </View>
-        </Reveal>
-
-        <Reveal scrollY={scrollY} reducedMotion={reducedMotion} style={s.safety}>
-          <View style={s.safetyIcon}><Ionicons name="shield-checkmark-outline" size={20} color="#DDE9E2" /></View>
-          <View style={s.safetyCopy}>
-            <Text style={s.safetyTitle}>Assistive, never authoritative.</Text>
-            <Text style={s.safetyText}>GuideLens can be wrong and must not be used as the sole source for traffic, medication, emergencies, or mobility decisions.</Text>
-          </View>
-        </Reveal>
-
-        <Text style={s.footer}>BUILT FOR THE SFBU NVIDIA DGX SPARK HACKATHON · 2026</Text>
-      </Animated.ScrollView>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#08110E' },
-  page: { width: '100%', maxWidth: 1180, alignSelf: 'center', paddingHorizontal: 22, paddingBottom: 48 },
-  nav: { minHeight: 82, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  brandLockup: { flexDirection: 'row', alignItems: 'center', gap: 11 },
-  brandMark: { width: 40, height: 40, borderRadius: 14, backgroundColor: '#14291F', borderWidth: 1, borderColor: '#365343', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  brandRing: { position: 'absolute', width: 52, height: 52, borderRadius: 26, borderWidth: 1, borderColor: 'rgba(200,255,114,.20)' },
-  brand: { color: '#F2F7F2', fontSize: 19, fontWeight: '800', letterSpacing: -0.4 },
-  brandSub: { color: '#769086', fontSize: 9, fontWeight: '800', letterSpacing: 1.35, marginTop: 2 },
-  statusPill: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 11, paddingVertical: 8, borderWidth: 1, borderColor: '#2F4A3E', borderRadius: 99, backgroundColor: 'rgba(15,33,25,.72)' },
-  statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#C8FF72' },
-  statusText: { color: '#BAD0C5', fontSize: 10, fontWeight: '800', letterSpacing: 1.1 },
-  hero: { paddingTop: 72, paddingBottom: 54, maxWidth: 830 },
-  eyebrow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  eyebrowLine: { width: 30, height: 1, backgroundColor: '#C8FF72' },
-  eyebrowText: { color: '#C8FF72', fontSize: 11, fontWeight: '800', letterSpacing: 1.65 },
-  title: { color: '#F3F7F3', fontSize: Platform.OS === 'web' ? 72 : 51, lineHeight: Platform.OS === 'web' ? 76 : 56, fontWeight: '800', letterSpacing: -3.5, marginTop: 21, maxWidth: 760 },
-  subtitle: { color: '#A8BCB2', fontSize: 19, lineHeight: 29, maxWidth: 660, marginTop: 22 },
-  actions: { flexDirection: 'row', gap: 12, marginTop: 34, flexWrap: 'wrap' },
-  primary: { minHeight: 53, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#C8FF72', borderRadius: 15, paddingHorizontal: 19 },
-  primaryText: { color: '#0A120D', fontSize: 15, fontWeight: '800', flexGrow: 1 },
-  secondary: { minHeight: 53, flexDirection: 'row', alignItems: 'center', gap: 9, borderWidth: 1, borderColor: '#355147', borderRadius: 15, paddingHorizontal: 18, backgroundColor: 'rgba(20,40,30,.45)' },
-  secondaryText: { color: '#DDE9E2', fontSize: 15, fontWeight: '700' },
-  downloadSection: { marginBottom: 32, padding: Platform.OS === 'web' ? 28 : 20, borderWidth: 1, borderColor: '#365448', borderRadius: 26, backgroundColor: '#0B1914' },
-  downloadHeading: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', alignItems: Platform.OS === 'web' ? 'flex-end' : 'flex-start', justifyContent: 'space-between', gap: 18 },
-  downloadTitle: { color: '#F0F7F1', fontSize: Platform.OS === 'web' ? 32 : 28, lineHeight: Platform.OS === 'web' ? 38 : 34, fontWeight: '800', letterSpacing: -1, marginTop: 10 },
-  downloadLead: { color: '#93AA9F', fontSize: 14, lineHeight: 21, maxWidth: 390 },
-  downloadGrid: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', flexWrap: 'wrap', gap: 10, marginTop: 24 },
-  downloadCard: { flexGrow: 1, flexBasis: Platform.OS === 'web' ? 240 : undefined, minHeight: 76, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 15, borderWidth: 1, borderColor: '#315043', borderRadius: 17, backgroundColor: '#10231B' },
-  downloadIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#173226' },
-  downloadCopy: { flex: 1 },
-  downloadLabel: { color: '#EFF6F0', fontSize: 15, fontWeight: '800' },
-  downloadDetail: { color: '#829A8E', fontSize: 11, marginTop: 3 },
-  downloadNote: { color: '#71887D', fontSize: 10, lineHeight: 15, marginTop: 15 },
-  briefing: { borderWidth: 1, borderColor: '#365448', borderRadius: 28, overflow: 'hidden', backgroundColor: '#0B1914' },
-  briefingHeader: { minHeight: 54, paddingHorizontal: 21, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#294237', backgroundColor: 'rgba(17,40,29,.64)' },
-  briefingLabel: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#FF7F6D' },
-  briefingLabelText: { color: '#DCEAE3', fontSize: 10, fontWeight: '800', letterSpacing: 1.4 },
-  briefingTime: { color: '#81988D', fontSize: 10, fontWeight: '800', letterSpacing: 1.05 },
-  briefingBody: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', minHeight: 382 },
-  scenePane: { flex: 1.1, minHeight: 330, overflow: 'hidden', backgroundColor: '#10281D', padding: 20, position: 'relative' },
-  sceneGrid: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, opacity: 0.26, backgroundColor: '#133626', borderWidth: 1, borderColor: '#527160' },
-  scanLine: { position: 'absolute', top: '47%', left: 0, right: 0, height: 1, backgroundColor: 'rgba(200,255,114,.58)' },
-  sceneTopline: { flexDirection: 'row', justifyContent: 'space-between' },
-  frameLabel: { color: '#B6CCBF', fontSize: 10, fontWeight: '800', letterSpacing: 1.1 },
-  objectDoor: { position: 'absolute', right: '15%', top: '24%', width: '27%', height: '53%', borderRadius: 10, borderWidth: 1.5, borderColor: '#C8FF72', backgroundColor: 'rgba(200,255,114,.055)' },
-  objectChair: { position: 'absolute', left: '18%', top: '48%', width: '21%', height: '26%', borderRadius: 10, borderWidth: 1.5, borderColor: '#C8FF72', backgroundColor: 'rgba(200,255,114,.055)' },
-  objectTag: { position: 'absolute', top: -27, left: -2, backgroundColor: '#C8FF72', borderRadius: 5, paddingHorizontal: 7, paddingVertical: 4 },
-  objectTagText: { color: '#102015', fontSize: 9, fontWeight: '800', letterSpacing: 0.35 },
-  sceneFooter: { position: 'absolute', left: 20, bottom: 20, flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 99, backgroundColor: 'rgba(8,22,16,.75)' },
-  sceneFooterText: { color: '#C8FF72', fontSize: 9, fontWeight: '800', letterSpacing: 1 },
-  responsePane: { flex: 0.9, minHeight: 330, padding: 30, justifyContent: 'center', backgroundColor: '#0F2019' },
-  responseEyebrow: { color: '#C8FF72', fontSize: 10, fontWeight: '800', letterSpacing: 1.4 },
-  responseTitle: { color: '#F0F7F1', fontSize: 29, lineHeight: 34, fontWeight: '800', letterSpacing: -0.8, marginTop: 14, maxWidth: 340 },
-  responseText: { color: '#A9BDB3', fontSize: 15, lineHeight: 23, marginTop: 13, maxWidth: 360 },
-  waveRow: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 58, marginTop: 24 },
-  waveBar: { width: 4, borderRadius: 99, backgroundColor: '#C8FF72' },
-  responseMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 20, paddingTop: 16, borderTopWidth: 1, borderTopColor: '#2B4339' },
-  metaChip: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  metaText: { color: '#A9C2B3', fontSize: 9, fontWeight: '800', letterSpacing: 1 },
-  metaTime: { color: '#71867C', fontSize: 11, fontWeight: '700' },
-  introSection: { marginTop: 104, maxWidth: 710 },
-  sectionOverline: { color: '#C8FF72', fontSize: 10, fontWeight: '800', letterSpacing: 1.75 },
-  sectionTitle: { color: '#F0F6F1', fontSize: Platform.OS === 'web' ? 47 : 38, lineHeight: Platform.OS === 'web' ? 51 : 42, fontWeight: '800', letterSpacing: -1.8, marginTop: 15, maxWidth: 660 },
-  sectionLead: { color: '#91A99E', fontSize: 17, lineHeight: 26, maxWidth: 610, marginTop: 17 },
-  cards: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', gap: 14, marginTop: 34 },
-  cardWrap: { flex: 1 },
-  card: { flex: 1, minHeight: 240, padding: 24, borderWidth: 1, borderColor: '#2C493D', borderRadius: 22, backgroundColor: '#0C1B16' },
-  cardTopline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  cardIcon: { width: 45, height: 45, borderRadius: 14, backgroundColor: '#173226', alignItems: 'center', justifyContent: 'center' },
-  cardEyebrow: { color: '#7F988C', fontSize: 10, fontWeight: '800', letterSpacing: 1.45 },
-  cardTitle: { color: '#EAF3EC', fontSize: 21, lineHeight: 26, fontWeight: '800', letterSpacing: -0.45, marginTop: 30 },
-  cardText: { color: '#91A89E', fontSize: 14, lineHeight: 21, marginTop: 11 },
-  architecture: { marginTop: 110, padding: Platform.OS === 'web' ? 38 : 24, borderWidth: 1, borderColor: '#315043', borderRadius: 28, backgroundColor: '#0B1914' },
-  architectureHeading: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', justifyContent: 'space-between', gap: 24 },
-  architectureTitle: { color: '#F0F7F1', fontSize: Platform.OS === 'web' ? 41 : 33, lineHeight: Platform.OS === 'web' ? 45 : 38, fontWeight: '800', letterSpacing: -1.5, marginTop: 14, maxWidth: 570 },
-  architectureSummary: { color: '#93AA9F', fontSize: 15, lineHeight: 23, maxWidth: 300, paddingTop: Platform.OS === 'web' ? 24 : 0 },
-  pipeline: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', marginTop: 42, alignItems: Platform.OS === 'web' ? 'stretch' : 'center' },
-  pipelineItemWrap: { flex: 1, flexDirection: Platform.OS === 'web' ? 'row' : 'column', alignItems: 'stretch' },
-  pipelineItem: { flex: 1, minHeight: 282, padding: 20, borderWidth: 1, borderColor: '#2C493D', borderRadius: 18, backgroundColor: '#10231B' },
-  pipelineTopline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  pipelineStep: { color: '#C8FF72', fontSize: 11, fontWeight: '800', letterSpacing: 1.2 },
-  pipelineLabel: { color: '#829A8E', fontSize: 10, fontWeight: '800', letterSpacing: 1.25, marginTop: 32 },
-  pipelineTitle: { color: '#EFF6F0', fontSize: 20, lineHeight: 24, fontWeight: '800', marginTop: 8, letterSpacing: -0.4 },
-  pipelineText: { color: '#90A79C', fontSize: 13, lineHeight: 20, marginTop: 10 },
-  pipelineMeta: { alignSelf: 'flex-start', borderRadius: 99, borderWidth: 1, borderColor: '#3C5A4B', paddingHorizontal: 9, paddingVertical: 6, marginTop: 19 },
-  pipelineMetaText: { color: '#B5CCBF', fontSize: 9, fontWeight: '800', letterSpacing: 0.65 },
-  connector: { width: Platform.OS === 'web' ? 46 : undefined, height: Platform.OS === 'web' ? undefined : 39, alignItems: 'center', justifyContent: 'center', flexDirection: Platform.OS === 'web' ? 'row' : 'column' },
-  connectorLine: { width: Platform.OS === 'web' ? 18 : 1, height: Platform.OS === 'web' ? 1 : 18, backgroundColor: '#567164' },
-  architectureFooter: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, padding: 15, marginTop: 28, borderRadius: 14, backgroundColor: '#102219' },
-  architectureFooterText: { flex: 1, color: '#9DB4A9', fontSize: 12, lineHeight: 18 },
-  safety: { flexDirection: 'row', alignItems: 'flex-start', gap: 14, maxWidth: 780, marginTop: 58, paddingVertical: 21, borderTopWidth: 1, borderBottomWidth: 1, borderColor: '#2C453A' },
-  safetyIcon: { width: 38, height: 38, borderRadius: 12, backgroundColor: '#26352C', alignItems: 'center', justifyContent: 'center' },
-  safetyCopy: { flex: 1 },
-  safetyTitle: { color: '#E6EFE8', fontSize: 16, fontWeight: '800' },
-  safetyText: { color: '#849B90', fontSize: 13, lineHeight: 20, marginTop: 5 },
-  footer: { color: '#587065', fontSize: 10, fontWeight: '700', letterSpacing: 1.2, textAlign: 'center', marginTop: 54 },
+  safe: {
+    flex: 1,
+    backgroundColor: '#07110F',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.07)',
+  },
+  brandGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  logoBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: '#B7FF56',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#B7FF56',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+  },
+  brandTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  brandTitle: {
+    color: '#F4FAF6',
+    fontSize: 19,
+    fontWeight: '800',
+    letterSpacing: -0.4,
+  },
+  versionChip: {
+    backgroundColor: 'rgba(183, 255, 86, 0.12)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(183, 255, 86, 0.25)',
+  },
+  versionText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  brandSubtitle: {
+    color: '#82998F',
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 1,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(183, 255, 86, 0.09)',
+    borderWidth: 1,
+    borderColor: 'rgba(183, 255, 86, 0.28)',
+    borderRadius: 99,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  statusGlowDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#B7FF56',
+    shadowColor: '#B7FF56',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 5,
+  },
+  statusPillText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+
+  // Tab Bar
+  tabBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: '#07110F',
+  },
+  tabButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+  },
+  tabButtonActive: {
+    backgroundColor: '#B7FF56',
+  },
+  tabButtonText: {
+    color: '#8CA499',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  tabButtonTextActive: {
+    color: '#07110F',
+    fontWeight: '800',
+  },
+
+  contentScroll: {
+    padding: 24,
+    paddingBottom: 48,
+    maxWidth: 1040,
+    width: '100%',
+    alignSelf: 'center',
+  },
+  tabContent: {
+    gap: 24,
+  },
+
+  // Hero Card
+  heroCard: {
+    backgroundColor: 'rgba(10, 28, 21, 0.95)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: 'rgba(183, 255, 86, 0.35)',
+    padding: 24,
+    position: 'relative',
+    overflow: 'hidden',
+    shadowColor: '#B7FF56',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 16,
+  },
+  heroGlowCorner: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: 'rgba(183, 255, 86, 0.08)',
+  },
+  heroHeader: {
+    gap: 8,
+  },
+  heroBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(183, 255, 86, 0.12)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  heroBadgeText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.9,
+  },
+  heroTitle: {
+    color: '#F4FAF6',
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: -0.6,
+  },
+  heroDesc: {
+    color: '#95ADA1',
+    fontSize: 14,
+    lineHeight: 21,
+    maxWidth: 620,
+  },
+
+  // Mode Picker inside Hero
+  modePickerContainer: {
+    marginTop: 20,
+    gap: 8,
+  },
+  modePickerLabel: {
+    color: '#6F8C7F',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+  },
+  modePicker: {
+    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
+    gap: 10,
+  },
+  modeOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(4, 15, 11, 0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 14,
+    padding: 14,
+  },
+  modeOptionActive: {
+    borderColor: '#B7FF56',
+    backgroundColor: 'rgba(183, 255, 86, 0.08)',
+  },
+  modeOptionTitle: {
+    color: '#D4E4DC',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  modeOptionTitleActive: {
+    color: '#F4FAF6',
+    fontWeight: '800',
+  },
+  modeOptionSub: {
+    color: '#7C988B',
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  // Main Launch Button
+  launchButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    backgroundColor: '#B7FF56',
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    marginTop: 22,
+    shadowColor: '#B7FF56',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+  },
+  launchButtonIconWrapper: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: 'rgba(7, 17, 15, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  launchButtonTextCol: {
+    flex: 1,
+  },
+  launchButtonMainText: {
+    color: '#07110F',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  launchButtonSubText: {
+    color: '#1A3328',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 1,
+  },
+
+  // Section Headers
+  sectionHeader: {
+    marginTop: 6,
+    gap: 4,
+  },
+  sectionTitle: {
+    color: '#F2FAF6',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  sectionDesc: {
+    color: '#7F9A8E',
+    fontSize: 13,
+  },
+
+  // Capability Cards Grid
+  cardsGrid: {
+    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
+    gap: 16,
+  },
+  featureCard: {
+    flex: 1,
+    backgroundColor: 'rgba(9, 23, 17, 0.85)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 18,
+    padding: 20,
+    gap: 12,
+  },
+  cardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  cardIconCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: 'rgba(183, 255, 86, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardIconCircleSign: {
+    backgroundColor: 'rgba(200, 255, 114, 0.12)',
+  },
+  cardTag: {
+    backgroundColor: 'rgba(183, 255, 86, 0.08)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  cardTagSign: {
+    backgroundColor: 'rgba(200, 255, 114, 0.08)',
+  },
+  cardTagText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  cardTagTextSign: {
+    color: '#C8FF72',
+  },
+  cardTitle: {
+    color: '#F4FAF6',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  cardBody: {
+    color: '#8FAAA0',
+    fontSize: 13,
+    lineHeight: 19,
+    flex: 1,
+  },
+  cardActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(183, 255, 86, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(183, 255, 86, 0.25)',
+    borderRadius: 11,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    marginTop: 4,
+  },
+  cardActionBtnSign: {
+    backgroundColor: 'rgba(200, 255, 114, 0.08)',
+    borderColor: 'rgba(200, 255, 114, 0.25)',
+  },
+  cardActionBtnText: {
+    color: '#B7FF56',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  cardActionBtnTextSign: {
+    color: '#C8FF72',
+  },
+
+  // Telemetry row
+  telemetryPillsRow: {
+    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
+    gap: 10,
+    marginTop: 4,
+  },
+  telemetryPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 12,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+  },
+  telemetryPillLabel: {
+    color: '#8FA99E',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  // Settings Screen
+  settingsContainer: {
+    gap: 20,
+  },
+  settingsHeader: {
+    gap: 4,
+  },
+  settingsHeading: {
+    color: '#F4FAF6',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  settingsSub: {
+    color: '#849F93',
+    fontSize: 13,
+  },
+  settingsCard: {
+    backgroundColor: 'rgba(8, 22, 16, 0.85)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 18,
+    padding: 20,
+    gap: 16,
+  },
+  settingsCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.06)',
+    paddingBottom: 12,
+  },
+  settingsCardTitle: {
+    color: '#F4FAF6',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  settingsCardNote: {
+    color: '#829C90',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 16,
+  },
+  settingRowBorder: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.05)',
+    paddingTop: 16,
+  },
+  settingCol: {
+    flex: 1,
+  },
+  settingLabel: {
+    color: '#E8F3EE',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  settingDesc: {
+    color: '#769286',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  toggleBtn: {
+    width: 48,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    padding: 3,
+    justifyContent: 'center',
+  },
+  toggleBtnActive: {
+    backgroundColor: '#B7FF56',
+  },
+  toggleKnob: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#7A9188',
+  },
+  toggleKnobActive: {
+    backgroundColor: '#07110F',
+    alignSelf: 'flex-end',
+  },
+  segmentedRow: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(4, 15, 11, 0.7)',
+    borderRadius: 10,
+    padding: 3,
+    gap: 3,
+  },
+  segmentedOption: {
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  segmentedOptionActive: {
+    backgroundColor: '#B7FF56',
+  },
+  segmentedOptionText: {
+    color: '#8EA79B',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  segmentedOptionTextActive: {
+    color: '#07110F',
+    fontWeight: '800',
+  },
+
+  // API Url row
+  apiUrlRow: {
+    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
+    gap: 8,
+  },
+  apiInput: {
+    flex: 1,
+    backgroundColor: 'rgba(4, 15, 11, 0.8)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: '#EAF5EF',
+    fontSize: 13,
+  },
+  pingBtn: {
+    backgroundColor: 'rgba(183, 255, 86, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(183, 255, 86, 0.35)',
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pingBtnText: {
+    color: '#B7FF56',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  pingResultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  pingResultText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  pingResultOnline: { color: '#B7FF56' },
+  pingResultOffline: { color: '#FF7865' },
+
+  // Specs Card
+  specCard: {
+    backgroundColor: 'rgba(8, 22, 16, 0.85)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 18,
+    padding: 20,
+    gap: 12,
+  },
+  specRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.04)',
+  },
+  specKey: {
+    color: '#849E93',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  specVal: {
+    color: '#E2EFE9',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  specValHighlight: {
+    color: '#B7FF56',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  versionFooter: {
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  versionFooterText: {
+    color: '#5C746B',
+    fontSize: 11,
+    fontWeight: '600',
+  },
 });
-/* Legacy duplicate landing page retained temporarily as reference during conflict resolution.
-import { Platform,Pressable,ScrollView,StyleSheet,Text,View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-const benefits=[{icon:'scan-outline' as const,title:'Understands the scene',text:'Identifies objects, obstacles, and the details that matter nearby.'},{icon:'volume-high-outline' as const,title:'Speaks with clarity',text:'Describes what matters without overwhelming the listener.'},{icon:'shield-checkmark-outline' as const,title:'Privacy first',text:'Fast tasks run on-device; complex requests go to your DGX Spark.'}];
-export default function Landing(){return <SafeAreaView style={s.safe}><ScrollView contentContainerStyle={s.page}>
-<View style={s.nav}><View style={s.brandMark}><Ionicons name="eye" size={20} color="#07110F"/></View><Text style={s.brand}>GuideLens</Text><View style={s.pill}><View style={s.dot}/><Text style={s.pillText}>MVP · LIVE</Text></View></View>
-<View style={s.hero}><View style={s.eyebrow}><Ionicons name="sparkles" size={14} color="#B7FF56"/><Text style={s.eyebrowText}>SFBU × NVIDIA DGX SPARK 2026</Text></View><Text style={s.title}>The world becomes{Platform.OS==='web'?'\n':' '}audible.</Text><Text style={s.subtitle}>An AI vision companion that sees through your camera and calmly describes the world around you.</Text><View style={s.actions}><Link href="/camera" asChild><Pressable style={s.primary}><Ionicons name="camera" size={21} color="#07110F"/><Text style={s.primaryText}>Try the live demo</Text></Pressable></Link><Pressable onPress={()=>Platform.OS==='web'&&window.open('https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026','_blank')} style={s.secondary}><Ionicons name="logo-github" size={20} color="#E9F5EF"/><Text style={s.secondaryText}>GitHub</Text></Pressable></View></View>
-<View style={s.preview}><View style={s.previewGlow}/><View style={s.previewTop}><Text style={s.previewLabel}>GUIDELENS CAMERA</Text><View style={s.live}><View style={s.liveDot}/><Text style={s.liveText}>LIVE</Text></View></View><View style={s.sceneIcon}><Ionicons name="navigate" size={38} color="#B7FF56"/></View><Text style={s.sceneTitle}>Clear path ahead</Text><Text style={s.sceneText}>Door 13 feet ahead. Chair to your right.</Text><View style={s.wave}>{[12,22,34,18,40,28,16,32,20,10].map((h,i)=><View key={i} style={[s.bar,{height:h}]}/>)}</View></View>
-<Text style={s.sectionKicker}>ONE IDEA · THREE LAYERS OF ASSISTANCE</Text><View style={s.cards}>{benefits.map(b=><View style={s.card} key={b.title}><View style={s.cardIcon}><Ionicons name={b.icon} size={24} color="#B7FF56"/></View><Text style={s.cardTitle}>{b.title}</Text><Text style={s.cardText}>{b.text}</Text></View>)}</View>
-<View style={s.how}><Text style={s.howTitle}>From camera to voice in a moment.</Text><View style={s.steps}>{['Camera','AI vision','DGX Spark','Speech'].map((x,i)=><View key={x} style={s.step}><Text style={s.stepNo}>0{i+1}</Text><Text style={s.stepText}>{x}</Text>{i<3&&<Ionicons style={s.arrow} name="arrow-forward" size={18} color="#4B6259"/>}</View>)}</View><Text style={s.disclaimer}>This hackathon MVP uses simulated AI responses. It is not a replacement for a white cane, guide dog, orientation training, or other mobility aids.</Text></View><Text style={s.footer}>Built with care in San Francisco · SFBU Hackathon 2026</Text>
-</ScrollView></SafeAreaView>}
-const s=StyleSheet.create({safe:{flex:1,backgroundColor:'#07110F'},page:{width:'100%',maxWidth:1120,alignSelf:'center',paddingHorizontal:22,paddingBottom:42},nav:{height:76,flexDirection:'row',alignItems:'center'},brandMark:{width:34,height:34,borderRadius:11,backgroundColor:'#B7FF56',alignItems:'center',justifyContent:'center'},brand:{color:'#F2FAF6',fontSize:19,fontWeight:'800',marginLeft:10},pill:{marginLeft:'auto',flexDirection:'row',alignItems:'center',borderWidth:1,borderColor:'#254139',borderRadius:99,paddingHorizontal:11,paddingVertical:7},dot:{width:6,height:6,borderRadius:3,backgroundColor:'#B7FF56',marginRight:7},pillText:{color:'#A7BDB4',fontSize:10,fontWeight:'800',letterSpacing:1.2},hero:{paddingTop:70,paddingBottom:54,maxWidth:770},eyebrow:{flexDirection:'row',alignItems:'center',gap:8},eyebrowText:{color:'#B7FF56',fontSize:11,fontWeight:'800',letterSpacing:1.7},title:{color:'#F5FBF7',fontSize:Platform.OS==='web'?72:50,lineHeight:Platform.OS==='web'?75:53,fontWeight:'800',letterSpacing:-3,marginTop:20},subtitle:{color:'#A7B8B1',fontSize:19,lineHeight:29,maxWidth:620,marginTop:22},actions:{flexDirection:'row',gap:12,marginTop:34,flexWrap:'wrap'},primary:{backgroundColor:'#B7FF56',borderRadius:14,paddingHorizontal:20,paddingVertical:15,flexDirection:'row',gap:10,alignItems:'center'},primaryText:{fontWeight:'800',fontSize:15,color:'#07110F'},secondary:{borderWidth:1,borderColor:'#31463F',borderRadius:14,paddingHorizontal:20,paddingVertical:15,flexDirection:'row',gap:9,alignItems:'center'},secondaryText:{color:'#E9F5EF',fontWeight:'700'},preview:{overflow:'hidden',minHeight:310,borderRadius:26,borderWidth:1,borderColor:'#29443B',backgroundColor:'#0C1B17',padding:24,alignItems:'center',justifyContent:'center'},previewGlow:{position:'absolute',width:430,height:430,borderRadius:215,backgroundColor:'#173D2D',opacity:.7},previewTop:{position:'absolute',top:20,left:22,right:22,flexDirection:'row',justifyContent:'space-between'},previewLabel:{color:'#668077',fontSize:10,fontWeight:'800',letterSpacing:1.4},live:{flexDirection:'row',alignItems:'center',gap:6},liveDot:{width:6,height:6,borderRadius:3,backgroundColor:'#FF735D'},liveText:{color:'#D7E5DF',fontSize:9,fontWeight:'800'},sceneIcon:{width:76,height:76,borderRadius:38,backgroundColor:'#19382C',alignItems:'center',justifyContent:'center'},sceneTitle:{color:'#F3FAF6',fontSize:25,fontWeight:'800',marginTop:18,textAlign:'center'},sceneText:{color:'#91A79E',fontSize:15,marginTop:7},wave:{flexDirection:'row',alignItems:'center',gap:5,height:42,marginTop:20},bar:{width:4,borderRadius:4,backgroundColor:'#B7FF56'},sectionKicker:{color:'#688078',fontSize:11,fontWeight:'800',letterSpacing:1.8,marginTop:70,marginBottom:18},cards:{flexDirection:Platform.OS==='web'?'row':'column',gap:14},card:{flex:1,borderWidth:1,borderColor:'#203A31',backgroundColor:'#0A1714',borderRadius:20,padding:22,minHeight:180},cardIcon:{width:46,height:46,borderRadius:14,backgroundColor:'#142B23',alignItems:'center',justifyContent:'center'},cardTitle:{color:'#F1F8F4',fontSize:18,fontWeight:'800',marginTop:20},cardText:{color:'#8FA49C',fontSize:14,lineHeight:21,marginTop:8},how:{marginTop:70,borderTopWidth:1,borderColor:'#1F3730',paddingTop:50},howTitle:{color:'#EFF8F3',fontSize:32,fontWeight:'800'},steps:{flexDirection:'row',flexWrap:'wrap',marginTop:34,gap:22},step:{minWidth:120,flexDirection:'row',alignItems:'center',gap:9},stepNo:{color:'#B7FF56',fontWeight:'800',fontSize:11},stepText:{color:'#DCEAE4',fontWeight:'700'},arrow:{marginLeft:'auto'},disclaimer:{color:'#60746C',fontSize:12,lineHeight:18,maxWidth:650,marginTop:40},footer:{color:'#4E655C',fontSize:11,textAlign:'center',marginTop:70}});
-*/
