@@ -1,4 +1,5 @@
 import type { ASLSessionState } from '../src/aslClassifier';
+import type { ASLWordState } from '../src/aslWordClassifier.web';
 
 export type SignContextState = {
   frameCount: number;
@@ -7,6 +8,7 @@ export type SignContextState = {
   ready: boolean;
   error?: string;
   aslState?: ASLSessionState;
+  wordState?: ASLWordState;
 };
 
 export type HandTrackerProps = {

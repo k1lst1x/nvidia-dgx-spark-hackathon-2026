@@ -27,6 +27,22 @@ type AssistFrame = {
   boxes: DetectionBox[];
 };
 
+function formatAslWord(word: string): string {
+  if (!word) return '';
+  const special: Record<string, string> = {
+    thankyou: 'Thank you',
+    hello: 'Hello',
+    please: 'Please',
+    yes: 'Yes',
+    no: 'No',
+    water: 'Water',
+    alligator: 'Alligator',
+    airplane: 'Airplane',
+    fireman: 'Firefighter',
+  };
+  return special[word.toLowerCase()] || word.charAt(0).toUpperCase() + word.slice(1);
+}
+
 export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<AssistMode>('scene');
@@ -40,6 +56,7 @@ export default function CameraScreen() {
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
   const lastOfflinePhrase = useRef('');
+  const lastOfflineWordPhrase = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -89,9 +106,24 @@ export default function CameraScreen() {
   const currentLetter = aslState?.currentLetter || '';
   const currentConfidence = aslState?.currentConfidence || 0;
   const offlinePhrase = resolveOfflinePhrase(spelledText);
+  const wordState = signContext.wordState;
+  const recognizedWordPhrase = wordState?.phrase || '';
+  const recognizedWord = wordState?.currentWord || '';
+
+  const formattedWordPhrase = recognizedWordPhrase
+    ? recognizedWordPhrase.split(' ').map(formatAslWord).join(' ')
+    : '';
+
+  const top3Summary = wordState?.top3 && wordState.top3.length > 0 && wordState.top3[0].confidence >= 0.20
+    ? wordState.top3.map((p) => `${formatAslWord(p.label)} ${Math.round(p.confidence * 100)}%`).join(' · ')
+    : '';
 
   const browserSignHeading = signContext.error
     ? 'Hand tracking needs attention.'
+    : formattedWordPhrase
+      ? formattedWordPhrase
+      : recognizedWord && (wordState?.currentConfidence || 0) >= 0.30
+        ? `Sign: ${formatAslWord(recognizedWord)} · ${Math.round((wordState?.currentConfidence || 0) * 100)}%`
     : offlinePhrase
       ? offlinePhrase.speech
       : spelledText
@@ -102,6 +134,12 @@ export default function CameraScreen() {
 
   const browserSignDetail = signContext.error
     ? signContext.error
+    : formattedWordPhrase
+      ? 'ASL dynamic sign phrase · Brief pause between signs'
+      : top3Summary
+        ? `Detected sign candidate: ${top3Summary}`
+      : recognizedWord
+        ? `Analyzing motion · ${Math.round((wordState?.bufferProgress || 0) * 100)}% temporal buffer`
     : offlinePhrase
       ? `Offline phrase · ${offlinePhrase.trigger} · no network required`
       : spelledText
@@ -109,8 +147,8 @@ export default function CameraScreen() {
       : currentLetter
         ? `Hold steady to lock "${currentLetter}" into word buffer`
         : signContext.handCount > 0
-          ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} tracked · Show ASL alphabet sign (A–Y)`
-          : 'Hold your hand in front of camera to fingerspell';
+          ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} tracked · Dynamic signs (Hello, Yes, No, Please, Thank you) or Fingerspell (A–Z)`
+          : 'Hold hand in front of camera to sign or fingerspell';
 
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
@@ -200,6 +238,14 @@ export default function CameraScreen() {
       speak(offlinePhrase.speech);
     }
   }, [offlinePhrase?.trigger]);
+
+  useEffect(() => {
+    if (!recognizedWordPhrase || recognizedWordPhrase === lastOfflineWordPhrase.current) return;
+    const previous = lastOfflineWordPhrase.current;
+    lastOfflineWordPhrase.current = recognizedWordPhrase;
+    const addition = recognizedWordPhrase.slice(previous.length).trim();
+    if (addition) speak(formatAslWord(addition));
+  }, [recognizedWordPhrase]);
 
   if (!permission) return <View style={c.fallback} />;
 
@@ -314,11 +360,11 @@ export default function CameraScreen() {
           {usesBrowserHandTracking ? (
             <View style={[c.aslWordCard, c.aslWordCardPanel]}>
               <View style={c.aslWordHeader}>
-                <Text style={c.aslWordLabel}>WORD BUFFER</Text>
+                <Text style={c.aslWordLabel}>OFFLINE TRANSCRIPT</Text>
                 <Pressable
-                  onPress={() => speak(offlinePhrase?.speech || spelledText)}
-                  disabled={!spelledText}
-                  style={[c.aslSpeakMiniBtn, !spelledText && c.aslSpeakMiniBtnDisabled]}
+                  onPress={() => speak(recognizedWordPhrase || offlinePhrase?.speech || spelledText)}
+                  disabled={!recognizedWordPhrase && !spelledText}
+                  style={[c.aslSpeakMiniBtn, !recognizedWordPhrase && !spelledText && c.aslSpeakMiniBtnDisabled]}
                   accessibilityLabel="Speak word buffer"
                 >
                   <Ionicons name="volume-high" size={15} color="#07110F" />
@@ -326,7 +372,7 @@ export default function CameraScreen() {
                 </Pressable>
               </View>
               <Text style={[c.aslWordText, !spelledText && c.aslWordTextEmpty]}>
-                {spelledText || 'Start signing'}
+                {recognizedWordPhrase || spelledText || 'Start signing'}
                 <Text style={c.aslCursor}>_</Text>
               </Text>
               <View style={c.aslWordActions}>

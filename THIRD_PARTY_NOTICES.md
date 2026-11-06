@@ -19,3 +19,22 @@ GuideLens uses Microsoft ONNX Runtime for on-device inference on iOS and Android
 
 - Source: https://github.com/microsoft/onnxruntime
 - License: MIT
+
+## ASL isolated-word Transformer
+
+GuideLens includes an ONNX conversion of the 250-class landmark Transformer
+checkpoint published by AWAINIA Aymen:
+
+- Source: https://github.com/aymenwnia/ASL-translator
+- Original checkpoint: `models/sign_transformer_best.pth`
+- ONNX SHA-256: `0b174222850924623cbe6c93dc4232dcdd36155181c4638031f4d41ee1248a0f`
+- Code and checkpoint repository license: MIT
+- Training data: PopSign ASL v1.0 / Google Isolated Sign Language Recognition,
+  CC BY 4.0 and subject to the competition rules
+
+Copyright (c) 2026 AWAINIA Aymen.
+
+This model recognizes isolated signs from a fixed 250-word vocabulary. The
+dataset authors state that the dataset is not intended as a general ASL-to-English
+translation or natural-language interface. GuideLens therefore labels this
+feature experimental and does not claim continuous-ASL translation accuracy.

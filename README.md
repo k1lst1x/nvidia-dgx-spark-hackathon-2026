@@ -103,7 +103,7 @@ uv pip install --python /private/tmp/asl-fingerspelling-venv/bin/python -r apps/
   --output apps/api/models/asl_fingerspelling_landmarks.json
 ```
 
-The live sign feature samples overlapping temporal windows, preserves an accepted transcript across windows, suppresses uncertain/repeated segments, and speaks only confident phrase boundaries. Desktop/web additionally tracks both hands, upper-body pose, and facial cues locally. Its offline fingerspelling layer can expand a small, explicit phrasebook (`HELP`, `STOP`, `WATER`, `BATHROOM`, and similar words) without a server, then automatically adds cloud phrase decoding when a backend is configured. Android samples camera windows for the backend decoder; native offline hand landmarks remain future work. This remains an experimental communication aid, not a validated replacement for a trained continuous-ASL interpreter.
+The live sign feature samples overlapping temporal windows, preserves an accepted transcript across windows, suppresses uncertain/repeated segments, and speaks only confident phrase boundaries. Desktop/web tracks both hands, 76 facial landmarks, and 12 upper-body pose landmarks locally. A bundled ONNX Transformer recognizes isolated signs from the 250-word PopSign vocabulary, while the static fingerspelling model handles letters and explicit emergency phrase shortcuts. Cloud phrase decoding is added automatically when a backend is configured. Android samples camera windows for the backend decoder; native offline hand landmarks remain future work. These are isolated-word and experimental phrase features, not a validated continuous-ASL interpreter.
 
 ## On-device detection
 

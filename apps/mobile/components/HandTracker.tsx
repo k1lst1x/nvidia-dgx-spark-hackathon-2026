@@ -1,6 +1,7 @@
 // TypeScript resolves this shared module while Metro selects HandTracker.web.tsx
 // or HandTracker.native.tsx at runtime.
 import type { ASLSessionState } from '../src/aslClassifier';
+import type { ASLWordState } from '../src/aslWordClassifier.web';
 
 export type SignContextState = {
   frameCount: number;
@@ -9,6 +10,7 @@ export type SignContextState = {
   ready: boolean;
   error?: string;
   aslState?: ASLSessionState;
+  wordState?: ASLWordState;
 };
 
 export type HandTrackerProps = {

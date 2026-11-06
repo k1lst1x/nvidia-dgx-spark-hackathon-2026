@@ -1,5 +1,6 @@
 import { CSSProperties, useEffect, useRef } from 'react';
 import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
+import { ASLWordEngine, type ASLWordState } from '../src/aslWordClassifier.web';
 
 const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
@@ -69,6 +70,7 @@ export type SignContextState = {
   aslState?: ASLSessionState;
   faceTracked?: boolean;
   poseTracked?: boolean;
+  wordState?: ASLWordState;
 };
 
 type HandTrackerProps = {
@@ -136,9 +138,19 @@ function getVisionRuntime(): Promise<VisionRuntime> {
   return visionRuntimePromise;
 }
 
-function flattenLandmarks(points: Landmark[] | null, expectedCount: number) {
-  const output = Array<number>(expectedCount * 3).fill(0);
-  points?.slice(0, expectedCount).forEach((point, index) => {
+const FACE_INDICES = [
+  61,185,40,39,37,0,267,269,270,409,291,146,91,181,84,17,314,405,321,375,
+  78,191,80,81,82,13,312,311,310,415,308,95,88,178,87,14,317,402,318,324,
+  1,2,98,327,4,5,195,197,33,7,163,144,145,153,154,155,133,
+  362,382,381,380,374,373,390,249,263,46,53,52,65,55,276,283,282,295,285,
+];
+const POSE_INDICES = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27];
+
+function flattenLandmarks(points: Landmark[] | null, indices: number[]) {
+  const output = Array<number>(indices.length * 3).fill(0);
+  indices.forEach((sourceIndex, index) => {
+    const point = points?.[sourceIndex];
+    if (!point) return;
     output[index * 3] = point.x;
     output[index * 3 + 1] = point.y;
     output[index * 3 + 2] = point.z ?? 0;
@@ -164,24 +176,15 @@ function createMultimodalFrame(
 
   const facePoints = face?.faceLandmarks[0] ?? null;
   const posePoints = pose?.landmarks[0] ?? null;
-  const blendshapes = Array<number>(52).fill(0);
-  face?.faceBlendshapes?.[0]?.categories
-    .slice()
-    .sort((a, b) => a.categoryName.localeCompare(b.categoryName))
-    .slice(0, 52)
-    .forEach((shape, index) => { blendshapes[index] = shape.score; });
+  const allHandIndices = Array.from({ length: 21 }, (_, index) => index);
 
-  // Stable 281-value feature vector: two hands, upper-body pose, facial cues,
-  // and presence masks. Missing trackers are zero-filled rather than shifting data.
+  // Exact 390-value PopSign training layout: left hand, right hand,
+  // 76 selected face landmarks, then 12 upper-body pose landmarks.
   return [
-    ...flattenLandmarks(left, 21),
-    ...flattenLandmarks(right, 21),
-    ...flattenLandmarks(posePoints, 33),
-    ...blendshapes,
-    left ? 1 : 0,
-    right ? 1 : 0,
-    facePoints ? 1 : 0,
-    posePoints ? 1 : 0,
+    ...flattenLandmarks(left, allHandIndices),
+    ...flattenLandmarks(right, allHandIndices),
+    ...flattenLandmarks(facePoints, FACE_INDICES),
+    ...flattenLandmarks(posePoints, POSE_INDICES),
   ];
 }
 
@@ -228,6 +231,7 @@ export default function HandTracker({
   const onContextChangeRef = useRef(onContextChange);
   const onContextCapturedRef = useRef(onContextCaptured);
   const onAslStateChangeRef = useRef(onAslStateChange);
+  const latestWordStateRef = useRef<ASLWordState | undefined>(undefined);
 
   // Initialize ASL Gesture Engine for zero-latency on-device processing
   const aslEngine = useRef<ASLGestureEngine>(
@@ -239,6 +243,11 @@ export default function HandTracker({
       },
     }),
   ).current;
+  const wordEngine = useRef<ASLWordEngine>(
+    new ASLWordEngine((state) => {
+      latestWordStateRef.current = state;
+    }),
+  ).current;
 
   // Expose controller methods to parent via ref
   useEffect(() => {
@@ -246,10 +255,13 @@ export default function HandTracker({
       aslEngineRef.current = {
         backspace: () => aslEngine.backspace(),
         addSpace: () => aslEngine.addSpace(),
-        clearText: () => aslEngine.clearText(),
+        clearText: () => {
+          aslEngine.clearText();
+          wordEngine.clear();
+        },
       };
     }
-  }, [aslEngineRef, aslEngine]);
+  }, [aslEngineRef, aslEngine, wordEngine]);
 
   useEffect(() => {
     onContextChangeRef.current = onContextChange;
@@ -289,8 +301,10 @@ export default function HandTracker({
         aslState,
         faceTracked,
         poseTracked,
+        wordState: latestWordStateRef.current,
       };
-      const key = `${frameCount}:${handCount}:${error ?? ''}:${faceTracked}:${poseTracked}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}`;
+      const wordState = latestWordStateRef.current;
+      const key = `${frameCount}:${handCount}:${error ?? ''}:${faceTracked}:${poseTracked}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}:${wordState?.currentWord ?? ''}:${wordState?.phrase ?? ''}:${Math.round((wordState?.currentConfidence ?? 0) * 20)}`;
       if (key !== lastContextState) {
         lastContextState = key;
         onContextChangeRef.current?.(next);
@@ -361,6 +375,7 @@ export default function HandTracker({
               if (smoothed.length === 0) {
                 smoothedHandsRef.current = [];
                 currentAslState = aslEngine.processFrame(undefined);
+                wordEngine.processFrame(undefined);
               } else {
                 // Perform instant on-device ASL classification (<0.2ms)
                 const primaryHand = smoothed[0];
@@ -371,8 +386,11 @@ export default function HandTracker({
 
                 currentAslState = aslEngine.processFrame(primaryHand, handednessCategory);
 
+                const handednessesArray = results.handedness ?? results.handednesses;
+                const multimodalFrame = createMultimodalFrame(smoothed, handednessesArray, face, pose);
+                wordEngine.processFrame(multimodalFrame, smoothed);
                 const sequence = sequenceRef.current;
-                sequence.push(createMultimodalFrame(smoothed, results.handednesses, face, pose));
+                sequence.push(multimodalFrame);
                 if (sequence.length > maxContextFrames) sequence.shift();
                 totalTrackedFramesRef.current += 1;
                 if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {
@@ -481,7 +499,7 @@ export default function HandTracker({
       faceDetector?.close();
       poseDetector?.close();
     };
-  }, [aslEngine]);
+  }, [aslEngine, wordEngine]);
 
   return (
     <div aria-label="Live sign language hand tracking" style={styles.container}>
