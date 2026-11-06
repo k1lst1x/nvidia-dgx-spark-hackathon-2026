@@ -119,7 +119,7 @@ export default function AppHome() {
             <View style={s.brandTitleRow}>
               <Text style={s.brandTitle}>GuideLens</Text>
               <View style={s.versionChip}>
-                <Text style={s.versionText}>v0.1.3</Text>
+                <Text style={s.versionText}>v0.1.4</Text>
               </View>
             </View>
             <Text style={s.brandSubtitle}>Spatial Perception & Sign Intelligence</Text>

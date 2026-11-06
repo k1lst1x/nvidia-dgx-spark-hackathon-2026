@@ -104,7 +104,11 @@ class KinematicGestureRecognizer {
     timestamp: number;
   }[] = [];
 
-  process(primaryHand: LandmarkPoint[] | undefined): ASLWordPrediction | null {
+  process(
+    primaryHand: LandmarkPoint[] | undefined,
+    face?: LandmarkPoint[],
+    pose?: LandmarkPoint[],
+  ): ASLWordPrediction | null {
     if (!primaryHand || primaryHand.length < 21) {
       if (this.history.length > 0) this.history.shift();
       return null;
@@ -118,6 +122,11 @@ class KinematicGestureRecognizer {
     const middleTip = primaryHand[12];
     const ringTip = primaryHand[16];
     const pinkyTip = primaryHand[20];
+
+    // Body anchors for relative scale & position
+    const nose = face?.[1] || pose?.[0];
+    const chin = face?.[152] || (nose ? { x: nose.x, y: nose.y + 0.12 } : undefined);
+    const shoulderY = pose && pose.length > 12 ? (pose[11].y + pose[12].y) / 2 : undefined;
 
     // Finger extensions relative to wrist / MCP
     const indexExt = dist2d(indexTip, wrist) > dist2d(indexPip, wrist) * 1.15;
@@ -149,25 +158,24 @@ class KinematicGestureRecognizer {
 
     const n = this.history.length;
     const recent = this.history[n - 1];
-    const older = this.history[Math.max(0, n - 12)];
 
     // 1. "YES" (да) - S-fist nodding vertically (up and down)
     const fistFrames = this.history.slice(-12).filter((h) => h.isFist).length;
-    if (fistFrames >= 8) {
+    if (fistFrames >= 6) {
       const yValues = this.history.slice(-16).map((h) => h.wrist.y);
       let directionChanges = 0;
       let lastDir = 0;
       for (let i = 1; i < yValues.length; i++) {
         const diff = yValues[i] - yValues[i - 1];
-        if (Math.abs(diff) > 0.005) {
+        if (Math.abs(diff) > 0.004) {
           const dir = Math.sign(diff);
           if (lastDir !== 0 && dir !== lastDir) directionChanges++;
           lastDir = dir;
         }
       }
       const ySpan = Math.max(...yValues) - Math.min(...yValues);
-      if (directionChanges >= 2 && ySpan >= 0.025) {
-        return { label: 'yes', confidence: 0.92 };
+      if (directionChanges >= 2 && ySpan >= 0.02) {
+        return { label: 'yes', confidence: 0.94 };
       }
     }
 
@@ -175,43 +183,49 @@ class KinematicGestureRecognizer {
     if (!recent.isFist && !recent.isOpen) {
       const pastPinch = Math.max(...this.history.slice(-14, -4).map((h) => h.pinchDist));
       const currentPinch = Math.min(...this.history.slice(-3).map((h) => h.pinchDist));
-      if (pastPinch > 0.075 && currentPinch < 0.045 && (pastPinch - currentPinch) > 0.035) {
-        return { label: 'no', confidence: 0.94 };
+      if (pastPinch > 0.07 && currentPinch < 0.045 && (pastPinch - currentPinch) > 0.028) {
+        return { label: 'no', confidence: 0.95 };
       }
     }
 
     // 3. "HELLO" (привет) - Open flat hand at head/temple level moving/waving
-    if (recent.isOpen && recent.wrist.y < 0.46) {
+    const isAtHeadLevel = nose ? recent.wrist.y <= nose.y + 0.12 : recent.wrist.y < 0.48;
+    if (recent.isOpen && isAtHeadLevel) {
       const xValues = this.history.slice(-16).map((h) => h.wrist.x);
       let xChanges = 0;
       let lastXDir = 0;
       for (let i = 1; i < xValues.length; i++) {
         const diff = xValues[i] - xValues[i - 1];
-        if (Math.abs(diff) > 0.005) {
+        if (Math.abs(diff) > 0.004) {
           const dir = Math.sign(diff);
           if (lastXDir !== 0 && dir !== lastXDir) xChanges++;
           lastXDir = dir;
         }
       }
       const xSpan = Math.max(...xValues) - Math.min(...xValues);
-      if ((xChanges >= 2 && xSpan >= 0.035) || xSpan >= 0.065) {
-        return { label: 'hello', confidence: 0.89 };
+      if ((xChanges >= 2 && xSpan >= 0.03) || xSpan >= 0.055) {
+        return { label: 'hello', confidence: 0.92 };
       }
     }
 
     // 4. "THANK YOU" (спасибо) - Flat hand starts at chin/mouth and moves forward/down
     if (recent.isOpen) {
-      const pastHighHand = this.history.slice(-15, -6).find((h) => h.indexTip.y < 0.42);
+      const isNearChin = (p: LandmarkPoint) => chin ? dist2d(p, chin) < 0.22 : p.y < 0.45;
+      const pastHighHand = this.history.slice(-15, -5).find((h) => isNearChin(h.indexTip) || isNearChin(h.wrist));
       const dy = recent.wrist.y - (pastHighHand?.wrist.y ?? recent.wrist.y);
-      if (pastHighHand && dy > 0.05) {
-        return { label: 'thankyou', confidence: 0.91 };
+      if (pastHighHand && dy > 0.04) {
+        return { label: 'thankyou', confidence: 0.93 };
       }
     }
 
     // 5. "PLEASE" (плиз) - Flat hand on chest moving in a circular path
-    if (recent.isOpen && recent.wrist.y >= 0.40 && recent.wrist.y <= 0.75) {
+    const isAtChestLevel = shoulderY
+      ? recent.wrist.y >= shoulderY - 0.05 && recent.wrist.y <= shoulderY + 0.32
+      : recent.wrist.y >= 0.38 && recent.wrist.y <= 0.76;
+
+    if (recent.isOpen && isAtChestLevel) {
       const points = this.history.slice(-18);
-      if (points.length >= 12) {
+      if (points.length >= 10) {
         const avgX = points.reduce((acc, p) => acc + p.wrist.x, 0) / points.length;
         const avgY = points.reduce((acc, p) => acc + p.wrist.y, 0) / points.length;
         let totalAngle = 0;
@@ -227,18 +241,19 @@ class KinematicGestureRecognizer {
           lastAngle = ang;
         }
         const radius = Math.hypot(recent.wrist.x - avgX, recent.wrist.y - avgY);
-        if (Math.abs(totalAngle) > 3.2 && radius > 0.02) {
-          return { label: 'please', confidence: 0.87 };
+        if (Math.abs(totalAngle) > 2.8 && radius > 0.015) {
+          return { label: 'please', confidence: 0.90 };
         }
       }
     }
 
     // 6. "WATER" (вода) - W-hand tapping near chin level
-    if (recent.isWHand && recent.indexTip.y < 0.50) {
+    const isNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.20 : recent.indexTip.y < 0.50;
+    if (recent.isWHand && isNearMouth) {
       const yValues = this.history.slice(-14).map((h) => h.indexTip.y);
       const ySpan = Math.max(...yValues) - Math.min(...yValues);
-      if (ySpan > 0.02) {
-        return { label: 'water', confidence: 0.88 };
+      if (ySpan > 0.018) {
+        return { label: 'water', confidence: 0.91 };
       }
     }
 
@@ -266,9 +281,13 @@ export class ASLWordEngine {
 
   constructor(private readonly onState: (state: ASLWordState) => void) {}
 
+  private lastHandPos?: LandmarkPoint;
+
   processFrame(
     features?: number[],
     rawHands?: LandmarkPoint[][],
+    face?: LandmarkPoint[],
+    pose?: LandmarkPoint[],
   ) {
     if (!features) {
       this.handsAbsentFrames += 1;
@@ -277,6 +296,7 @@ export class ASLWordEngine {
         this.candidate = '';
         this.stablePredictions = 0;
         this.kinematic.clear();
+        this.lastHandPos = undefined;
       }
       this.emit('', 0, []);
       return;
@@ -284,7 +304,7 @@ export class ASLWordEngine {
 
     // 1. Check kinematic motion for essential conversational gestures first
     const primaryHand = rawHands?.[0];
-    const kinematicMatch = this.kinematic.process(primaryHand);
+    const kinematicMatch = this.kinematic.process(primaryHand, face, pose);
     const now = performance.now();
 
     if (kinematicMatch && kinematicMatch.confidence >= 0.80) {
@@ -303,7 +323,21 @@ export class ASLWordEngine {
       return;
     }
 
-    // 2. Feed into the 250-class Transformer sequence buffer
+    // 2. Motion Energy Gate (Sign Activity Detection)
+    // Avoid running Transformer inference when hand is idle or resting on a table
+    if (primaryHand && primaryHand.length > 0) {
+      const currentWrist = primaryHand[0];
+      const motion = this.lastHandPos ? dist2d(currentWrist, this.lastHandPos) : 0.05;
+      this.lastHandPos = currentWrist;
+
+      // When nearly static, slow down sequence filling to prevent false positives
+      if (motion < 0.003 && this.frames.length >= 16) {
+        this.emit(this.candidate, 0, []);
+        return;
+      }
+    }
+
+    // 3. Feed into the 250-class Transformer sequence buffer
     if (features.length !== config.input_dim) return;
     this.handsAbsentFrames = 0;
     this.frames.push(features);

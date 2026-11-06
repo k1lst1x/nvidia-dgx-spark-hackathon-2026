@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
-import { offlinePhraseCount, resolveOfflinePhrase } from '../src/offlinePhrasebook';
+import { offlinePhraseCount, resolveOfflinePhrase, predictOfflineCompletions } from '../src/offlinePhrasebook';
 import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
@@ -87,7 +87,7 @@ export default function CameraScreen() {
     return counts;
   }, {});
   const localSummary = detections.length
-    ? `Detected ${Object.entries(objectCounts).slice(0, 3).map(([label, count]) => count > 1 ? `${count} ${label}s` : label).join(', ')}`
+    ? `Detected ${detections.slice(0, 3).map((item) => `${item.label}${item.direction ? ` ${item.direction}` : ''} (~${item.distance_m ? item.distance_m.toFixed(1) : '1.0'}m)`).join(', ')}`
     : 'Looking for nearby objects…';
   const serverBoxes = (vision?.objects || [])
     .filter((item) => [item.x, item.y, item.width, item.height].every((value) => typeof value === 'number'))
@@ -100,7 +100,7 @@ export default function CameraScreen() {
     }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
-    detail: vision?.speech || 'Object detection is running privately on this device.',
+    detail: vision?.speech || 'Real-time spatial tracker running privately on this device.',
     speech: vision?.speech || localSummary,
     icon: mode === 'sign' ? 'hand-left' : vision?.urgency === 'high' ? 'warning' : 'navigate',
     boxes: (detections.length ? detections.map((item) => ({
@@ -108,7 +108,7 @@ export default function CameraScreen() {
       t: `${Math.round(item.y * 100)}%` as `${number}%`,
       w: `${Math.round(item.width * 100)}%` as `${number}%`,
       h: `${Math.round(item.height * 100)}%` as `${number}%`,
-      label: `${item.label} · ${Math.round(item.confidence * 100)}%`,
+      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ''}${item.direction ? ` · ${item.direction}` : ''}`,
     })) : serverBoxes),
   } : fallback;
 
@@ -117,6 +117,8 @@ export default function CameraScreen() {
   const currentLetter = aslState?.currentLetter || '';
   const currentConfidence = aslState?.currentConfidence || 0;
   const offlinePhrase = resolveOfflinePhrase(spelledText);
+  const currentFingerspelledWord = spelledText.trim().split(/\s+/).at(-1) || '';
+  const phraseSuggestions = predictOfflineCompletions(currentFingerspelledWord);
   const wordState = signContext.wordState;
   const recognizedWordPhrase = wordState?.phrase || '';
   const recognizedWord = wordState?.currentWord || '';
@@ -400,6 +402,23 @@ export default function CameraScreen() {
                 {recognizedWordPhrase || spelledText || 'Start signing'}
                 <Text style={c.aslCursor}>_</Text>
               </Text>
+
+              {phraseSuggestions.length > 0 && (
+                <View style={c.suggestionsRow}>
+                  {phraseSuggestions.map((sug) => (
+                    <Pressable
+                      key={sug.trigger}
+                      onPress={() => speak(sug.speech)}
+                      style={c.suggestionChip}
+                      accessibilityLabel={`Suggest word ${sug.trigger}`}
+                    >
+                      <Ionicons name="sparkles" size={11} color="#07110F" />
+                      <Text style={c.suggestionChipText}>{sug.trigger}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+
               <View style={c.aslWordActions}>
                 <Pressable onPress={() => aslEngineRef.current?.addSpace()} style={c.aslActionBtn} accessibilityLabel="Add space">
                   <Ionicons name="return-down-forward-outline" size={16} color="#DDE9E4" />
@@ -695,4 +714,24 @@ const c = StyleSheet.create({
     fontWeight: '700',
   },
   aslActionClearText: { color: '#FF826F' },
+  suggestionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginVertical: 6,
+  },
+  suggestionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#C8FF72',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  suggestionChipText: {
+    color: '#07110F',
+    fontSize: 11,
+    fontWeight: '800',
+  },
 });

@@ -5,6 +5,9 @@ export type LocalDetection = {
   y: number;
   width: number;
   height: number;
+  distance_m?: number;
+  direction?: 'left' | 'ahead' | 'right';
+  id?: number;
 };
 
 export type DetectionResult = {

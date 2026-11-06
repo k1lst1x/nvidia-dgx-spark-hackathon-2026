@@ -488,7 +488,7 @@ export default function HandTracker({
 
                 const handednessesArray = results.handedness ?? results.handednesses;
                 const multimodalFrame = createMultimodalFrame(smoothed, handednessesArray, face, pose);
-                wordEngine.processFrame(multimodalFrame, smoothed);
+                wordEngine.processFrame(multimodalFrame, smoothed, face?.faceLandmarks?.[0], pose?.landmarks?.[0]);
                 const sequence = sequenceRef.current;
                 const temporalFrame = createCtcFeatureFrame(smoothed, handednessesArray, face, pose);
                 sequence.push(temporalFrame);
