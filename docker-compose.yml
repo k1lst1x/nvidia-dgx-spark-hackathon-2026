@@ -6,8 +6,24 @@ services:
       GROQ_API_KEY: "${GROQ_API_KEY:?Set GROQ_API_KEY in your local .env}"
       GROQ_VISION_MODEL: "${GROQ_VISION_MODEL:-qwen/qwen3.8-27b}"
       CORS_ORIGINS: "http://localhost:8081"
+      # Opt in to official Ultralytics YOLO scene detections. The checkpoint is
+      # downloaded by the container on first use; see README for AGPL licensing.
+      ULTRALYTICS_YOLO_ENABLED: "${ULTRALYTICS_YOLO_ENABLED:-false}"
+      ULTRALYTICS_YOLO_MODEL: "${ULTRALYTICS_YOLO_MODEL:-yolo11n.pt}"
+      ULTRALYTICS_YOLO_DEVICE: "${ULTRALYTICS_YOLO_DEVICE:-cpu}"
+      DEPTH_ANYTHING_ENABLED: "${DEPTH_ANYTHING_ENABLED:-false}"
+      DEPTH_ANYTHING_DEVICE: "${DEPTH_ANYTHING_DEVICE:-cuda}"
+      DEPTH_ANYTHING_CHECKPOINT: "/models/depth_anything_v2_metric_hypersim_vits.pth"
+    volumes:
+      # Persist the downloaded checkpoint between container rebuilds without
+      # checking model weights into source control.
+      - ultralytics-model-cache:/root/.cache/ultralytics
+      - ./apps/api/models:/models:ro
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 3s
       retries: 3
+
+volumes:
+  ultralytics-model-cache:

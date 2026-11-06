@@ -105,6 +105,23 @@ uv pip install --python /private/tmp/asl-fingerspelling-venv/bin/python -r apps/
 
 The live sign feature samples overlapping temporal windows, preserves an accepted transcript across windows, suppresses uncertain/repeated segments, and speaks only confident phrase boundaries. Desktop/web tracks both hands, 76 facial landmarks, and 12 upper-body pose landmarks locally. A bundled ONNX Transformer recognizes isolated signs from the 250-word PopSign vocabulary, while the static fingerspelling model handles letters and explicit emergency phrase shortcuts. Cloud phrase decoding is added automatically when a backend is configured. Android samples camera windows for the backend decoder; native offline hand landmarks remain future work. These are isolated-word and experimental phrase features, not a validated continuous-ASL interpreter.
 
+### Causal temporal CTC recognizer
+
+`apps/api/training/sign_transformer.py` defines the next-stage continuous-sign recognizer: a four-layer, eight-head causal Transformer that projects each 281-value fused hand/pose/face frame into 256 dimensions and emits gloss logits through a CTC head. Its causal attention mask only exposes past and present frames, making it suitable for live decoding. The recognition model and English translation model remain separate so a decoder cannot silently invent missing signing information.
+
+Train it with a JSONL manifest of **gloss-labelled temporal sequences** (not one sentence label repeated per frame):
+
+```bash
+uv pip install --python /private/tmp/asl-fingerspelling-venv/bin/python -r apps/api/requirements-train.txt
+/private/tmp/asl-fingerspelling-venv/bin/python apps/api/training/train_sign_transformer.py \
+  --train /path/to/train_sequences.jsonl \
+  --validation /path/to/validation_sequences.jsonl
+```
+
+Each JSONL row has `features` shaped `(frames, 281)` and a `glosses` list, for example `{"features": [[...]], "glosses": ["ME", "NEED", "WATER"]}`. The provided fingerspelling archive cannot train this model because it has static letter images rather than synchronized movement, face, pose, and gloss-sequence labels.
+
+For small, privacy-preserving capture sessions, `apps/mobile/src/landmarkRecorder.web.ts` provides `SignRecorder`. It samples the live 281-feature stream at 20 FPS and downloads JSON records containing landmark frames, signer ID, verified glosses, and optional English text—never the camera video. The trainer accepts its `frames` field directly. Add controls only for an annotation workflow where a fluent signer can verify the gloss labels.
+
 ## On-device detection
 
 The native and desktop apps bundle the official Apache-2.0 YOLOX Nano ONNX model (3.5 MB). ONNX Runtime performs local detection; no object-detection frames leave the device. A compact COCO object signature triggers Groq only when objects change or when the eight-second semantic-description refresh expires. Desktop uses ONNX Runtime WebAssembly inside an Electron sandbox, so it continues detecting objects even without a configured backend.
@@ -125,6 +142,41 @@ Desktop artifacts are intentionally unsigned hackathon builds. Windows SmartScre
 The model is intentionally YOLOX Nano rather than an Ultralytics checkpoint: YOLOX is Apache-2.0 compatible with this MIT project, while current Ultralytics models require AGPL-3.0 compliance or a commercial license. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The bundled detector recognizes the 80 COCO classes and is a prototype aid, not a safety-certified navigation system. It cannot detect every curb, stair, hole, glass surface, or unusual obstacle.
+
+### Optional Ultralytics YOLO scene detector
+
+Scene Assist can additionally run an official Ultralytics YOLO checkpoint in the FastAPI service. This is opt-in: it augments the Groq scene prompt with verified labels and coordinates, and provides overlay boxes when the local detector is unavailable. It does not replace the fast bundled YOLOX detector used for offline updates.
+
+```bash
+# .env
+ULTRALYTICS_YOLO_ENABLED=true
+ULTRALYTICS_YOLO_MODEL=yolo11n.pt
+# Use 0 on a CUDA-equipped DGX host, otherwise leave cpu.
+ULTRALYTICS_YOLO_DEVICE=cpu
+docker compose up --build
+```
+
+The checkpoint downloads into the service's model cache the first time Scene Assist runs; it is not committed to this repository. Ultralytics distributes its implementation under AGPL-3.0 and offers an Enterprise license for proprietary distribution. Review the [Ultralytics license terms](https://docs.ultralytics.com/help/license/) before enabling it outside an AGPL-compatible project.
+
+### Approximate distance and approaching-object warnings
+
+Scene Assist can use the official Apache-2.0 [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) metric-depth implementation to estimate object depth and issue a conservative warning only when a matching detected box becomes both closer and larger across several frames. This is not a collision detector, distance measurement tool, or safe navigation feature.
+
+Download the official **metric Hypersim Small** checkpoint described in the repository's [metric-depth instructions](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth) and save it as:
+
+```text
+apps/api/models/depth_anything_v2_metric_hypersim_vits.pth
+```
+
+Then enable it locally:
+
+```bash
+DEPTH_ANYTHING_ENABLED=true
+DEPTH_ANYTHING_DEVICE=cuda # use cpu when CUDA is unavailable
+docker compose up --build
+```
+
+Meter values are approximate. Alerts require a sustained depth decrease plus bounding-box growth and must not be relied on for street crossing, obstacle avoidance, or any other safety-critical decision.
 
 ### Installable builds
 

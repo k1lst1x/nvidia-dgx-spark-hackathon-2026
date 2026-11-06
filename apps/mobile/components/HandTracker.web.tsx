@@ -1,11 +1,13 @@
 import { CSSProperties, useEffect, useRef } from 'react';
 import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
 import { ASLWordEngine, type ASLWordState } from '../src/aslWordClassifier.web';
+import { TEMPORAL_FEATURE_COUNT, type SignRecorder } from '../src/landmarkRecorder.web';
 
 const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const faceModelPath = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const poseModelPath = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+const holisticModelPath = 'https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/latest/holistic_landmarker.task';
 const visionModule = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs';
 const framesPerGesture = 30;
 const contextGestures = 6;
@@ -41,6 +43,17 @@ type PoseDetector = {
   close: () => void;
 };
 
+type HolisticDetector = {
+  detectForVideo: (video: HTMLVideoElement, timestamp: number) => {
+    leftHandLandmarks?: Landmark[];
+    rightHandLandmarks?: Landmark[];
+    faceLandmarks?: Landmark[];
+    poseLandmarks?: Landmark[];
+    faceBlendshapes?: { categories: Array<{ categoryName: string; score: number }> };
+  };
+  close: () => void;
+};
+
 type VisionRuntime = {
   FilesetResolver: { forVisionTasks: (root: string) => Promise<unknown> };
   HandLandmarker: {
@@ -55,6 +68,7 @@ type VisionRuntime = {
     POSE_CONNECTIONS: unknown;
     createFromOptions: (vision: unknown, options: object) => Promise<PoseDetector>;
   };
+  HolisticLandmarker: { createFromOptions: (vision: unknown, options: object) => Promise<HolisticDetector> };
   DrawingUtils: new (context: CanvasRenderingContext2D) => {
     drawConnectors: (landmarks: Landmark[], connections: unknown, style: object) => void;
     drawLandmarks: (landmarks: Landmark[], style: object) => void;
@@ -82,6 +96,8 @@ type HandTrackerProps = {
     addSpace: () => string;
     clearText: () => void;
   } | null>;
+  /** Optional developer capture hook for verified, gloss-labelled samples. */
+  trainingRecorder?: SignRecorder;
 };
 
 async function createHandDetector(runtime: VisionRuntime, vision: unknown): Promise<HandDetector> {
@@ -125,6 +141,19 @@ async function createPoseDetector(runtime: VisionRuntime, vision: unknown): Prom
     return await runtime.PoseLandmarker.createFromOptions(vision, options('GPU'));
   } catch {
     return runtime.PoseLandmarker.createFromOptions(vision, options('CPU'));
+  }
+}
+
+async function createHolisticDetector(runtime: VisionRuntime, vision: unknown): Promise<HolisticDetector> {
+  const options = (delegate: 'GPU' | 'CPU') => ({
+    baseOptions: { modelAssetPath: holisticModelPath, delegate },
+    runningMode: 'VIDEO',
+    outputFaceBlendshapes: true,
+  });
+  try {
+    return await runtime.HolisticLandmarker.createFromOptions(vision, options('GPU'));
+  } catch {
+    return runtime.HolisticLandmarker.createFromOptions(vision, options('CPU'));
   }
 }
 
@@ -188,6 +217,47 @@ function createMultimodalFrame(
   ];
 }
 
+function createCtcFeatureFrame(
+  hands: Landmark[][],
+  handednesses: Handedness | undefined,
+  face: ReturnType<FaceDetector['detectForVideo']> | undefined,
+  pose: ReturnType<PoseDetector['detectForVideo']> | undefined,
+) {
+  let left: Landmark[] | null = null;
+  let right: Landmark[] | null = null;
+  hands.forEach((points, index) => {
+    const label = handednesses?.[index]?.[0]?.categoryName;
+    if (label === 'Left') left = points;
+    else if (label === 'Right') right = points;
+    else if (!right) right = points;
+    else if (!left) left = points;
+  });
+
+  const allHandIndices = Array.from({ length: 21 }, (_, index) => index);
+  const allPoseIndices = Array.from({ length: 33 }, (_, index) => index);
+  const facePoints = face?.faceLandmarks[0] ?? null;
+  const posePoints = pose?.landmarks[0] ?? null;
+  const blendshapes = Array<number>(52).fill(0);
+  face?.faceBlendshapes?.[0]?.categories
+    .slice()
+    .sort((a, b) => a.categoryName.localeCompare(b.categoryName))
+    .slice(0, 52)
+    .forEach((shape, index) => { blendshapes[index] = shape.score; });
+
+  // The causal CTC Transformer consumes this stable layout:
+  // hands (126) + pose (99) + face blendshapes (52) + masks (4) = 281.
+  return [
+    ...flattenLandmarks(left, allHandIndices),
+    ...flattenLandmarks(right, allHandIndices),
+    ...flattenLandmarks(posePoints, allPoseIndices),
+    ...blendshapes,
+    left ? 1 : 0,
+    right ? 1 : 0,
+    facePoints ? 1 : 0,
+    posePoints ? 1 : 0,
+  ];
+}
+
 function distanceBetweenWrist(a: Landmark[], b: Landmark[]) {
   const dx = a[0]?.x - b[0]?.x;
   const dy = a[0]?.y - b[0]?.y;
@@ -220,6 +290,7 @@ export default function HandTracker({
   onContextCaptured,
   onAslStateChange,
   aslEngineRef,
+  trainingRecorder,
 }: HandTrackerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -282,6 +353,7 @@ export default function HandTracker({
     let detector: HandDetector | undefined;
     let faceDetector: FaceDetector | undefined;
     let poseDetector: PoseDetector | undefined;
+    let holisticDetector: HolisticDetector | undefined;
     let lastContextState = '';
 
     const reportContext = (
@@ -315,13 +387,20 @@ export default function HandTracker({
       try {
         const runtime = await getVisionRuntime();
         const vision = await runtime.FilesetResolver.forVisionTasks(wasmRoot);
-        detector = await createHandDetector(runtime, vision);
-        const [face, pose] = await Promise.allSettled([
-          createFaceDetector(runtime, vision),
-          createPoseDetector(runtime, vision),
-        ]);
-        faceDetector = face.status === 'fulfilled' ? face.value : undefined;
-        poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
+        // Holistic produces all modalities from one synchronized inference graph,
+        // preventing hand/face/pose timing drift during rapid signs. Older or
+        // constrained browsers keep the previous three-task fallback.
+        try {
+          holisticDetector = await createHolisticDetector(runtime, vision);
+        } catch {
+          detector = await createHandDetector(runtime, vision);
+          const [face, pose] = await Promise.allSettled([
+            createFaceDetector(runtime, vision),
+            createPoseDetector(runtime, vision),
+          ]);
+          faceDetector = face.status === 'fulfilled' ? face.value : undefined;
+          poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
+        }
 
         if (!active) return;
 
@@ -353,7 +432,7 @@ export default function HandTracker({
         reportContext(0);
 
         const track = () => {
-          if (!active || !detector) return;
+          if (!active || (!detector && !holisticDetector)) return;
 
           if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
             canvas.width = video.videoWidth;
@@ -362,9 +441,28 @@ export default function HandTracker({
             if (video.currentTime !== lastVideoTime) {
               lastVideoTime = video.currentTime;
               const timestamp = performance.now();
-              const results = detector.detectForVideo(video, timestamp);
-              const face = faceDetector?.detectForVideo(video, timestamp);
-              const pose = poseDetector?.detectForVideo(video, timestamp);
+              const holistic = holisticDetector?.detectForVideo(video, timestamp);
+              const results = holistic
+                ? {
+                    landmarks: [
+                      ...(holistic.leftHandLandmarks ? [holistic.leftHandLandmarks] : []),
+                      ...(holistic.rightHandLandmarks ? [holistic.rightHandLandmarks] : []),
+                    ],
+                    handednesses: [
+                      ...(holistic.leftHandLandmarks ? [[{ categoryName: 'Left' }]] : []),
+                      ...(holistic.rightHandLandmarks ? [[{ categoryName: 'Right' }]] : []),
+                    ],
+                  }
+                : detector!.detectForVideo(video, timestamp);
+              const face = holistic
+                ? {
+                    faceLandmarks: holistic.faceLandmarks ? [holistic.faceLandmarks] : [],
+                    faceBlendshapes: holistic.faceBlendshapes ? [holistic.faceBlendshapes] : [],
+                  }
+                : faceDetector?.detectForVideo(video, timestamp);
+              const pose = holistic
+                ? { landmarks: holistic.poseLandmarks ? [holistic.poseLandmarks] : [] }
+                : poseDetector?.detectForVideo(video, timestamp);
               context.clearRect(0, 0, canvas.width, canvas.height);
 
               const smoothed = smoothLandmarks(results.landmarks, smoothedHandsRef.current);
@@ -390,7 +488,12 @@ export default function HandTracker({
                 const multimodalFrame = createMultimodalFrame(smoothed, handednessesArray, face, pose);
                 wordEngine.processFrame(multimodalFrame, smoothed);
                 const sequence = sequenceRef.current;
-                sequence.push(multimodalFrame);
+                const temporalFrame = createCtcFeatureFrame(smoothed, handednessesArray, face, pose);
+                if (temporalFrame.length !== TEMPORAL_FEATURE_COUNT) {
+                  throw new Error(`Expected ${TEMPORAL_FEATURE_COUNT} temporal features`);
+                }
+                sequence.push(temporalFrame);
+                trainingRecorder?.addFrame(temporalFrame, timestamp);
                 if (sequence.length > maxContextFrames) sequence.shift();
                 totalTrackedFramesRef.current += 1;
                 if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {
@@ -498,6 +601,7 @@ export default function HandTracker({
       detector?.close();
       faceDetector?.close();
       poseDetector?.close();
+      holisticDetector?.close();
     };
   }, [aslEngine, wordEngine]);
 

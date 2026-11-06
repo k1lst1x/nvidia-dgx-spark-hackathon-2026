@@ -57,6 +57,7 @@ export default function CameraScreen() {
   const lastTranslation = useRef('');
   const lastOfflinePhrase = useRef('');
   const lastOfflineWordPhrase = useRef('');
+  const lastApproachWarning = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -87,18 +88,27 @@ export default function CameraScreen() {
   const localSummary = detections.length
     ? `Detected ${Object.entries(objectCounts).slice(0, 3).map(([label, count]) => count > 1 ? `${count} ${label}s` : label).join(', ')}`
     : 'Looking for nearby objects…';
+  const serverBoxes = (vision?.objects || [])
+    .filter((item) => [item.x, item.y, item.width, item.height].every((value) => typeof value === 'number'))
+    .map((item) => ({
+      l: `${Math.round((item.x || 0) * 100)}%` as `${number}%`,
+      t: `${Math.round((item.y || 0) * 100)}%` as `${number}%`,
+      w: `${Math.round((item.width || 0) * 100)}%` as `${number}%`,
+      h: `${Math.round((item.height || 0) * 100)}%` as `${number}%`,
+      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ` · ${Math.round(item.confidence * 100)}%`}`,
+    }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
     detail: vision?.speech || 'Object detection is running privately on this device.',
     speech: vision?.speech || localSummary,
     icon: mode === 'sign' ? 'hand-left' : vision?.urgency === 'high' ? 'warning' : 'navigate',
-    boxes: detections.map((item) => ({
+    boxes: (detections.length ? detections.map((item) => ({
       l: `${Math.round(item.x * 100)}%` as `${number}%`,
       t: `${Math.round(item.y * 100)}%` as `${number}%`,
       w: `${Math.round(item.width * 100)}%` as `${number}%`,
       h: `${Math.round(item.height * 100)}%` as `${number}%`,
       label: `${item.label} · ${Math.round(item.confidence * 100)}%`,
-    })),
+    })) : serverBoxes),
   } : fallback;
 
   const aslState = signContext.aslState;
@@ -227,6 +237,15 @@ export default function CameraScreen() {
       }
     }
   }, [isSignMode, usesBrowserHandTracking, vision]);
+
+  useEffect(() => {
+    if (isSignMode || !vision?.approaching?.length) return;
+    const warning = vision.approaching.map((item) => `${item.label}:${item.distance_m}`).join('|');
+    if (warning !== lastApproachWarning.current) {
+      lastApproachWarning.current = warning;
+      speak(vision.speech);
+    }
+  }, [isSignMode, vision?.approaching, vision?.speech]);
 
   useEffect(() => {
     if (!offlinePhrase) {

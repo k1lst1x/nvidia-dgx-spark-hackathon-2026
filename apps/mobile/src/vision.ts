@@ -9,7 +9,14 @@ export type VisionObject = {
   label: string;
   confidence: number;
   position: string;
+  x?: number | null;
+  y?: number | null;
+  width?: number | null;
+  height?: number | null;
+  distance_m?: number | null;
 };
+
+export type ApproachingWarning = { label: string; distance_m: number };
 
 export type VisionResult = {
   summary: string;
@@ -20,6 +27,7 @@ export type VisionResult = {
   objects: VisionObject[];
   task: AssistMode;
   should_speak?: boolean;
+  approaching?: ApproachingWarning[];
 };
 
 export type SignTranslation = {
