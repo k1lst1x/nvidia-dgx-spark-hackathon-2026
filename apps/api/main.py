@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 import uuid
 from collections import defaultdict, deque
@@ -29,6 +30,9 @@ YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "
 YOLO_MODEL = os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
 YOLO_DEVICE = os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu")
 YOLO_CONFIDENCE = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
+# One Ultralytics model instance is shared by the API process. Keep the ByteTrack
+# state scoped to one active camera feed so object IDs never bleed between users.
+YOLO_TRACK_IDLE_SECONDS = float(os.getenv("YOLO_TRACK_IDLE_SECONDS", "4"))
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("guidelens")
@@ -44,6 +48,9 @@ _slots = asyncio.Semaphore(MAX_CONCURRENCY)
 _requests: dict[str, deque[float]] = defaultdict(deque)
 _depth_model = DepthAnythingMetric()
 _approach_tracker = ApproachingObjectTracker()
+_yolo_tracking_lock = threading.Lock()
+_yolo_tracker_session: str | None = None
+_yolo_tracker_seen_at = 0.0
 
 
 class DetectedObject(BaseModel):
@@ -57,6 +64,9 @@ class DetectedObject(BaseModel):
     width: float | None = Field(default=None, ge=0, le=1)
     height: float | None = Field(default=None, ge=0, le=1)
     distance_m: float | None = Field(default=None, gt=0, le=80)
+    # Short-lived ByteTrack ID for associating one camera feed's boxes over time.
+    # It is intentionally not a persistent identity or person identifier.
+    track_id: int | None = Field(default=None, ge=1)
 
 
 class ApproachingWarning(BaseModel):
@@ -182,22 +192,50 @@ def _get_yolo_model():
     return YOLO(YOLO_MODEL)
 
 
-def _detect_with_yolo(image_bytes: bytes) -> list[DetectedObject]:
-    """Run local Ultralytics YOLO and return display-ready normalized boxes."""
+def _reset_yolo_tracker(model) -> None:
+    """Clear ByteTrack state attached to an already-initialized Ultralytics predictor."""
+    predictor = getattr(model, "predictor", None)
+    for tracker in getattr(predictor, "trackers", ()):
+        reset = getattr(tracker, "reset", None)
+        if reset:
+            reset()
+
+
+def _detect_with_yolo(image_bytes: bytes, session_id: str = "") -> list[DetectedObject]:
+    """Run YOLO11 + ByteTrack and return display-ready normalized, tracked boxes."""
+    global _yolo_tracker_session, _yolo_tracker_seen_at
     if not YOLO_ENABLED:
         return []
     try:
         from PIL import Image
 
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        result = _get_yolo_model().predict(
-            source=image,
-            conf=YOLO_CONFIDENCE,
-            imgsz=640,
-            device=YOLO_DEVICE,
-            verbose=False,
-            max_det=12,
-        )[0]
+        # `persist=True` carries IDs between captures in one feed. Ultralytics'
+        # tracker lives on its shared predictor, so protect it with a lock and
+        # reset it for a new/idle session before accepting another camera frame.
+        with _yolo_tracking_lock:
+            model = _get_yolo_model()
+            now = time.monotonic()
+            if (
+                _yolo_tracker_session is not None
+                and (
+                    _yolo_tracker_session != session_id
+                    or now - _yolo_tracker_seen_at > YOLO_TRACK_IDLE_SECONDS
+                )
+            ):
+                _reset_yolo_tracker(model)
+            _yolo_tracker_session = session_id
+            _yolo_tracker_seen_at = now
+            result = model.track(
+                source=image,
+                persist=True,
+                tracker="bytetrack.yaml",
+                conf=YOLO_CONFIDENCE,
+                imgsz=640,
+                device=YOLO_DEVICE,
+                verbose=False,
+                max_det=12,
+            )[0]
         image_width, image_height = image.size
         names = result.names
         detections: list[DetectedObject] = []
@@ -211,6 +249,11 @@ def _detect_with_yolo(image_bytes: bytes) -> list[DetectedObject]:
                 continue
             class_id = int(box.cls[0].item())
             label = str(names[class_id])
+            track_id = (
+                int(box.id[0].item())
+                if getattr(result.boxes, "is_track", False) and box.id is not None
+                else None
+            )
             detections.append(DetectedObject(
                 label=label,
                 confidence=float(box.conf[0].item()),
@@ -219,6 +262,7 @@ def _detect_with_yolo(image_bytes: bytes) -> list[DetectedObject]:
                 y=y,
                 width=width,
                 height=height,
+                track_id=track_id,
             ))
         return detections
     except Exception:
@@ -415,7 +459,10 @@ async def describe(
         raise HTTPException(503, "Vision service is not configured")
     started = time.monotonic()
     async with _slots:
-        verified_objects = await asyncio.to_thread(_detect_with_yolo, body) if task == "scene" else []
+        verified_objects = (
+            await asyncio.to_thread(_detect_with_yolo, body, client_id)
+            if task == "scene" else []
+        )
         warnings = []
         if verified_objects and _depth_model.ready:
             depth_map = await asyncio.to_thread(_depth_model.infer, body)

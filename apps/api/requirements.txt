@@ -6,5 +6,8 @@ httpx==0.28.1
 # weights are fetched by Ultralytics on first use and intentionally are not
 # committed to this repository.
 ultralytics>=8.3.0,<9
+# ByteTrack's linear-assignment implementation is an optional Ultralytics
+# dependency and is required when Scene Assist calls model.track(...).
+lap>=0.5.12
 numpy>=1.26
 opencv-python-headless>=4.10

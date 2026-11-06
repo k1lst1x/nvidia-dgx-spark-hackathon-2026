@@ -57,7 +57,6 @@ export default function CameraScreen() {
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
   const lastOfflinePhrase = useRef('');
-  const lastOfflineWordPhrase = useRef('');
   const lastApproachWarning = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
@@ -96,20 +95,22 @@ export default function CameraScreen() {
       t: `${Math.round((item.y || 0) * 100)}%` as `${number}%`,
       w: `${Math.round((item.width || 0) * 100)}%` as `${number}%`,
       h: `${Math.round((item.height || 0) * 100)}%` as `${number}%`,
-      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ` · ${Math.round(item.confidence * 100)}%`}`,
+      label: `${item.label}${item.track_id ? ` #${item.track_id}` : ''}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ` · ${Math.round(item.confidence * 100)}%`}`,
     }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
     detail: vision?.speech || 'Real-time spatial tracker running privately on this device.',
     speech: vision?.speech || localSummary,
     icon: mode === 'sign' ? 'hand-left' : vision?.urgency === 'high' ? 'warning' : 'navigate',
-    boxes: (detections.length ? detections.map((item) => ({
+    // Prefer server YOLO boxes when supplied: they are the detections paired
+    // with metric depth. Keep local YOLOX as a fast offline fallback.
+    boxes: (serverBoxes.length ? serverBoxes : detections.map((item) => ({
       l: `${Math.round(item.x * 100)}%` as `${number}%`,
       t: `${Math.round(item.y * 100)}%` as `${number}%`,
       w: `${Math.round(item.width * 100)}%` as `${number}%`,
       h: `${Math.round(item.height * 100)}%` as `${number}%`,
       label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ''}${item.direction ? ` · ${item.direction}` : ''}`,
-    })) : serverBoxes),
+    }))),
   } : fallback;
 
   const aslState = signContext.aslState;
@@ -133,8 +134,14 @@ export default function CameraScreen() {
 
   const browserSignHeading = signContext.error
     ? 'Hand tracking needs attention.'
-    : formattedWordPhrase
-      ? formattedWordPhrase
+    // A local word recognizer is useful as a capture aid, but it must never
+    // override the sentence-level result from the contextual decoder.
+    : translation
+      ? translation
+      : isAnalysingContext
+        ? 'Analyzing the signed phrase…'
+        : formattedWordPhrase
+          ? formattedWordPhrase
       : recognizedWord && (wordState?.currentConfidence || 0) >= 0.30
         ? `Sign: ${formatAslWord(recognizedWord)} · ${Math.round((wordState?.currentConfidence || 0) * 100)}%`
     : offlinePhrase
@@ -143,12 +150,16 @@ export default function CameraScreen() {
         ? `Spelled: "${spelledText}"`
       : currentLetter
         ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
-        : translation || (isAnalysingContext ? 'Interpreting your signed context…' : 'Ready for ASL gestures');
+        : 'Ready for ASL gestures';
 
   const browserSignDetail = signContext.error
     ? signContext.error
-    : formattedWordPhrase
-      ? 'ASL dynamic sign phrase · Brief pause between signs'
+    : translation
+      ? 'Contextual phrase result · Confirm its meaning with the signer'
+      : isAnalysingContext
+        ? 'Collecting an overlapping sequence before producing a phrase result'
+        : formattedWordPhrase
+          ? 'Isolated-sign buffer · Waiting for contextual phrase analysis'
       : top3Summary
         ? `Detected sign candidate: ${top3Summary}`
       : recognizedWord
@@ -260,14 +271,6 @@ export default function CameraScreen() {
       speak(offlinePhrase.speech);
     }
   }, [offlinePhrase?.trigger]);
-
-  useEffect(() => {
-    if (!recognizedWordPhrase || recognizedWordPhrase === lastOfflineWordPhrase.current) return;
-    const previous = lastOfflineWordPhrase.current;
-    lastOfflineWordPhrase.current = recognizedWordPhrase;
-    const addition = recognizedWordPhrase.slice(previous.length).trim();
-    if (addition) speak(formatAslWord(addition));
-  }, [recognizedWordPhrase]);
 
   if (!permission) return <View style={c.fallback} />;
 

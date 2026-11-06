@@ -158,6 +158,8 @@ docker compose up --build
 
 The checkpoint downloads into the service's model cache the first time Scene Assist runs; it is not committed to this repository. Ultralytics distributes its implementation under AGPL-3.0 and offers an Enterprise license for proprietary distribution. Review the [Ultralytics license terms](https://docs.ultralytics.com/help/license/) before enabling it outside an AGPL-compatible project.
 
+When this detector is enabled, Scene Assist uses ByteTrack to keep a short-lived numeric ID on a detected object while the same camera feed is active. The ID resets after four idle seconds (configurable with `YOLO_TRACK_IDLE_SECONDS`) or when another session uses the shared API worker. It improves overlay continuity and depth matching; it is not a person identifier and does not improve YOLO's class accuracy.
+
 ### Approximate distance and approaching-object warnings
 
 Scene Assist can use the official Apache-2.0 [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) metric-depth implementation to estimate object depth and issue a conservative warning only when a matching detected box becomes both closer and larger across several frames. This is not a collision detector, distance measurement tool, or safe navigation feature.
