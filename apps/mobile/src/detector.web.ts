@@ -83,12 +83,19 @@ function estimateSpatialInfo(item: LocalDetection): { distance_m: number; direct
   return { distance_m, direction };
 }
 
+type TrackState = LocalDetection & {
+  missed: number;
+  id: number;
+  prevDistance?: number;
+  lastSeenTime: number;
+};
+
 /**
- * Production-grade Temporal Object Tracker with EMA coordinate smoothing
- * and hysteresis confidence persistence. Prevents bounding box bouncing and flicker.
+ * Production-grade Temporal Object Tracker with EMA coordinate smoothing,
+ * approach velocity estimation, and hysteresis confidence persistence.
  */
 class TemporalObjectTracker {
-  private tracks: Array<LocalDetection & { missed: number; id: number }> = [];
+  private tracks: TrackState[] = [];
   private nextId = 1;
   private readonly emaAlpha = 0.68; // Smooth, low-latency filter
   private readonly matchIouThreshold = 0.28;
@@ -96,6 +103,7 @@ class TemporalObjectTracker {
   update(rawDetections: LocalDetection[]): LocalDetection[] {
     const matchedTrackIndices = new Set<number>();
     const matchedDetectionIndices = new Set<number>();
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
     // 1. Greedy IoU matching with label constraint
     for (let d = 0; d < rawDetections.length; d++) {
@@ -128,6 +136,19 @@ class TemporalObjectTracker {
         track.confidence = this.emaAlpha * candidate.confidence + (1 - this.emaAlpha) * track.confidence;
 
         const spatial = estimateSpatialInfo(track);
+        const dt = Math.max(0.05, (now - track.lastSeenTime) / 1000);
+        if (track.prevDistance != null && spatial.distance_m != null) {
+          const dDist = track.prevDistance - spatial.distance_m;
+          const speed = dDist / dt; // positive means object is getting closer
+          track.velocity_mps = Math.round(speed * 10) / 10;
+          track.is_approaching = speed > 0.35 && spatial.distance_m <= 2.5 && spatial.direction === 'ahead';
+        } else {
+          track.is_approaching = false;
+          track.velocity_mps = 0;
+        }
+
+        track.prevDistance = spatial.distance_m;
+        track.lastSeenTime = now;
         track.distance_m = spatial.distance_m;
         track.direction = spatial.direction;
         track.missed = 0;
@@ -145,6 +166,10 @@ class TemporalObjectTracker {
           direction: spatial.direction,
           id: this.nextId++,
           missed: 0,
+          prevDistance: spatial.distance_m,
+          lastSeenTime: now,
+          is_approaching: false,
+          velocity_mps: 0,
         });
       }
     }
@@ -160,8 +185,10 @@ class TemporalObjectTracker {
     // Keep active tracks (survive up to 2 missed frames if previously confident)
     this.tracks = this.tracks.filter((t) => t.missed <= 2 && t.confidence >= 0.22);
 
-    // 4. Priority Sort: Person first, then closest obstacles (<1.5m), then highest confidence
+    // 4. Priority Sort: Approaching hazards first, then person, then closest obstacles (<1.5m), then highest confidence
     const sorted = [...this.tracks].sort((a, b) => {
+      if (a.is_approaching && !b.is_approaching) return -1;
+      if (b.is_approaching && !a.is_approaching) return 1;
       if (a.label === 'person' && b.label !== 'person') return -1;
       if (b.label === 'person' && a.label !== 'person') return 1;
       const distA = a.distance_m ?? 5;
@@ -170,7 +197,7 @@ class TemporalObjectTracker {
       return b.confidence - a.confidence;
     });
 
-    return sorted.map(({ missed: _m, ...item }) => item);
+    return sorted.map(({ missed: _m, prevDistance: _p, lastSeenTime: _l, ...item }) => item);
   }
 
   clear() {

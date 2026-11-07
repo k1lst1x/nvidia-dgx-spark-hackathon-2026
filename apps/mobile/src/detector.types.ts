@@ -8,6 +8,8 @@ export type LocalDetection = {
   distance_m?: number;
   direction?: 'left' | 'ahead' | 'right';
   id?: number;
+  is_approaching?: boolean;
+  velocity_mps?: number;
 };
 
 export type DetectionResult = {

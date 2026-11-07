@@ -127,6 +127,121 @@ async function imageUriToDataUrl(uri: string) {
   });
 }
 
+export function synthesizeLocalSceneResult(
+  detections: LocalDetection[],
+  previousSceneKey: string,
+  mode: AssistMode,
+): VisionResult {
+  const visionObjects: VisionObject[] = detections.map((d) => ({
+    label: d.label,
+    confidence: d.confidence,
+    position: d.direction || 'ahead',
+    x: d.x,
+    y: d.y,
+    width: d.width,
+    height: d.height,
+    distance_m: d.distance_m ?? null,
+    relative_proximity: d.distance_m != null ? Math.max(0, Math.min(1, 1 - d.distance_m / 4.0)) : null,
+    track_id: d.id ?? null,
+  }));
+
+  // 1. Check for approaching hazards (TTC alert)
+  const approachingHazards = detections.filter(
+    (d) => d.is_approaching && d.distance_m != null && d.distance_m <= 2.5
+  );
+
+  if (approachingHazards.length > 0) {
+    const hazard = approachingHazards[0];
+    const distStr = hazard.distance_m ? `${hazard.distance_m.toFixed(1)} meters` : 'close';
+    const speech = `Caution: ${hazard.label} approaching directly ahead at ${distStr}.`;
+    const scene_key = `hazard_${hazard.label}_${Math.round((hazard.distance_m || 1) * 2)}`;
+    return {
+      summary: `Caution: ${hazard.label} approaching (~${distStr})`,
+      speech,
+      scene_key,
+      urgency: 'high',
+      changed: true,
+      objects: visionObjects,
+      task: mode,
+      should_speak: true,
+      approaching: approachingHazards.map((h) => ({
+        label: h.label,
+        distance_m: h.distance_m ?? 1.0,
+      })),
+    };
+  }
+
+  // 2. Check for close obstacles directly in path (< 1.4m)
+  const immediateAhead = detections.filter(
+    (d) => d.direction === 'ahead' && d.distance_m != null && d.distance_m < 1.4
+  );
+
+  if (immediateAhead.length > 0) {
+    const obs = immediateAhead[0];
+    const speech = `Attention: ${obs.label} directly ahead, ${obs.distance_m?.toFixed(1)} meters.`;
+    const scene_key = `obs_${obs.label}_${Math.round((obs.distance_m || 1) * 2)}`;
+    return {
+      summary: `Obstacle ahead: ${obs.label} (${obs.distance_m?.toFixed(1)}m)`,
+      speech,
+      scene_key,
+      urgency: 'medium',
+      changed: scene_key !== previousSceneKey,
+      objects: visionObjects,
+      task: mode,
+      should_speak: scene_key !== previousSceneKey,
+    };
+  }
+
+  // 3. Clear path
+  if (detections.length === 0) {
+    const scene_key = 'empty_path';
+    return {
+      summary: 'Path clear ahead',
+      speech: 'The path is clear. No obstacles detected nearby.',
+      scene_key,
+      urgency: 'low',
+      changed: scene_key !== previousSceneKey,
+      objects: [],
+      task: mode,
+      should_speak: scene_key !== previousSceneKey,
+    };
+  }
+
+  // 4. Natural spatial narration of detected objects
+  const ahead = detections.filter((d) => d.direction === 'ahead');
+  const left = detections.filter((d) => d.direction === 'left');
+  const right = detections.filter((d) => d.direction === 'right');
+
+  const parts: string[] = [];
+  if (ahead.length > 0) {
+    parts.push(`Ahead: ${ahead.slice(0, 2).map((d) => `${d.label} at ${d.distance_m?.toFixed(1) || '1'}m`).join(', ')}`);
+  }
+  if (right.length > 0) {
+    parts.push(`To your right: ${right.slice(0, 2).map((d) => d.label).join(', ')}`);
+  }
+  if (left.length > 0) {
+    parts.push(`To your left: ${left.slice(0, 2).map((d) => d.label).join(', ')}`);
+  }
+
+  const speech = parts.join('. ') + '.';
+  const scene_key = detections
+    .slice(0, 4)
+    .map((d) => `${d.label}_${d.direction}_${Math.round(d.distance_m || 1)}`)
+    .sort()
+    .join('|');
+
+  return {
+    summary: `Nearby: ${detections.slice(0, 3).map((d) => d.label).join(', ')}`,
+    speech,
+    scene_key,
+    urgency: 'low',
+    changed: scene_key !== previousSceneKey,
+    objects: visionObjects,
+    task: mode,
+    should_speak: scene_key !== previousSceneKey,
+  };
+}
+
 export function useVisionLoop(camera: RefObject<CameraView | null>, mode: AssistMode, enabled: boolean) {
   const [result, setResult] = useState<VisionResult | null>(null);
   const [state, setState] = useState<VisionState>('starting');
@@ -216,6 +331,14 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       failures.current = 0;
       setState('live');
 
+      // In purely offline mode (or while waiting for cloud), synthesize local spatial speech
+      if (!API_URL || !shouldUseCloud) {
+        const localResult = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
+        sceneKey.current = localResult.scene_key;
+        setResult(localResult);
+        setLastUpdated(Date.now());
+      }
+
       // Never make the bounding boxes wait for a network request. The previous
       // implementation paused local updates while the cloud description ran,
       // leaving frames behind when the user turned the camera.
@@ -235,6 +358,11 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
             if (cloudController.signal.aborted || runGeneration !== generation.current) return;
             // Local detection remains live even when optional cloud narration is unavailable.
             console.warn('Cloud scene description unavailable', error);
+            // Fall back to local synthesis on cloud failure
+            const localFallback = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
+            sceneKey.current = localFallback.scene_key;
+            setResult(localFallback);
+            setLastUpdated(Date.now());
           })
           .finally(() => {
             if (controller.current === cloudController) controller.current = null;

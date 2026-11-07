@@ -58,6 +58,179 @@ function suppressOverlaps(items: LocalDetection[]) {
   return kept;
 }
 
+const OBJECT_HEIGHT_PRIORS: Record<string, number> = {
+  person: 1.70,
+  bicycle: 1.00,
+  car: 1.50,
+  motorcycle: 1.10,
+  bus: 3.10,
+  train: 3.80,
+  truck: 2.80,
+  traffic_light: 1.20,
+  fire_hydrant: 0.70,
+  stop_sign: 0.80,
+  bench: 0.85,
+  cat: 0.30,
+  dog: 0.55,
+  horse: 1.60,
+  backpack: 0.45,
+  umbrella: 0.85,
+  handbag: 0.35,
+  suitcase: 0.65,
+  bottle: 0.24,
+  wine_glass: 0.20,
+  cup: 0.12,
+  fork: 0.18,
+  knife: 0.20,
+  spoon: 0.16,
+  bowl: 0.12,
+  banana: 0.18,
+  apple: 0.08,
+  sandwich: 0.10,
+  chair: 0.85,
+  couch: 0.85,
+  potted_plant: 0.45,
+  bed: 0.75,
+  dining_table: 0.75,
+  tv: 0.55,
+  laptop: 0.30,
+  mouse: 0.06,
+  remote: 0.18,
+  keyboard: 0.15,
+  cell_phone: 0.15,
+  microwave: 0.35,
+  oven: 0.75,
+  sink: 0.60,
+  refrigerator: 1.70,
+  book: 0.24,
+  clock: 0.30,
+};
+
+function estimateSpatialInfo(item: LocalDetection): { distance_m: number; direction: 'left' | 'ahead' | 'right' } {
+  const normPrior = OBJECT_HEIGHT_PRIORS[item.label.replace(/\s+/g, '_')] ?? 0.50;
+  const fNorm = 1.15;
+  const rawDist = (normPrior * fNorm) / Math.max(0.04, item.height);
+  const distance_m = Math.round(Math.max(0.3, Math.min(8.0, rawDist)) * 10) / 10;
+  const centerX = item.x + item.width / 2;
+  const direction: 'left' | 'ahead' | 'right' =
+    centerX < 0.35 ? 'left' : centerX > 0.65 ? 'right' : 'ahead';
+  return { distance_m, direction };
+}
+
+type TrackState = LocalDetection & {
+  missed: number;
+  id: number;
+  prevDistance?: number;
+  lastSeenTime: number;
+};
+
+class TemporalObjectTracker {
+  private tracks: TrackState[] = [];
+  private nextId = 1;
+  private readonly emaAlpha = 0.68;
+  private readonly matchIouThreshold = 0.28;
+
+  update(rawDetections: LocalDetection[]): LocalDetection[] {
+    const matchedTrackIndices = new Set<number>();
+    const matchedDetectionIndices = new Set<number>();
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+    for (let d = 0; d < rawDetections.length; d++) {
+      const candidate = rawDetections[d];
+      let bestIou = this.matchIouThreshold;
+      let bestTrackIndex = -1;
+
+      for (let t = 0; t < this.tracks.length; t++) {
+        if (matchedTrackIndices.has(t)) continue;
+        const track = this.tracks[t];
+        if (track.label === candidate.label) {
+          const overlap = iou(track, candidate);
+          if (overlap > bestIou) {
+            bestIou = overlap;
+            bestTrackIndex = t;
+          }
+        }
+      }
+
+      if (bestTrackIndex !== -1) {
+        matchedTrackIndices.add(bestTrackIndex);
+        matchedDetectionIndices.add(d);
+        const track = this.tracks[bestTrackIndex];
+
+        track.x = this.emaAlpha * candidate.x + (1 - this.emaAlpha) * track.x;
+        track.y = this.emaAlpha * candidate.y + (1 - this.emaAlpha) * track.y;
+        track.width = this.emaAlpha * candidate.width + (1 - this.emaAlpha) * track.width;
+        track.height = this.emaAlpha * candidate.height + (1 - this.emaAlpha) * track.height;
+        track.confidence = this.emaAlpha * candidate.confidence + (1 - this.emaAlpha) * track.confidence;
+
+        const spatial = estimateSpatialInfo(track);
+        const dt = Math.max(0.05, (now - track.lastSeenTime) / 1000);
+        if (track.prevDistance != null && spatial.distance_m != null) {
+          const dDist = track.prevDistance - spatial.distance_m;
+          const speed = dDist / dt;
+          track.velocity_mps = Math.round(speed * 10) / 10;
+          track.is_approaching = speed > 0.35 && spatial.distance_m <= 2.5 && spatial.direction === 'ahead';
+        } else {
+          track.is_approaching = false;
+          track.velocity_mps = 0;
+        }
+
+        track.prevDistance = spatial.distance_m;
+        track.lastSeenTime = now;
+        track.distance_m = spatial.distance_m;
+        track.direction = spatial.direction;
+        track.missed = 0;
+      }
+    }
+
+    for (let d = 0; d < rawDetections.length; d++) {
+      if (!matchedDetectionIndices.has(d)) {
+        const item = rawDetections[d];
+        const spatial = estimateSpatialInfo(item);
+        this.tracks.push({
+          ...item,
+          distance_m: spatial.distance_m,
+          direction: spatial.direction,
+          id: this.nextId++,
+          missed: 0,
+          prevDistance: spatial.distance_m,
+          lastSeenTime: now,
+          is_approaching: false,
+          velocity_mps: 0,
+        });
+      }
+    }
+
+    for (let t = 0; t < this.tracks.length; t++) {
+      if (!matchedTrackIndices.has(t)) {
+        this.tracks[t].missed += 1;
+        this.tracks[t].confidence *= 0.88;
+      }
+    }
+
+    this.tracks = this.tracks.filter((t) => t.missed <= 2 && t.confidence >= 0.22);
+
+    const sorted = [...this.tracks].sort((a, b) => {
+      if (a.is_approaching && !b.is_approaching) return -1;
+      if (b.is_approaching && !a.is_approaching) return 1;
+      if (a.label === 'person' && b.label !== 'person') return -1;
+      if (b.label === 'person' && a.label !== 'person') return 1;
+      const distA = a.distance_m ?? 5;
+      const distB = b.distance_m ?? 5;
+      if (Math.abs(distA - distB) > 0.8) return distA - distB;
+      return b.confidence - a.confidence;
+    });
+
+    return sorted.map(({ missed: _m, prevDistance: _p, lastSeenTime: _l, ...item }) => item);
+  }
+
+  clear() {
+    this.tracks = [];
+  }
+}
+
+const tracker = new TemporalObjectTracker();
+
 function isLikelySelfPerson(item: LocalDetection) {
   return item.label === 'person' && item.width >= 0.7 && item.x <= 0.16 && item.y <= 0.28;
 }
@@ -158,7 +331,9 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
         ...box,
       });
     }
-    return { available: true, detections: focusOnObjects(detections) };
+    const focused = focusOnObjects(detections);
+    const tracked = tracker.update(focused);
+    return { available: true, detections: tracked };
   } catch {
     return { available: false, detections: [] };
   }

@@ -106,6 +106,7 @@ class KinematicGestureRecognizer {
 
   process(
     primaryHand: LandmarkPoint[] | undefined,
+    secondaryHand?: LandmarkPoint[],
     face?: LandmarkPoint[],
     pose?: LandmarkPoint[],
   ): ASLWordPrediction | null {
@@ -123,9 +124,13 @@ class KinematicGestureRecognizer {
     const ringTip = primaryHand[16];
     const pinkyTip = primaryHand[20];
 
+    // Calculate dynamic hand span to normalize scale (invariant to distance from camera)
+    const handSpan = Math.max(0.06, dist2d(wrist, indexMcp));
+    const scale = handSpan / 0.12;
+
     // Body anchors for relative scale & position
     const nose = face?.[1] || pose?.[0];
-    const chin = face?.[152] || (nose ? { x: nose.x, y: nose.y + 0.12 } : undefined);
+    const chin = face?.[152] || (nose ? { x: nose.x, y: nose.y + 0.12 * scale } : undefined);
     const shoulderY = pose && pose.length > 12 ? (pose[11].y + pose[12].y) / 2 : undefined;
 
     // Finger extensions relative to wrist / MCP
@@ -133,11 +138,20 @@ class KinematicGestureRecognizer {
     const middleExt = dist2d(middleTip, wrist) > dist2d(primaryHand[10], wrist) * 1.15;
     const ringExt = dist2d(ringTip, wrist) > dist2d(primaryHand[14], wrist) * 1.15;
     const pinkyExt = dist2d(pinkyTip, wrist) > dist2d(primaryHand[18], wrist) * 1.15;
+    const thumbExt = dist2d(thumbTip, wrist) > dist2d(primaryHand[2], wrist) * 1.15;
 
     const isFist = !indexExt && !middleExt && !ringExt && !pinkyExt;
     const isOpen = indexExt && middleExt && ringExt && pinkyExt;
     const isWHand = indexExt && middleExt && ringExt && !pinkyExt;
+    const isILY = thumbExt && indexExt && pinkyExt && !middleExt && !ringExt;
     const pinchDist = (dist2d(indexTip, thumbTip) + dist2d(middleTip, thumbTip)) / 2;
+
+    // Secondary hand relations (if both hands visible in frame)
+    const hasSecHand = Boolean(secondaryHand && secondaryHand.length >= 21);
+    const secWrist = hasSecHand ? secondaryHand![0] : undefined;
+    const secIndexTip = hasSecHand ? secondaryHand![8] : undefined;
+    const interWristDist = secWrist ? dist2d(wrist, secWrist) : 999;
+    const interTipDist = secIndexTip ? dist2d(indexTip, secIndexTip) : 999;
 
     this.history.push({
       wrist,
@@ -167,14 +181,14 @@ class KinematicGestureRecognizer {
       let lastDir = 0;
       for (let i = 1; i < yValues.length; i++) {
         const diff = yValues[i] - yValues[i - 1];
-        if (Math.abs(diff) > 0.004) {
+        if (Math.abs(diff) > 0.004 * scale) {
           const dir = Math.sign(diff);
           if (lastDir !== 0 && dir !== lastDir) directionChanges++;
           lastDir = dir;
         }
       }
       const ySpan = Math.max(...yValues) - Math.min(...yValues);
-      if (directionChanges >= 2 && ySpan >= 0.02) {
+      if (directionChanges >= 2 && ySpan >= 0.018 * scale) {
         return { label: 'yes', confidence: 0.94 };
       }
     }
@@ -183,42 +197,91 @@ class KinematicGestureRecognizer {
     if (!recent.isFist && !recent.isOpen) {
       const pastPinch = Math.max(...this.history.slice(-14, -4).map((h) => h.pinchDist));
       const currentPinch = Math.min(...this.history.slice(-3).map((h) => h.pinchDist));
-      if (pastPinch > 0.07 && currentPinch < 0.045 && (pastPinch - currentPinch) > 0.028) {
+      if (pastPinch > 0.06 * scale && currentPinch < 0.045 * scale && (pastPinch - currentPinch) > 0.024 * scale) {
         return { label: 'no', confidence: 0.95 };
       }
     }
 
-    // 3. "HELLO" (привет) - Open flat hand at head/temple level moving/waving
-    const isAtHeadLevel = nose ? recent.wrist.y <= nose.y + 0.12 : recent.wrist.y < 0.48;
+    // 3. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
+    const isThumbsUpFist = isFist && thumbTip.y < indexMcp.y - 0.03 * scale;
+    if (isThumbsUpFist) {
+      const yValues = this.history.slice(-12).map((h) => h.wrist.y);
+      const dy = yValues[yValues.length - 1] - yValues[0];
+      if (dy < -0.028 * scale || (hasSecHand && interWristDist < 0.25 * scale)) {
+        return { label: 'help', confidence: 0.94 };
+      }
+    }
+
+    // 4. "STOP" (стоп) - Open flat palm facing forward firmly or chopping on palm
+    if (isOpen) {
+      const isVerticalPalm = indexTip.y < wrist.y - 0.08 * scale;
+      if (hasSecHand && interWristDist < 0.16 * scale) {
+        return { label: 'stop', confidence: 0.95 };
+      }
+      if (isVerticalPalm && recent.wrist.y > 0.35 && recent.wrist.y < 0.80) {
+        const xVar = Math.max(...this.history.slice(-10).map((h) => h.wrist.x)) - Math.min(...this.history.slice(-10).map((h) => h.wrist.x));
+        if (xVar < 0.02 * scale) {
+          return { label: 'stop', confidence: 0.93 };
+        }
+      }
+    }
+
+    // 5. "MORE" (ещё) - Both hands pinched, fingertips tapping together
+    if (hasSecHand && recent.pinchDist < 0.06 * scale && interTipDist < 0.09 * scale) {
+      return { label: 'more', confidence: 0.92 };
+    }
+
+    // 6. "FOOD" / "EAT" (еда) - Flattened O/pinch tapping near mouth/chin
+    const isNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.18 * scale : recent.indexTip.y < 0.44;
+    if (recent.pinchDist < 0.05 * scale && isNearMouth) {
+      const yValues = this.history.slice(-12).map((h) => h.indexTip.y);
+      const ySpan = Math.max(...yValues) - Math.min(...yValues);
+      if (ySpan > 0.012 * scale) {
+        return { label: 'food', confidence: 0.92 };
+      }
+    }
+
+    // 7. "PAIN" (боль) - Both index fingers pointing at each other in jabs
+    if (hasSecHand && indexExt && !middleExt && !ringExt && interTipDist < 0.15 * scale) {
+      return { label: 'pain', confidence: 0.93 };
+    }
+
+    // 8. "I LOVE YOU" (ILY sign) - Thumb, index, pinky extended
+    if (isILY) {
+      return { label: 'ily', confidence: 0.95 };
+    }
+
+    // 9. "HELLO" (привет) - Open flat hand at head/temple level moving/waving
+    const isAtHeadLevel = nose ? recent.wrist.y <= nose.y + 0.14 * scale : recent.wrist.y < 0.48;
     if (recent.isOpen && isAtHeadLevel) {
       const xValues = this.history.slice(-16).map((h) => h.wrist.x);
       let xChanges = 0;
       let lastXDir = 0;
       for (let i = 1; i < xValues.length; i++) {
         const diff = xValues[i] - xValues[i - 1];
-        if (Math.abs(diff) > 0.004) {
+        if (Math.abs(diff) > 0.004 * scale) {
           const dir = Math.sign(diff);
           if (lastXDir !== 0 && dir !== lastXDir) xChanges++;
           lastXDir = dir;
         }
       }
       const xSpan = Math.max(...xValues) - Math.min(...xValues);
-      if ((xChanges >= 2 && xSpan >= 0.03) || xSpan >= 0.055) {
+      if ((xChanges >= 2 && xSpan >= 0.028 * scale) || xSpan >= 0.05 * scale) {
         return { label: 'hello', confidence: 0.92 };
       }
     }
 
-    // 4. "THANK YOU" (спасибо) - Flat hand starts at chin/mouth and moves forward/down
+    // 10. "THANK YOU" (спасибо) - Flat hand starts at chin/mouth and moves forward/down
     if (recent.isOpen) {
-      const isNearChin = (p: LandmarkPoint) => chin ? dist2d(p, chin) < 0.22 : p.y < 0.45;
+      const isNearChin = (p: LandmarkPoint) => chin ? dist2d(p, chin) < 0.22 * scale : p.y < 0.45;
       const pastHighHand = this.history.slice(-15, -5).find((h) => isNearChin(h.indexTip) || isNearChin(h.wrist));
       const dy = recent.wrist.y - (pastHighHand?.wrist.y ?? recent.wrist.y);
-      if (pastHighHand && dy > 0.04) {
+      if (pastHighHand && dy > 0.035 * scale) {
         return { label: 'thankyou', confidence: 0.93 };
       }
     }
 
-    // 5. "PLEASE" (плиз) - Flat hand on chest moving in a circular path
+    // 11. "PLEASE" (пожалуйста) - Flat hand on chest moving in a circular path
     const isAtChestLevel = shoulderY
       ? recent.wrist.y >= shoulderY - 0.05 && recent.wrist.y <= shoulderY + 0.32
       : recent.wrist.y >= 0.38 && recent.wrist.y <= 0.76;
@@ -241,18 +304,18 @@ class KinematicGestureRecognizer {
           lastAngle = ang;
         }
         const radius = Math.hypot(recent.wrist.x - avgX, recent.wrist.y - avgY);
-        if (Math.abs(totalAngle) > 2.8 && radius > 0.015) {
+        if (Math.abs(totalAngle) > 2.6 && radius > 0.012 * scale) {
           return { label: 'please', confidence: 0.90 };
         }
       }
     }
 
-    // 6. "WATER" (вода) - W-hand tapping near chin level
-    const isNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.20 : recent.indexTip.y < 0.50;
-    if (recent.isWHand && isNearMouth) {
+    // 12. "WATER" (вода) - W-hand tapping near chin level
+    const isWaterNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.22 * scale : recent.indexTip.y < 0.50;
+    if (recent.isWHand && isWaterNearMouth) {
       const yValues = this.history.slice(-14).map((h) => h.indexTip.y);
       const ySpan = Math.max(...yValues) - Math.min(...yValues);
-      if (ySpan > 0.018) {
+      if (ySpan > 0.015 * scale) {
         return { label: 'water', confidence: 0.91 };
       }
     }
@@ -304,7 +367,8 @@ export class ASLWordEngine {
 
     // 1. Check kinematic motion for essential conversational gestures first
     const primaryHand = rawHands?.[0];
-    const kinematicMatch = this.kinematic.process(primaryHand, face, pose);
+    const secondaryHand = rawHands?.[1];
+    const kinematicMatch = this.kinematic.process(primaryHand, secondaryHand, face, pose);
     const now = performance.now();
 
     if (kinematicMatch && kinematicMatch.confidence >= 0.80) {

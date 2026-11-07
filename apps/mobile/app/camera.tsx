@@ -58,6 +58,8 @@ export default function CameraScreen() {
   const lastTranslation = useRef('');
   const lastOfflinePhrase = useRef('');
   const lastApproachWarning = useRef('');
+  const lastRecognizedWord = useRef('');
+  const lastObstacleWarning = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -134,11 +136,13 @@ export default function CameraScreen() {
         ? 'Analyzing the signed phrase…'
         : offlinePhrase
           ? offlinePhrase.speech
-          : spelledText
-            ? `Spelled: "${spelledText}"`
-            : currentLetter
-              ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
-              : 'Ready for a complete signed phrase';
+          : recognizedWord
+            ? `Sign: "${recognizedWord.toUpperCase()}"`
+            : spelledText
+              ? `Spelled: "${spelledText}"`
+              : currentLetter
+                ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
+                : 'Ready for a complete signed phrase';
 
   const browserSignDetail = signContext.error
     ? signContext.error
@@ -251,6 +255,26 @@ export default function CameraScreen() {
       speak(offlinePhrase.speech);
     }
   }, [offlinePhrase?.trigger]);
+
+  useEffect(() => {
+    if (!recognizedWord) {
+      lastRecognizedWord.current = '';
+      return;
+    }
+    if (recognizedWord !== lastRecognizedWord.current) {
+      lastRecognizedWord.current = recognizedWord;
+      const phrase = resolveOfflinePhrase(recognizedWord);
+      speak(phrase ? phrase.speech : recognizedWord);
+    }
+  }, [recognizedWord]);
+
+  useEffect(() => {
+    if (isSignMode || !vision?.should_speak || !vision.speech || vision.urgency === 'low') return;
+    if (vision.scene_key !== lastObstacleWarning.current) {
+      lastObstacleWarning.current = vision.scene_key;
+      speak(vision.speech);
+    }
+  }, [isSignMode, vision?.should_speak, vision?.speech, vision?.urgency, vision?.scene_key]);
 
   if (!permission) return <View style={c.fallback} />;
 
