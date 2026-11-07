@@ -124,7 +124,7 @@ export default function AssistantHub() {
             <View style={s.brandTitleRow}>
               <Text style={s.brandTitle}>GuideLens</Text>
               <View style={s.versionChip}>
-                <Text style={s.versionText}>v0.1.4</Text>
+                <Text style={s.versionText}>v0.1.5</Text>
               </View>
             </View>
             <Text style={s.brandSubtitle}>Spatial Perception & Sign Intelligence</Text>
