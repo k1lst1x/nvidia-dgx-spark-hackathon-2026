@@ -95,7 +95,7 @@ export default function CameraScreen() {
       t: `${Math.round((item.y || 0) * 100)}%` as `${number}%`,
       w: `${Math.round((item.width || 0) * 100)}%` as `${number}%`,
       h: `${Math.round((item.height || 0) * 100)}%` as `${number}%`,
-      label: `${item.label}${item.track_id ? ` #${item.track_id}` : ''}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ` · ${Math.round(item.confidence * 100)}%`}`,
+      label: `${item.label}${item.track_id ? ` #${item.track_id}` : ''}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : item.relative_proximity != null ? ` · ${item.relative_proximity >= 0.67 ? 'nearer' : item.relative_proximity <= 0.33 ? 'farther' : 'mid-depth'}` : ` · ${Math.round(item.confidence * 100)}%`}`,
     }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
@@ -121,16 +121,8 @@ export default function CameraScreen() {
   const currentFingerspelledWord = spelledText.trim().split(/\s+/).at(-1) || '';
   const phraseSuggestions = predictOfflineCompletions(currentFingerspelledWord);
   const wordState = signContext.wordState;
-  const recognizedWordPhrase = wordState?.phrase || '';
   const recognizedWord = wordState?.currentWord || '';
-
-  const formattedWordPhrase = recognizedWordPhrase
-    ? recognizedWordPhrase.split(' ').map(formatAslWord).join(' ')
-    : '';
-
-  const top3Summary = wordState?.top3 && wordState.top3.length > 0 && wordState.top3[0].confidence >= 0.20
-    ? wordState.top3.map((p) => `${formatAslWord(p.label)} ${Math.round(p.confidence * 100)}%`).join(' · ')
-    : '';
+  const displayedTranscript = translation || spelledText;
 
   const browserSignHeading = signContext.error
     ? 'Hand tracking needs attention.'
@@ -140,17 +132,13 @@ export default function CameraScreen() {
       ? translation
       : isAnalysingContext
         ? 'Analyzing the signed phrase…'
-        : formattedWordPhrase
-          ? formattedWordPhrase
-      : recognizedWord && (wordState?.currentConfidence || 0) >= 0.30
-        ? `Sign: ${formatAslWord(recognizedWord)} · ${Math.round((wordState?.currentConfidence || 0) * 100)}%`
-    : offlinePhrase
-      ? offlinePhrase.speech
-      : spelledText
-        ? `Spelled: "${spelledText}"`
-      : currentLetter
-        ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
-        : 'Ready for ASL gestures';
+        : offlinePhrase
+          ? offlinePhrase.speech
+          : spelledText
+            ? `Spelled: "${spelledText}"`
+            : currentLetter
+              ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
+              : 'Ready for a complete signed phrase';
 
   const browserSignDetail = signContext.error
     ? signContext.error
@@ -158,21 +146,13 @@ export default function CameraScreen() {
       ? 'Contextual phrase result · Confirm its meaning with the signer'
       : isAnalysingContext
         ? 'Collecting an overlapping sequence before producing a phrase result'
-        : formattedWordPhrase
-          ? 'Isolated-sign buffer · Waiting for contextual phrase analysis'
-      : top3Summary
-        ? `Detected sign candidate: ${top3Summary}`
-      : recognizedWord
-        ? `Analyzing motion · ${Math.round((wordState?.bufferProgress || 0) * 100)}% temporal buffer`
-    : offlinePhrase
-      ? `Offline phrase · ${offlinePhrase.trigger} · no network required`
-      : spelledText
-        ? `Fingerspell one of ${offlinePhraseCount} offline phrases or any word · On-device model (${aslState?.accuracyScore || 88}% test accuracy)`
-      : currentLetter
-        ? `Hold steady to lock "${currentLetter}" into word buffer`
-        : signContext.handCount > 0
-          ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} tracked · Dynamic signs (Hello, Yes, No, Please, Thank you) or Fingerspell (A–Z)`
-          : 'Hold hand in front of camera to sign or fingerspell';
+        : offlinePhrase
+          ? `Offline phrase · ${offlinePhrase.trigger} · no network required`
+          : spelledText
+            ? 'Fingerspelling buffer · contextual translation continues in the background'
+            : signContext.handCount > 0
+              ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} · ${signContext.faceTracked ? 'face' : 'face searching'} · ${signContext.poseTracked ? 'body pose' : 'body searching'} · multimodal movement capture`
+              : 'Frame your hands, face, and upper body to sign';
 
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
@@ -390,19 +370,19 @@ export default function CameraScreen() {
           {usesBrowserHandTracking ? (
             <View style={[c.aslWordCard, c.aslWordCardPanel]}>
               <View style={c.aslWordHeader}>
-                <Text style={c.aslWordLabel}>OFFLINE TRANSCRIPT</Text>
+                <Text style={c.aslWordLabel}>{translation ? 'CONTEXTUAL TRANSLATION' : 'FINGERSPELL BUFFER'}</Text>
                 <Pressable
-                  onPress={() => speak(recognizedWordPhrase || offlinePhrase?.speech || spelledText)}
-                  disabled={!recognizedWordPhrase && !spelledText}
-                  style={[c.aslSpeakMiniBtn, !recognizedWordPhrase && !spelledText && c.aslSpeakMiniBtnDisabled]}
+                  onPress={() => speak(displayedTranscript || offlinePhrase?.speech)}
+                  disabled={!displayedTranscript}
+                  style={[c.aslSpeakMiniBtn, !displayedTranscript && c.aslSpeakMiniBtnDisabled]}
                   accessibilityLabel="Speak word buffer"
                 >
                   <Ionicons name="volume-high" size={15} color="#07110F" />
                   <Text style={c.aslSpeakMiniText}>Speak</Text>
                 </Pressable>
               </View>
-              <Text style={[c.aslWordText, !spelledText && c.aslWordTextEmpty]}>
-                {recognizedWordPhrase || spelledText || 'Start signing'}
+              <Text style={[c.aslWordText, !displayedTranscript && c.aslWordTextEmpty]}>
+                {displayedTranscript || 'Waiting for a complete signed phrase'}
                 <Text style={c.aslCursor}>_</Text>
               </Text>
 

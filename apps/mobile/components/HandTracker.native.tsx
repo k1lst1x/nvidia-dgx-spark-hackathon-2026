@@ -8,6 +8,8 @@ export type SignContextState = {
   ready: boolean;
   error?: string;
   aslState?: ASLSessionState;
+  faceTracked?: boolean;
+  poseTracked?: boolean;
   wordState?: ASLWordState;
 };
 

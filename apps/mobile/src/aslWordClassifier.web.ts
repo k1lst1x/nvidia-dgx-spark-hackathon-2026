@@ -313,7 +313,8 @@ export class ASLWordEngine {
         kinematicMatch.label !== this.lastCommitted ||
         now - this.lastCommitTime > this.commitCooldownMs
       ) {
-        this.phrase.push(kinematicMatch.label);
+        // Isolated gesture guesses are capture hints only. Sentence text is
+        // produced by the temporal multimodal decoder, never appended here.
         this.lastCommitted = kinematicMatch.label;
         this.lastCommitTime = now;
         this.frames = [];
@@ -378,7 +379,7 @@ export class ASLWordEngine {
           this.stablePredictions >= requiredStable &&
           (best.label !== this.lastCommitted || now - this.lastCommitTime > this.commitCooldownMs)
         ) {
-          this.phrase.push(best.label);
+          // Do not compose a transcript from isolated classifier guesses.
           this.lastCommitted = best.label;
           this.lastCommitTime = now;
           this.stablePredictions = 0;

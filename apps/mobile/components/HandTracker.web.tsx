@@ -7,7 +7,9 @@ const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/was
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const faceModelPath = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 const poseModelPath = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
-const holisticModelPath = 'https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/latest/holistic_landmarker.task';
+// Pin the task asset version. `latest` is not a supported GCS model version
+// and caused the holistic path to be silently unreachable in some browsers.
+const holisticModelPath = 'https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task';
 const visionModule = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs';
 const framesPerGesture = 30;
 const contextGestures = 6;
@@ -45,11 +47,14 @@ type PoseDetector = {
 
 type HolisticDetector = {
   detectForVideo: (video: HTMLVideoElement, timestamp: number) => {
-    leftHandLandmarks?: Landmark[];
-    rightHandLandmarks?: Landmark[];
-    faceLandmarks?: Landmark[];
-    poseLandmarks?: Landmark[];
-    faceBlendshapes?: { categories: Array<{ categoryName: string; score: number }> };
+    // The official Tasks API returns one array per detected person/face/hand.
+    // Holistic is configured for one signer, so index 0 is the synchronized
+    // face, pose, and hand result for the current video frame.
+    leftHandLandmarks: Landmark[][];
+    rightHandLandmarks: Landmark[][];
+    faceLandmarks: Landmark[][];
+    poseLandmarks: Landmark[][];
+    faceBlendshapes: Array<{ categories: Array<{ categoryName: string; score: number }> }>;
   };
   close: () => void;
 };
@@ -149,6 +154,11 @@ async function createHolisticDetector(runtime: VisionRuntime, vision: unknown): 
     baseOptions: { modelAssetPath: holisticModelPath, delegate },
     runningMode: 'VIDEO',
     outputFaceBlendshapes: true,
+    minFaceDetectionConfidence: 0.4,
+    minFacePresenceConfidence: 0.4,
+    minPoseDetectionConfidence: 0.4,
+    minPosePresenceConfidence: 0.4,
+    minHandLandmarksConfidence: 0.4,
   });
   try {
     return await runtime.HolisticLandmarker.createFromOptions(vision, options('GPU'));
@@ -387,13 +397,35 @@ export default function HandTracker({
       try {
         const runtime = await getVisionRuntime();
         const vision = await runtime.FilesetResolver.forVisionTasks(wasmRoot);
-        detector = await createHandDetector(runtime, vision);
-        const [face, pose] = await Promise.allSettled([
-          createFaceDetector(runtime, vision),
-          createPoseDetector(runtime, vision),
-        ]);
-        faceDetector = face.status === 'fulfilled' ? face.value : undefined;
-        poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
+        let fallbackSetup: Promise<void> | undefined;
+        const activateIndividualFallback = () => {
+          if (!fallbackSetup) {
+            fallbackSetup = (async () => {
+              const [hand, face, pose] = await Promise.allSettled([
+                createHandDetector(runtime, vision),
+                createFaceDetector(runtime, vision),
+                createPoseDetector(runtime, vision),
+              ]);
+              if (hand.status !== 'fulfilled') {
+                throw hand.reason instanceof Error ? hand.reason : new Error('Hand tracker could not start.');
+              }
+              detector = hand.value;
+              faceDetector = face.status === 'fulfilled' ? face.value : undefined;
+              poseDetector = pose.status === 'fulfilled' ? pose.value : undefined;
+            })();
+          }
+          return fallbackSetup;
+        };
+        // Holistic produces hands, face, blendshapes, and pose from one
+        // timestamped frame. This is essential for temporal signing motion.
+        // Some devices/browsers cannot run the composite model, so retain the
+        // existing individual-task implementation as a complete fallback.
+        try {
+          holisticDetector = await createHolisticDetector(runtime, vision);
+        } catch (holisticError) {
+          console.warn('Holistic tracker unavailable; using individual MediaPipe trackers.', holisticError);
+          await activateIndividualFallback();
+        }
 
         if (!active) return;
 
@@ -425,7 +457,13 @@ export default function HandTracker({
         reportContext(0);
 
         const track = () => {
-          if (!active || (!detector && !holisticDetector)) return;
+          if (!active) return;
+          // A failed Holistic frame can trigger an asynchronous fallback setup.
+          // Keep the animation loop alive until the individual trackers are ready.
+          if (!detector && !holisticDetector) {
+            animationFrame = requestAnimationFrame(track);
+            return;
+          }
 
           if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
             canvas.width = video.videoWidth;
@@ -438,31 +476,52 @@ export default function HandTracker({
               let face: ReturnType<FaceDetector['detectForVideo']> | undefined;
               let pose: ReturnType<PoseDetector['detectForVideo']> | undefined;
 
-              if (detector) {
-                results = detector.detectForVideo(video, timestamp);
-                face = faceDetector?.detectForVideo(video, timestamp);
-                pose = poseDetector?.detectForVideo(video, timestamp);
-              } else if (holisticDetector) {
-                const holistic = holisticDetector.detectForVideo(video, timestamp);
-                const landmarks: Landmark[][] = [];
-                const handednesses: Handedness = [];
-                if (holistic.leftHandLandmarks && holistic.leftHandLandmarks.length > 0) {
-                  landmarks.push(holistic.leftHandLandmarks);
-                  handednesses.push([{ categoryName: 'Left', score: 1 }]);
+              try {
+                if (detector) {
+                  results = detector.detectForVideo(video, timestamp);
+                  // A face or pose model failure must not stop hand/motion
+                  // capture. Preserve the available modalities for this frame.
+                  try { face = faceDetector?.detectForVideo(video, timestamp); }
+                  catch (error) { console.warn('Face tracker frame failed.', error); }
+                  try { pose = poseDetector?.detectForVideo(video, timestamp); }
+                  catch (error) { console.warn('Pose tracker frame failed.', error); }
+                } else if (holisticDetector) {
+                  const holistic = holisticDetector.detectForVideo(video, timestamp);
+                  const landmarks: Landmark[][] = [];
+                  const handednesses: Handedness = [];
+                  const leftHand = holistic.leftHandLandmarks[0];
+                  const rightHand = holistic.rightHandLandmarks[0];
+                  if (leftHand && leftHand.length > 0) {
+                    landmarks.push(leftHand);
+                    handednesses.push([{ categoryName: 'Left', score: 1 }]);
+                  }
+                  if (rightHand && rightHand.length > 0) {
+                    landmarks.push(rightHand);
+                    handednesses.push([{ categoryName: 'Right', score: 1 }]);
+                  }
+                  results = { landmarks, handednesses, handedness: handednesses };
+                  face = {
+                    faceLandmarks: holistic.faceLandmarks,
+                    faceBlendshapes: holistic.faceBlendshapes,
+                  };
+                  pose = { landmarks: holistic.poseLandmarks };
+                } else {
+                  animationFrame = requestAnimationFrame(track);
+                  return;
                 }
-                if (holistic.rightHandLandmarks && holistic.rightHandLandmarks.length > 0) {
-                  landmarks.push(holistic.rightHandLandmarks);
-                  handednesses.push([{ categoryName: 'Right', score: 1 }]);
+              } catch (error) {
+                if (holisticDetector) {
+                  console.warn('Holistic tracking frame failed; switching to individual trackers.', error);
+                  holisticDetector.close();
+                  holisticDetector = undefined;
+                  void activateIndividualFallback().catch((fallbackError) => {
+                    reportContext(0, `Tracking fallback failed: ${fallbackError instanceof Error ? fallbackError.message : 'unknown error'}`);
+                  });
+                  reportContext(0, 'Reconnecting hand, face, and body tracking…');
+                } else {
+                  reportContext(0, `Hand tracking frame failed: ${error instanceof Error ? error.message : 'unknown error'}`);
                 }
-                results = { landmarks, handednesses, handedness: handednesses };
-                face = {
-                  faceLandmarks: holistic.faceLandmarks && holistic.faceLandmarks.length > 0 ? [holistic.faceLandmarks] : [],
-                  faceBlendshapes: holistic.faceBlendshapes ? [holistic.faceBlendshapes] : [],
-                };
-                pose = {
-                  landmarks: holistic.poseLandmarks && holistic.poseLandmarks.length > 0 ? [holistic.poseLandmarks] : [],
-                };
-              } else {
+                animationFrame = requestAnimationFrame(track);
                 return;
               }
               context.clearRect(0, 0, canvas.width, canvas.height);
