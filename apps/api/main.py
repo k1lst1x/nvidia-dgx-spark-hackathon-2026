@@ -19,7 +19,12 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 
-from depth import ApproachingObjectTracker, DepthAnythingMetric, readings_for_boxes
+from depth import (
+    ApproachingObjectTracker,
+    DepthAnythingMetric,
+    readings_for_boxes,
+    relative_proximity_for_boxes,
+)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
@@ -39,7 +44,12 @@ logger = logging.getLogger("guidelens")
 app = FastAPI(title="GuideLens Vision API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8081").split(","),
+    # Expo/Web may serve the same local app via either hostname. Support both
+    # explicit loopback origins by default; production still supplies its own
+    # comma-separated CORS_ORIGINS value.
+    allow_origins=os.getenv(
+        "CORS_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082"
+    ).split(","),
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-Session-ID"],
 )
@@ -64,6 +74,9 @@ class DetectedObject(BaseModel):
     width: float | None = Field(default=None, ge=0, le=1)
     height: float | None = Field(default=None, ge=0, le=1)
     distance_m: float | None = Field(default=None, gt=0, le=80)
+    # Normalized only within the current frame. This is used for pretrained
+    # relative-depth checkpoints and must never be presented as meters.
+    relative_proximity: float | None = Field(default=None, ge=0, le=1)
     # Short-lived ByteTrack ID for associating one camera feed's boxes over time.
     # It is intentionally not a persistent identity or person identifier.
     track_id: int | None = Field(default=None, ge=1)
@@ -180,6 +193,21 @@ def _position_for_box(x: float, y: float, width: float, height: float) -> str:
     horizontal = "left" if x + width / 2 < 0.33 else "right" if x + width / 2 > 0.67 else "center"
     vertical = "upper" if y + height / 2 < 0.33 else "lower" if y + height / 2 > 0.67 else "middle"
     return horizontal if vertical == "middle" else f"{vertical} {horizontal}"
+
+
+def _local_scene_result(objects: list[DetectedObject]) -> VisionResult:
+    """Keep verified local vision usable when the optional cloud narrator fails."""
+    labels = list(dict.fromkeys(item.label for item in objects))[:3]
+    description = ", ".join(labels) if labels else "no recognized objects"
+    return VisionResult(
+        summary=f"Detected {description}",
+        speech=f"Detected {description}.",
+        scene_key=f"local:{'-'.join(labels) or 'empty'}",
+        urgency="low",
+        changed=True,
+        objects=objects[:8],
+        task="scene",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -433,7 +461,12 @@ def health():
         "configured": bool(os.getenv("GROQ_API_KEY")),
         "model": MODEL,
         "yolo": {"enabled": YOLO_ENABLED, "model": YOLO_MODEL if YOLO_ENABLED else None},
-        "depth": {"enabled": _depth_model.enabled, "ready": _depth_model.ready},
+        "depth": {
+            "enabled": _depth_model.enabled,
+            "ready": _depth_model.ready,
+            "mode": _depth_model.mode,
+            "metric": _depth_model.is_metric,
+        },
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -466,21 +499,36 @@ async def describe(
         warnings = []
         if verified_objects and _depth_model.ready:
             depth_map = await asyncio.to_thread(_depth_model.infer, body)
-            readings = readings_for_boxes(depth_map, verified_objects)
-            distances = {
-                (reading.label, round(reading.x, 3), round(reading.y, 3)): reading.depth_m
-                for reading in readings
-            }
-            verified_objects = [
-                item.model_copy(update={
-                    "distance_m": distances.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
-                })
-                for item in verified_objects
-            ]
-            warnings = _approach_tracker.update(client_id, readings)
-        result = await _call_groq(
-            [(body, image.content_type)], previous_scene_key[:80], task, verified_objects,
-        )
+            if _depth_model.is_metric:
+                readings = readings_for_boxes(depth_map, verified_objects)
+                distances = {
+                    (reading.label, round(reading.x, 3), round(reading.y, 3)): reading.depth_m
+                    for reading in readings
+                }
+                verified_objects = [
+                    item.model_copy(update={
+                        "distance_m": distances.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
+                    })
+                    for item in verified_objects
+                ]
+                warnings = _approach_tracker.update(client_id, readings)
+            else:
+                proximity = relative_proximity_for_boxes(depth_map, verified_objects)
+                verified_objects = [
+                    item.model_copy(update={
+                        "relative_proximity": proximity.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
+                    })
+                    for item in verified_objects
+                ]
+        try:
+            result = await _call_groq(
+                [(body, image.content_type)], previous_scene_key[:80], task, verified_objects,
+            )
+        except HTTPException as error:
+            if task != "scene" or not verified_objects:
+                raise
+            logger.warning("cloud_scene_unavailable_using_local_detection detail=%s", error.detail)
+            result = _local_scene_result(verified_objects)
     # Geometry comes from the detector, never the language model. This lets the
     # mobile client draw accurate fallback boxes when its local model is absent.
     if verified_objects:

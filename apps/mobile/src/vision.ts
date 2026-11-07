@@ -14,6 +14,7 @@ export type VisionObject = {
   width?: number | null;
   height?: number | null;
   distance_m?: number | null;
+  relative_proximity?: number | null;
   track_id?: number | null;
 };
 

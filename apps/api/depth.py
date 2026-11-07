@@ -1,4 +1,4 @@
-"""Conservative metric-depth and approaching-object helpers for Scene Assist.
+"""Depth Anything V2 preprocessing and conservative approach helpers for Scene Assist.
 
 The model is optional.  It uses the official Depth Anything V2 metric-depth
 implementation vendored into the API image at build time; the checkpoint is
@@ -94,16 +94,33 @@ class ApproachingObjectTracker:
 
 
 class DepthAnythingMetric:
-    """Lazy wrapper around official Depth Anything V2 metric-depth code."""
+    """Lazy Depth Anything V2 wrapper for metric or relative-depth checkpoints.
+
+    ``metric`` checkpoints produce depth in meters. Pretrained ViT checkpoints
+    such as ``depth_anything_v2_vitl.pth`` produce *relative* depth only: a
+    larger value means visually nearer in that image, not a physical distance.
+    """
 
     def __init__(self) -> None:
         self.enabled = os.getenv("DEPTH_ANYTHING_ENABLED", "false").lower() in {"1", "true", "yes"}
-        self.repo_path = Path(os.getenv("DEPTH_ANYTHING_REPO", "/opt/depth-anything-v2/metric_depth"))
-        self.checkpoint = Path(os.getenv("DEPTH_ANYTHING_CHECKPOINT", "/models/depth_anything_v2_metric_hypersim_vits.pth"))
+        self.mode = os.getenv("DEPTH_ANYTHING_MODE", "metric").lower()
+        if self.mode not in {"metric", "relative"}:
+            raise ValueError("DEPTH_ANYTHING_MODE must be 'metric' or 'relative'")
+        default_repo = "/opt/depth-anything-v2/metric_depth" if self.is_metric else "/opt/depth-anything-v2"
+        default_checkpoint = (
+            "/models/depth_anything_v2_metric_hypersim_vits.pth"
+            if self.is_metric else "/models/depth_anything_v2_vitl.pth"
+        )
+        self.repo_path = Path(os.getenv("DEPTH_ANYTHING_REPO", default_repo))
+        self.checkpoint = Path(os.getenv("DEPTH_ANYTHING_CHECKPOINT", default_checkpoint))
         self.device = os.getenv("DEPTH_ANYTHING_DEVICE", "cuda")
         self.max_depth = float(os.getenv("DEPTH_ANYTHING_MAX_DEPTH_M", "20"))
         self.input_size = int(os.getenv("DEPTH_ANYTHING_INPUT_SIZE", "518"))
         self._model = None
+
+    @property
+    def is_metric(self) -> bool:
+        return self.mode == "metric"
 
     @property
     def ready(self) -> bool:
@@ -120,7 +137,11 @@ class DepthAnythingMetric:
             sys.path.insert(0, str(self.repo_path))
         from depth_anything_v2.dpt import DepthAnythingV2
 
-        config = {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384], "max_depth": self.max_depth}
+        config = (
+            {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384], "max_depth": self.max_depth}
+            if self.is_metric
+            else {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]}
+        )
         device = self.device if self.device != "cuda" or torch.cuda.is_available() else "cpu"
         model = DepthAnythingV2(**config)
         model.load_state_dict(torch.load(self.checkpoint, map_location="cpu", weights_only=True))
@@ -128,7 +149,7 @@ class DepthAnythingMetric:
         return self._model
 
     def infer(self, image_bytes: bytes):
-        """Return HxW metric-depth map in meters, or None when not configured."""
+        """Return an HxW metric-meter or unitless relative-depth map."""
         model = self._load()
         if model is None:
             return None
@@ -139,7 +160,20 @@ class DepthAnythingMetric:
         image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
         if image is None:
             return None
-        return model.infer_image(image, input_size=self.input_size)
+        # The upstream helper chooses a device independently of the configured
+        # model device. Run the shared preprocessing path explicitly so CPU,
+        # CUDA, and MPS deployments cannot create an image/model device mismatch.
+        import torch
+        import torch.nn.functional as functional
+
+        tensor, (height, width) = model.image2tensor(image, self.input_size)
+        device = next(model.parameters()).device
+        with torch.no_grad():
+            prediction = model(tensor.to(device))
+        prediction = functional.interpolate(
+            prediction[:, None], (height, width), mode="bilinear", align_corners=True
+        )[0, 0]
+        return prediction.detach().cpu().numpy()
 
 
 def readings_for_boxes(depth_map, objects: list[Box]) -> list[DepthReading]:
@@ -165,3 +199,38 @@ def readings_for_boxes(depth_map, objects: list[Box]) -> list[DepthReading]:
             continue
         readings.append(DepthReading(item.label, x, y, box_width, box_height, distance_m, now))
     return readings
+
+
+def relative_proximity_for_boxes(depth_map, objects: list[Box]) -> dict[tuple[str, float, float], float]:
+    """Map each detected box to a normalized *within-frame* near-depth score.
+
+    The output is in [0, 1] and is intentionally not converted to meters. It
+    only tells the UI which detected objects are comparatively closer in the
+    current camera frame.
+    """
+    if depth_map is None:
+        return {}
+    import numpy as np
+
+    finite = depth_map[np.isfinite(depth_map)]
+    if finite.size == 0:
+        return {}
+    low, high = np.percentile(finite, [5, 95])
+    scale = max(float(high - low), 1e-6)
+    height, width = depth_map.shape[:2]
+    scores: dict[tuple[str, float, float], float] = {}
+    for item in objects:
+        if None in (item.x, item.y, item.width, item.height):
+            continue
+        x, y, box_width, box_height = item.x, item.y, item.width, item.height
+        left = max(0, min(width - 1, int((x + box_width * 0.18) * width)))
+        right = max(left + 1, min(width, int((x + box_width * 0.82) * width)))
+        top = max(0, min(height - 1, int((y + box_height * 0.18) * height)))
+        bottom = max(top + 1, min(height, int((y + box_height * 0.82) * height)))
+        values = depth_map[top:bottom, left:right]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        score = float(np.clip((float(np.median(values)) - low) / scale, 0, 1))
+        scores[(item.label, round(x, 3), round(y, 3))] = score
+    return scores
