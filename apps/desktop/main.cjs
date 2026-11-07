@@ -67,7 +67,7 @@ app.whenReady().then(() => {
     window.webContents.on('will-navigate', (event, url) => {
       if (!isTrusted(url)) event.preventDefault();
     });
-    window.loadURL(`${origin}${process.env.GUIDELENS_START_PATH || ''}`);
+    window.loadURL(`${origin}${process.env.GUIDELENS_START_PATH || '/hub'}`);
     if (process.env.GUIDELENS_DEVTOOLS === '1') window.webContents.openDevTools({ mode: 'detach' });
   });
   app.on('before-quit', () => server.close());
