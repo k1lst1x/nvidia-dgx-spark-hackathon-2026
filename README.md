@@ -122,6 +122,19 @@ Each JSONL row has `features` shaped `(frames, 281)` and a `glosses` list, for e
 
 For small, privacy-preserving capture sessions, `apps/mobile/src/landmarkRecorder.web.ts` provides `SignRecorder`. It samples the live 281-feature stream at 20 FPS and downloads JSON records containing landmark frames, signer ID, verified glosses, and optional English text—never the camera video. The trainer accepts its `frames` field directly. Add controls only for an annotation workflow where a fluent signer can verify the gloss labels.
 
+### Optional Uni-Sign How2Sign research backend
+
+VisionMate retains raw MediaPipe Holistic hand, face, pose, and timestamp data in recorder exports as well as its existing 281-value CTC stream. `apps/api/unisign_adapter.py` maps raw landmarks to the four pose streams used by Uni-Sign's released pose-only architecture: body `(T,9,3)`, left hand `(T,21,3)`, right hand `(T,21,3)`, and face `(T,18,3)`. This is not a direct checkpoint-compatible replacement: the official How2Sign checkpoint expects RTM WholeBody 133-point topology and per-landmark confidence scores, while MediaPipe Tasks does not expose those scores and Face Mesh does not have the same 18-point face topology.
+
+The adapter refuses official-checkpoint inference by default in that case. A clearly labelled `presence_proxy` experiment exists only to test data plumbing and must not be used for translation-accuracy claims. Validate an export with:
+
+```bash
+PYTHONPATH=apps/api python apps/api/training/verify_unisign_adapter.py recording.json
+PYTHONPATH=apps/api python apps/api/training/verify_unisign_adapter.py recording.json --allow-presence-proxy
+```
+
+Uni-Sign's official repository and checkpoint require a separate local installation, include an mT5 decoder, and are released under a non-commercial checkpoint license. The released online script processes a finite clip rather than causal live windows, so a real-time deployment needs benchmarked causal/windowed decoding and selective fine-tuning with paired MediaPipe/RTM pose data.
+
 ## On-device detection
 
 The native and desktop apps bundle the official Apache-2.0 YOLOX Nano ONNX model (3.5 MB). ONNX Runtime performs local detection; no object-detection frames leave the device. A compact COCO object signature triggers Groq only when objects change or when the eight-second semantic-description refresh expires. Desktop uses ONNX Runtime WebAssembly inside an Electron sandbox, so it continues detecting objects even without a configured backend.
@@ -158,11 +171,11 @@ docker compose up --build
 
 The checkpoint downloads into the service's model cache the first time Scene Assist runs; it is not committed to this repository. Ultralytics distributes its implementation under AGPL-3.0 and offers an Enterprise license for proprietary distribution. Review the [Ultralytics license terms](https://docs.ultralytics.com/help/license/) before enabling it outside an AGPL-compatible project.
 
-When this detector is enabled, Scene Assist uses ByteTrack to keep a short-lived numeric ID on a detected object while the same camera feed is active. The ID resets after four idle seconds (configurable with `YOLO_TRACK_IDLE_SECONDS`) or when another session uses the shared API worker. It improves overlay continuity and depth matching; it is not a person identifier and does not improve YOLO's class accuracy.
+When this detector is enabled, Scene Assist uses BoT-SORT with sparse optical-flow camera-motion compensation to keep a short-lived numeric ID on an object while the glasses camera moves. The ID resets after four idle seconds (configurable with `YOLO_TRACK_IDLE_SECONDS`) or when another session uses the shared API worker. Camera-motion compensation improves 2-D association only: it is not metric 3-D ego-motion, a persistent person identifier, or a class-accuracy improvement.
 
-### Approximate distance and approaching-object warnings
+### Experimental distance and relative-motion debug data
 
-Scene Assist can use the official Apache-2.0 [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) metric-depth implementation to estimate object depth and issue a conservative warning only when a matching detected box becomes both closer and larger across several frames. This is not a collision detector, distance measurement tool, or safe navigation feature.
+Scene Assist can use the official Apache-2.0 [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) metric-depth implementation to estimate the central visible surface of each tracked box. `POST /v1/track` is the fast detector → depth → timestamped-history path and does not call Groq; `POST /v1/describe` remains the slower verbal-description path. With a metric checkpoint and several stable readings, the API can expose **experimental camera-relative** depth trends, relative depth velocity, and a 1-D closest-approach projection in object debug data.
 
 Download the official **metric Hypersim Small** checkpoint described in the repository's [metric-depth instructions](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth) and save it as:
 
@@ -178,7 +191,15 @@ DEPTH_ANYTHING_DEVICE=cuda # use cpu when CUDA is unavailable
 docker compose up --build
 ```
 
-Meter values are approximate. Alerts require a sustained depth decrease plus bounding-box growth and must not be relied on for street crossing, obstacle avoidance, or any other safety-critical decision.
+Meter values are approximate. The app intentionally keeps collision and mobility alerts disabled (`MOBILITY_COLLISION_WARNINGS_ENABLED=false`): BoT-SORT's compensation does not tell whether an apparent change came from the user walking or an object moving. World-frame motion requires calibrated metric depth plus an external camera-pose source and camera intrinsics; the included `EgoMotionProvider` interface is experimental and has no production provider yet. Do not use this for street crossing, obstacle avoidance, or any other safety-critical decision.
+
+To benchmark real recordings, annotate the five scenarios—stationary objects, approaching pedestrians, crossing objects, camera turns, and camera shake—then run:
+
+```bash
+PYTHONPATH=apps/api python apps/api/benchmarks/benchmark_motion.py --manifest clips.jsonl
+```
+
+The tool reports null rather than fabricating FPS, depth error, trend accuracy, or ID stability when the supplied recording manifest lacks timing or ground truth.
 
 ### Installable builds
 

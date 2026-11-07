@@ -36,6 +36,27 @@ def test_missing_provider_configuration_fails_closed():
     assert response.json()["detail"] == "Vision service is not configured"
 
 
+def test_tracking_endpoint_is_independent_of_groq_configuration():
+    # A tiny valid PNG proves the low-latency endpoint does not require or call
+    # the cloud narrator. YOLO is disabled in unit tests, so it returns an
+    # explicit empty/disabled result rather than fabricating detections.
+    image = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0"
+        b"\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    response = client.post(
+        "/v1/track",
+        headers={"X-Session-ID": "tracking-test"},
+        files={"image": ("frame.png", image, "image/png")},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detector"] == "disabled"
+    assert payload["objects"] == []
+    assert payload["collision_warnings_enabled"] is False
+
+
 def test_sign_sequence_requires_three_jpeg_frames():
     response = client.post(
         "/v1/interpret-sign",
@@ -68,3 +89,18 @@ def test_sign_sequence_fails_closed_without_provider_key():
     )
     assert response.status_code == 503
     assert response.json()["detail"] == "Vision service is not configured"
+
+
+def test_unisign_is_opt_in_and_does_not_load_from_health_check():
+    status = client.get("/v1/unisign/status")
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["enabled"] is False
+    assert payload["loaded"] is False
+    assert "checkpoint" not in payload
+
+
+def test_unisign_experimental_endpoint_fails_closed_when_disabled():
+    response = client.post("/v1/unisign/interpret", json={"raw_holistic": [{}], "experimental": True})
+    assert response.status_code == 503
+    assert "experimental" in response.json()["detail"].lower()

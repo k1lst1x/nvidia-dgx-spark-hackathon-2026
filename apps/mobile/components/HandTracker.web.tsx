@@ -1,7 +1,7 @@
 import { CSSProperties, useEffect, useRef } from 'react';
 import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
 import { ASLWordEngine, type ASLWordState } from '../src/aslWordClassifier.web';
-import { TEMPORAL_FEATURE_COUNT, type SignRecorder } from '../src/landmarkRecorder.web';
+import { TEMPORAL_FEATURE_COUNT, type RawHolisticFrame, type SignRecorder } from '../src/landmarkRecorder.web';
 
 const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
 const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
@@ -266,6 +266,40 @@ function createCtcFeatureFrame(
     facePoints ? 1 : 0,
     posePoints ? 1 : 0,
   ];
+}
+
+function copyRawLandmarks(points: Landmark[] | null | undefined) {
+  return points?.map((point) => ({ x: point.x, y: point.y, z: point.z ?? 0 })) ?? null;
+}
+
+/**
+ * Keep the original Holistic coordinates alongside the compressed 281-vector.
+ * MediaPipe Tasks exposes point coordinates but not RTM WholeBody-style
+ * per-keypoint scores, so the export records that limitation rather than
+ * manufacturing confidence values for a different pretrained model.
+ */
+function createRawHolisticFrame(
+  hands: Landmark[][],
+  handednesses: Handedness | undefined,
+  face: ReturnType<FaceDetector['detectForVideo']> | undefined,
+  pose: ReturnType<PoseDetector['detectForVideo']> | undefined,
+  timestamp: number,
+): RawHolisticFrame {
+  let left: Landmark[] | null = null;
+  let right: Landmark[] | null = null;
+  hands.forEach((points, index) => {
+    const label = handednesses?.[index]?.[0]?.categoryName;
+    if (label === 'Left') left = points;
+    else if (label === 'Right') right = points;
+  });
+  return {
+    timestamp_ms: timestamp,
+    left_hand: copyRawLandmarks(left),
+    right_hand: copyRawLandmarks(right),
+    face: copyRawLandmarks(face?.faceLandmarks[0]),
+    pose: copyRawLandmarks(pose?.landmarks[0]),
+    confidence_representation: 'not_available_from_mediapipe_tasks',
+  };
 }
 
 function distanceBetweenWrist(a: Landmark[], b: Landmark[]) {
@@ -553,6 +587,13 @@ export default function HandTracker({
                 sequence.push(temporalFrame);
                 if (trainingRecorder && temporalFrame.length === TEMPORAL_FEATURE_COUNT) {
                   trainingRecorder.addFrame(temporalFrame, timestamp);
+                  trainingRecorder.addRawHolisticFrame(createRawHolisticFrame(
+                    smoothed,
+                    handednessesArray,
+                    face,
+                    pose,
+                    timestamp,
+                  ));
                 }
                 if (sequence.length > maxContextFrames) sequence.shift();
                 totalTrackedFramesRef.current += 1;

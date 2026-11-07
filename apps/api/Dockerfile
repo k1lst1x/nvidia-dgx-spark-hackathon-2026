@@ -7,6 +7,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # supplied separately through /models rather than downloaded during a build.
 RUN git clone --depth 1 https://github.com/DepthAnything/Depth-Anything-V2.git /opt/depth-anything-v2
 COPY main.py .
+COPY schemas.py .
+COPY yolo_tracker.py .
 COPY depth.py .
+COPY motion.py .
+COPY botsort.yaml .
+COPY unisign_adapter.py .
+COPY unisign_backend.py .
 ENV PORT=8000
 CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]

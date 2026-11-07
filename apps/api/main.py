@@ -5,39 +5,50 @@ import json
 import logging
 import os
 import random
-import threading
 import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from functools import lru_cache
-from io import BytesIO
-from typing import Literal
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 from depth import (
-    ApproachingObjectTracker,
     DepthAnythingMetric,
-    readings_for_boxes,
     relative_proximity_for_boxes,
+    surface_readings_for_boxes,
 )
+from motion import MotionHistory
+from schemas import (
+    DetectedObject,
+    SignSequenceRequest,
+    SignTranslation,
+    TrackingResult,
+    UniSignRawRequest,
+    VisionResult,
+)
+from unisign_backend import UniSignBackend, UniSignBackendError
+from yolo_tracker import YoloTracker
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "1500000"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "4"))
 MIN_REQUEST_INTERVAL = float(os.getenv("MIN_REQUEST_INTERVAL", "1.5"))
+TRACK_MIN_REQUEST_INTERVAL = float(os.getenv("TRACK_MIN_REQUEST_INTERVAL", "0.7"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
 YOLO_MODEL = os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
 YOLO_DEVICE = os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu")
 YOLO_CONFIDENCE = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
-# One Ultralytics model instance is shared by the API process. Keep the ByteTrack
+# One Ultralytics model instance is shared by the API process. Keep the BoT-SORT
 # state scoped to one active camera feed so object IDs never bleed between users.
 YOLO_TRACK_IDLE_SECONDS = float(os.getenv("YOLO_TRACK_IDLE_SECONDS", "4"))
+YOLO_TRACKER_CONFIG = os.getenv("YOLO_TRACKER_CONFIG", str(Path(__file__).with_name("botsort.yaml")))
+# Never enable collision/mobility alerts based on experimental monocular geometry.
+MOBILITY_COLLISION_WARNINGS_ENABLED = os.getenv("MOBILITY_COLLISION_WARNINGS_ENABLED", "false").lower() in {"1", "true", "yes"}
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("guidelens")
@@ -56,59 +67,15 @@ app.add_middleware(
 
 _slots = asyncio.Semaphore(MAX_CONCURRENCY)
 _requests: dict[str, deque[float]] = defaultdict(deque)
+_track_requests: dict[str, deque[float]] = defaultdict(deque)
 _depth_model = DepthAnythingMetric()
-_approach_tracker = ApproachingObjectTracker()
-_yolo_tracking_lock = threading.Lock()
-_yolo_tracker_session: str | None = None
-_yolo_tracker_seen_at = 0.0
-
-
-class DetectedObject(BaseModel):
-    label: str = Field(max_length=40)
-    confidence: float = Field(ge=0, le=1)
-    position: str = Field(max_length=30)
-    # Normalized coordinates are filled by the verified local YOLO detector.
-    # They are optional so Groq-only deployments retain the original API shape.
-    x: float | None = Field(default=None, ge=0, le=1)
-    y: float | None = Field(default=None, ge=0, le=1)
-    width: float | None = Field(default=None, ge=0, le=1)
-    height: float | None = Field(default=None, ge=0, le=1)
-    distance_m: float | None = Field(default=None, gt=0, le=80)
-    # Normalized only within the current frame. This is used for pretrained
-    # relative-depth checkpoints and must never be presented as meters.
-    relative_proximity: float | None = Field(default=None, ge=0, le=1)
-    # Short-lived ByteTrack ID for associating one camera feed's boxes over time.
-    # It is intentionally not a persistent identity or person identifier.
-    track_id: int | None = Field(default=None, ge=1)
-
-
-class ApproachingWarning(BaseModel):
-    label: str = Field(max_length=40)
-    distance_m: float = Field(gt=0, le=80)
-
-
-class VisionResult(BaseModel):
-    summary: str = Field(max_length=100)
-    speech: str = Field(max_length=240)
-    scene_key: str = Field(max_length=80)
-    urgency: Literal["low", "medium", "high"]
-    changed: bool
-    objects: list[DetectedObject] = Field(max_length=8)
-    approaching: list[ApproachingWarning] = Field(default_factory=list, max_length=3)
-    task: Literal["scene", "sign"]
-
-
-class SignSequenceRequest(BaseModel):
-    frames: list[str] = Field(min_length=3, max_length=3)
-    previous_transcript: str = Field(default="", max_length=600)
-
-
-class SignTranslation(BaseModel):
-    transcript: str = Field(max_length=600)
-    segment: str = Field(max_length=180)
-    confidence: float = Field(ge=0, le=1)
-    is_final: bool
-    should_speak: bool
+_unisign_backend = UniSignBackend()
+_motion_history = MotionHistory()
+_yolo_tracker = YoloTracker(
+    enabled=YOLO_ENABLED, model_path=YOLO_MODEL, device=YOLO_DEVICE,
+    confidence=YOLO_CONFIDENCE, tracker_config=YOLO_TRACKER_CONFIG,
+    idle_seconds=YOLO_TRACK_IDLE_SECONDS,
+)
 
 
 VISION_SCHEMA = {
@@ -189,10 +156,17 @@ def _rate_limit(client_id: str) -> None:
     bucket.append(now)
 
 
-def _position_for_box(x: float, y: float, width: float, height: float) -> str:
-    horizontal = "left" if x + width / 2 < 0.33 else "right" if x + width / 2 > 0.67 else "center"
-    vertical = "upper" if y + height / 2 < 0.33 else "lower" if y + height / 2 > 0.67 else "middle"
-    return horizontal if vertical == "middle" else f"{vertical} {horizontal}"
+def _track_rate_limit(client_id: str) -> None:
+    """Allow a bounded geometry cadence independent of slow cloud narration."""
+    now = time.monotonic()
+    bucket = _track_requests[client_id]
+    while bucket and now - bucket[0] > 10:
+        bucket.popleft()
+    if bucket and now - bucket[-1] < TRACK_MIN_REQUEST_INTERVAL:
+        raise HTTPException(429, "Tracking frames are arriving too quickly", headers={"Retry-After": "1"})
+    if len(bucket) >= 16:
+        raise HTTPException(429, "Tracking session rate limit exceeded", headers={"Retry-After": "1"})
+    bucket.append(now)
 
 
 def _local_scene_result(objects: list[DetectedObject]) -> VisionResult:
@@ -210,92 +184,38 @@ def _local_scene_result(objects: list[DetectedObject]) -> VisionResult:
     )
 
 
-@lru_cache(maxsize=1)
-def _get_yolo_model():
-    """Load the official Ultralytics checkpoint only when the opt-in detector is used."""
-    try:
-        from ultralytics import YOLO
-    except ImportError as exc:  # pragma: no cover - deployment configuration guard
-        raise RuntimeError("Ultralytics is not installed; rebuild the API image with requirements.txt") from exc
-    return YOLO(YOLO_MODEL)
+def _add_depth_and_motion(
+    objects: list[DetectedObject], image_bytes: bytes, session_id: str
+) -> list[DetectedObject]:
+    """Attach conservative depth/motion debug data without calling Groq.
 
-
-def _reset_yolo_tracker(model) -> None:
-    """Clear ByteTrack state attached to an already-initialized Ultralytics predictor."""
-    predictor = getattr(model, "predictor", None)
-    for tracker in getattr(predictor, "trackers", ()):
-        reset = getattr(tracker, "reset", None)
-        if reset:
-            reset()
-
-
-def _detect_with_yolo(image_bytes: bytes, session_id: str = "") -> list[DetectedObject]:
-    """Run YOLO11 + ByteTrack and return display-ready normalized, tracked boxes."""
-    global _yolo_tracker_session, _yolo_tracker_seen_at
-    if not YOLO_ENABLED:
-        return []
-    try:
-        from PIL import Image
-
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        # `persist=True` carries IDs between captures in one feed. Ultralytics'
-        # tracker lives on its shared predictor, so protect it with a lock and
-        # reset it for a new/idle session before accepting another camera frame.
-        with _yolo_tracking_lock:
-            model = _get_yolo_model()
-            now = time.monotonic()
-            if (
-                _yolo_tracker_session is not None
-                and (
-                    _yolo_tracker_session != session_id
-                    or now - _yolo_tracker_seen_at > YOLO_TRACK_IDLE_SECONDS
-                )
-            ):
-                _reset_yolo_tracker(model)
-            _yolo_tracker_session = session_id
-            _yolo_tracker_seen_at = now
-            result = model.track(
-                source=image,
-                persist=True,
-                tracker="bytetrack.yaml",
-                conf=YOLO_CONFIDENCE,
-                imgsz=640,
-                device=YOLO_DEVICE,
-                verbose=False,
-                max_det=12,
-            )[0]
-        image_width, image_height = image.size
-        names = result.names
-        detections: list[DetectedObject] = []
-        for box in result.boxes:
-            left, top, right, bottom = (float(value) for value in box.xyxy[0].tolist())
-            x = max(0.0, min(1.0, left / image_width))
-            y = max(0.0, min(1.0, top / image_height))
-            width = max(0.0, min(1.0 - x, (right - left) / image_width))
-            height = max(0.0, min(1.0 - y, (bottom - top) / image_height))
-            if width < 0.02 or height < 0.02:
-                continue
-            class_id = int(box.cls[0].item())
-            label = str(names[class_id])
-            track_id = (
-                int(box.id[0].item())
-                if getattr(result.boxes, "is_track", False) and box.id is not None
-                else None
-            )
-            detections.append(DetectedObject(
-                label=label,
-                confidence=float(box.conf[0].item()),
-                position=_position_for_box(x, y, width, height),
-                x=x,
-                y=y,
-                width=width,
-                height=height,
-                track_id=track_id,
-            ))
-        return detections
-    except Exception:
-        logger.exception("yolo_detection_failed model=%s", YOLO_MODEL)
-        return []
+    Relative-depth checkpoints can only expose within-frame ordering, so they
+    intentionally never produce distance, velocity, TTC, or warnings.
+    """
+    if not objects or not _depth_model.ready:
+        return objects
+    depth_map = _depth_model.infer(image_bytes)
+    if _depth_model.is_metric:
+        surface_readings = surface_readings_for_boxes(depth_map, objects)
+        by_track = {
+            reading.track_id: (reading.depth_m, reading.confidence, reading.spread_m)
+            for reading in surface_readings if reading.track_id is not None
+        }
+        estimates = _motion_history.update(session_id, objects, by_track)
+        return [
+            item.model_copy(update={
+                "distance_m": by_track.get(item.track_id, (None, 0, 0))[0],
+                "motion": estimates[item.track_id].as_dict() if item.track_id in estimates else None,
+            })
+            for item in objects
+        ]
+    proximity = relative_proximity_for_boxes(depth_map, objects)
+    return [
+        item.model_copy(update={
+            "relative_proximity": proximity.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
+        })
+        for item in objects
+    ]
 
 
 async def _call_groq(
@@ -460,15 +380,56 @@ def health():
         "provider": "groq",
         "configured": bool(os.getenv("GROQ_API_KEY")),
         "model": MODEL,
-        "yolo": {"enabled": YOLO_ENABLED, "model": YOLO_MODEL if YOLO_ENABLED else None},
+        "yolo": {
+            "enabled": YOLO_ENABLED,
+            "model": YOLO_MODEL if YOLO_ENABLED else None,
+            "tracker": "botsort",
+            "camera_motion_compensation": "sparseOptFlow",
+        },
         "depth": {
             "enabled": _depth_model.enabled,
             "ready": _depth_model.ready,
             "mode": _depth_model.mode,
             "metric": _depth_model.is_metric,
         },
+        # Asset readiness only; this endpoint must not allocate the 1.19 GB
+        # Uni-Sign checkpoint or mT5 decoder just to answer a health probe.
+        "unisign": _unisign_backend.status(),
+        "motion": {
+            "experimental": True,
+            "requires_metric_depth_for_motion": True,
+            "collision_warnings_enabled": MOBILITY_COLLISION_WARNINGS_ENABLED,
+        },
         "time": datetime.now(timezone.utc).isoformat(),
     }
+
+
+async def _read_tracking_image(image: UploadFile) -> bytes:
+    if image.content_type not in {"image/jpeg", "image/webp", "image/png"}:
+        raise HTTPException(415, "JPEG, WebP, or PNG required")
+    body = await image.read(MAX_IMAGE_BYTES + 1)
+    if not body or len(body) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, "Image is empty or too large")
+    return body
+
+
+@app.post("/v1/track", response_model=TrackingResult)
+async def track_scene(request: Request, image: UploadFile = File(...)):
+    """Fast detector/depth/motion path, intentionally separate from Groq."""
+    client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
+    _track_rate_limit(client_id)
+    body = await _read_tracking_image(image)
+    started = time.monotonic()
+    async with _slots:
+        objects = await asyncio.to_thread(_yolo_tracker.detect, body, client_id)
+        objects = await asyncio.to_thread(_add_depth_and_motion, objects, body, client_id)
+    return TrackingResult(
+        objects=objects,
+        tracking_latency_ms=int((time.monotonic() - started) * 1000),
+        detector="yolo11-botsort" if YOLO_ENABLED else "disabled",
+        metric_depth=_depth_model.ready and _depth_model.is_metric,
+        collision_warnings_enabled=False,
+    )
 
 
 @app.post("/v1/describe", response_model=VisionResult)
@@ -483,43 +444,17 @@ async def describe(
     request_id = uuid.uuid4().hex[:12]
     client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
     _rate_limit(client_id)
-    if image.content_type not in {"image/jpeg", "image/webp", "image/png"}:
-        raise HTTPException(415, "JPEG, WebP, or PNG required")
-    body = await image.read(MAX_IMAGE_BYTES + 1)
-    if not body or len(body) > MAX_IMAGE_BYTES:
-        raise HTTPException(413, "Image is empty or too large")
+    body = await _read_tracking_image(image)
     if not os.getenv("GROQ_API_KEY"):
         raise HTTPException(503, "Vision service is not configured")
     started = time.monotonic()
     async with _slots:
         verified_objects = (
-            await asyncio.to_thread(_detect_with_yolo, body, client_id)
+            await asyncio.to_thread(_yolo_tracker.detect, body, client_id)
             if task == "scene" else []
         )
-        warnings = []
         if verified_objects and _depth_model.ready:
-            depth_map = await asyncio.to_thread(_depth_model.infer, body)
-            if _depth_model.is_metric:
-                readings = readings_for_boxes(depth_map, verified_objects)
-                distances = {
-                    (reading.label, round(reading.x, 3), round(reading.y, 3)): reading.depth_m
-                    for reading in readings
-                }
-                verified_objects = [
-                    item.model_copy(update={
-                        "distance_m": distances.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
-                    })
-                    for item in verified_objects
-                ]
-                warnings = _approach_tracker.update(client_id, readings)
-            else:
-                proximity = relative_proximity_for_boxes(depth_map, verified_objects)
-                verified_objects = [
-                    item.model_copy(update={
-                        "relative_proximity": proximity.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
-                    })
-                    for item in verified_objects
-                ]
+            verified_objects = await asyncio.to_thread(_add_depth_and_motion, verified_objects, body, client_id)
         try:
             result = await _call_groq(
                 [(body, image.content_type)], previous_scene_key[:80], task, verified_objects,
@@ -533,16 +468,6 @@ async def describe(
     # mobile client draw accurate fallback boxes when its local model is absent.
     if verified_objects:
         result.objects = verified_objects[:8]
-    if warnings:
-        result.approaching = [
-            ApproachingWarning(label=warning.label, distance_m=round(warning.distance_m, 1))
-            for warning in warnings[:3]
-        ]
-        lead = result.approaching[0]
-        result.summary = f"Caution: {lead.label} approaching"
-        result.speech = f"Caution. {lead.label} is getting closer, about {lead.distance_m:.1f} meters away."
-        result.urgency = "high"
-        result.changed = True
     logger.info(
         "vision_complete request_id=%s latency_ms=%d bytes=%d changed=%s urgency=%s",
         request_id,
@@ -579,3 +504,18 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         sum(len(body) for body, _ in decoded),
     )
     return result
+
+
+@app.get("/v1/unisign/status")
+async def unisign_status():
+    """Expose only opt-in backend readiness; never load a large model on health checks."""
+    return _unisign_backend.status()
+
+
+@app.post("/v1/unisign/interpret")
+async def interpret_unisign_experimental(sequence: UniSignRawRequest):
+    """Research endpoint for explicitly opted-in MediaPipe compatibility runs."""
+    try:
+        return _unisign_backend.translate_raw_mediapipe(sequence.raw_holistic, experimental=sequence.experimental)
+    except UniSignBackendError as error:
+        raise HTTPException(503, str(error)) from error

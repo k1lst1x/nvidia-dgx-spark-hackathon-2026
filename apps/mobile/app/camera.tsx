@@ -6,7 +6,6 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
-import { offlinePhraseCount, resolveOfflinePhrase, predictOfflineCompletions } from '../src/offlinePhrasebook';
 import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
@@ -27,22 +26,6 @@ type AssistFrame = {
   boxes: DetectionBox[];
 };
 
-function formatAslWord(word: string): string {
-  if (!word) return '';
-  const special: Record<string, string> = {
-    thankyou: 'Thank you',
-    hello: 'Hello',
-    please: 'Please',
-    yes: 'Yes',
-    no: 'No',
-    water: 'Water',
-    alligator: 'Alligator',
-    airplane: 'Airplane',
-    fireman: 'Firefighter',
-  };
-  return special[word.toLowerCase()] || word.charAt(0).toUpperCase() + word.slice(1);
-}
-
 export default function CameraScreen() {
   const { initialMode } = useLocalSearchParams<{ initialMode?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
@@ -56,9 +39,7 @@ export default function CameraScreen() {
   const [captureVersion, setCaptureVersion] = useState(0);
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
-  const lastOfflinePhrase = useRef('');
   const lastApproachWarning = useRef('');
-  const lastRecognizedWord = useRef('');
   const lastObstacleWarning = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
@@ -70,6 +51,7 @@ export default function CameraScreen() {
   } | null>(null);
 
   const isSignMode = mode === 'sign';
+  const showVisionDebug = process.env.EXPO_PUBLIC_VISION_DEBUG === 'true';
   const usesBrowserHandTracking = isSignMode && Platform.OS === 'web';
   const { result: vision, state: visionState, detections, scanNow } = useVisionLoop(
     cameraRef,
@@ -88,7 +70,7 @@ export default function CameraScreen() {
     return counts;
   }, {});
   const localSummary = detections.length
-    ? `Detected ${detections.slice(0, 3).map((item) => `${item.label}${item.direction ? ` ${item.direction}` : ''} (~${item.distance_m ? item.distance_m.toFixed(1) : '1.0'}m)`).join(', ')}`
+    ? `Detected ${detections.slice(0, 3).map((item) => `${item.label}${item.direction ? ` ${item.direction}` : ''}`).join(', ')}`
     : 'Looking for nearby objects…';
   const serverBoxes = (vision?.objects || [])
     .filter((item) => [item.x, item.y, item.width, item.height].every((value) => typeof value === 'number'))
@@ -97,7 +79,7 @@ export default function CameraScreen() {
       t: `${Math.round((item.y || 0) * 100)}%` as `${number}%`,
       w: `${Math.round((item.width || 0) * 100)}%` as `${number}%`,
       h: `${Math.round((item.height || 0) * 100)}%` as `${number}%`,
-      label: `${item.label}${item.track_id ? ` #${item.track_id}` : ''}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : item.relative_proximity != null ? ` · ${item.relative_proximity >= 0.67 ? 'nearer' : item.relative_proximity <= 0.33 ? 'farther' : 'mid-depth'}` : ` · ${Math.round(item.confidence * 100)}%`}`,
+      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : item.relative_proximity != null ? ` · ${item.relative_proximity >= 0.67 ? 'nearer' : item.relative_proximity <= 0.33 ? 'farther' : 'mid-depth'}` : ` · ${Math.round(item.confidence * 100)}%`}${showVisionDebug ? ` · id ${item.track_id ?? '—'} · ${item.motion?.direction || item.position} · ${item.motion?.trend || 'unknown'} · ${Math.round((item.motion?.confidence ?? item.confidence) * 100)}%` : ''}`,
     }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
@@ -111,20 +93,16 @@ export default function CameraScreen() {
       t: `${Math.round(item.y * 100)}%` as `${number}%`,
       w: `${Math.round(item.width * 100)}%` as `${number}%`,
       h: `${Math.round(item.height * 100)}%` as `${number}%`,
-      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : ''}${item.direction ? ` · ${item.direction}` : ''}`,
+      label: `${item.label}${item.direction ? ` · ${item.direction}` : ''}`,
     }))),
   } : fallback;
 
-  const aslState = signContext.aslState;
-  const spelledText = aslState?.spelledText || '';
-  const currentLetter = aslState?.currentLetter || '';
-  const currentConfidence = aslState?.currentConfidence || 0;
-  const offlinePhrase = resolveOfflinePhrase(spelledText);
-  const currentFingerspelledWord = spelledText.trim().split(/\s+/).at(-1) || '';
-  const phraseSuggestions = predictOfflineCompletions(currentFingerspelledWord);
-  const wordState = signContext.wordState;
-  const recognizedWord = wordState?.currentWord || '';
-  const displayedTranscript = translation || spelledText;
+  // Fingerspelling and isolated-sign classifiers are capture aids only. Do
+  // not present their noisy letter/word guesses as a contextual translation.
+  // Never fall back to isolated letters/words here. The board represents only
+  // the contextual decoder, but exposes its real state so a stalled request
+  // is not mistaken for an empty translation.
+  const displayedTranscript = translation;
 
   const browserSignHeading = signContext.error
     ? 'Hand tracking needs attention.'
@@ -134,15 +112,7 @@ export default function CameraScreen() {
       ? translation
       : isAnalysingContext
         ? 'Analyzing the signed phrase…'
-        : offlinePhrase
-          ? offlinePhrase.speech
-          : recognizedWord
-            ? `Sign: "${recognizedWord.toUpperCase()}"`
-            : spelledText
-              ? `Spelled: "${spelledText}"`
-              : currentLetter
-                ? `Letter ${currentLetter} · ${Math.round(currentConfidence * 100)}% Match`
-                : 'Ready for a complete signed phrase';
+        : 'Ready for a complete signed phrase';
 
   const browserSignDetail = signContext.error
     ? signContext.error
@@ -150,13 +120,20 @@ export default function CameraScreen() {
       ? 'Contextual phrase result · Confirm its meaning with the signer'
       : isAnalysingContext
         ? 'Collecting an overlapping sequence before producing a phrase result'
-        : offlinePhrase
-          ? `Offline phrase · ${offlinePhrase.trigger} · no network required`
-          : spelledText
-            ? 'Fingerspelling buffer · contextual translation continues in the background'
-            : signContext.handCount > 0
+        : signContext.handCount > 0
               ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} · ${signContext.faceTracked ? 'face' : 'face searching'} · ${signContext.poseTracked ? 'body pose' : 'body searching'} · multimodal movement capture`
               : 'Frame your hands, face, and upper body to sign';
+
+  const contextBoardText = displayedTranscript
+    || translationError
+    || (isAnalysingContext
+      ? 'Analyzing the signed phrase…'
+      : signContext.ready
+        ? 'Preparing the next signed phrase…'
+        : signContext.handCount > 0
+          ? 'Capturing signed context…'
+          : 'Show your hands to begin signing');
+  const contextBoardIsError = Boolean(translationError || signContext.error);
 
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
@@ -203,8 +180,11 @@ export default function CameraScreen() {
   const interpretLiveContext = async (sequence: number[][], frames: string[]) => {
     capturedSequence.current = sequence;
     capturedFrames.current = frames;
-    // Only attempt cloud translation if backend is configured
-    if (frames.length !== 3 || translationInFlight.current || !hasVisionBackend) return;
+    if (frames.length !== 3 || translationInFlight.current) return;
+    if (!hasVisionBackend) {
+      setTranslationError('Live translation needs EXPO_PUBLIC_API_URL and the VisionMate API server.');
+      return;
+    }
     translationInFlight.current = true;
     setIsAnalysingContext(true);
     setTranslationError('');
@@ -244,29 +224,6 @@ export default function CameraScreen() {
       speak(vision.speech);
     }
   }, [isSignMode, vision?.approaching, vision?.speech]);
-
-  useEffect(() => {
-    if (!offlinePhrase) {
-      lastOfflinePhrase.current = '';
-      return;
-    }
-    if (offlinePhrase.trigger !== lastOfflinePhrase.current) {
-      lastOfflinePhrase.current = offlinePhrase.trigger;
-      speak(offlinePhrase.speech);
-    }
-  }, [offlinePhrase?.trigger]);
-
-  useEffect(() => {
-    if (!recognizedWord) {
-      lastRecognizedWord.current = '';
-      return;
-    }
-    if (recognizedWord !== lastRecognizedWord.current) {
-      lastRecognizedWord.current = recognizedWord;
-      const phrase = resolveOfflinePhrase(recognizedWord);
-      speak(phrase ? phrase.speech : recognizedWord);
-    }
-  }, [recognizedWord]);
 
   useEffect(() => {
     if (isSignMode || !vision?.should_speak || !vision.speech || vision.urgency === 'low') return;
@@ -325,7 +282,7 @@ export default function CameraScreen() {
               {usesBrowserHandTracking
                 ? hasVisionBackend
                   ? 'HYBRID ASL · OFFLINE + CLOUD'
-                  : 'OFFLINE ASL FINGERSPELLING'
+                  : 'ASL CONTEXT · CAPTURING'
                 : visionState === 'offline'
                   ? 'VISION · RECONNECTING'
                   : visionState === 'analyzing'
@@ -356,36 +313,10 @@ export default function CameraScreen() {
         <View style={c.reticle}>
           {usesBrowserHandTracking && isSignMode && (
             <View style={c.aslHudContainer}>
-              {currentLetter ? (
-                <View style={c.aslLetterCard}>
-                  <View style={c.aslBadge}>
-                    <Text style={c.aslBadgeLetter}>{currentLetter}</Text>
-                  </View>
-                  <View style={c.aslMeta}>
-                    <View style={c.aslMetaRow}>
-                      <Text style={c.aslConfidenceText}>{Math.round(currentConfidence * 100)}% match</Text>
-                      <Text style={c.aslChipText}>On-Device AI</Text>
-                    </View>
-                    <View style={c.aslProgressTrack}>
-                      <View
-                        style={[
-                          c.aslProgressFill,
-                          { width: `${Math.round((aslState?.holdProgress || 0) * 100)}%` },
-                          aslState?.isHolding && c.aslProgressFillDone,
-                        ]}
-                      />
-                    </View>
-                  </View>
-                </View>
-              ) : (
-                <View style={c.aslPromptCard}>
-                  <Ionicons name="hand-left-outline" size={17} color="#C8FF72" />
-                  <Text style={c.aslPromptText}>
-                    {signContext.handCount > 0 ? 'Hold sign steady to commit' : 'Show hand in frame to spell ASL'}
-                  </Text>
-                </View>
-              )}
-
+              <View style={c.aslPromptCard}>
+                <Ionicons name="chatbubbles-outline" size={17} color="#C8FF72" />
+                <Text style={c.aslPromptText}>Context-aware sign translation</Text>
+              </View>
             </View>
           )}
         </View>
@@ -394,54 +325,29 @@ export default function CameraScreen() {
           {usesBrowserHandTracking ? (
             <View style={[c.aslWordCard, c.aslWordCardPanel]}>
               <View style={c.aslWordHeader}>
-                <Text style={c.aslWordLabel}>{translation ? 'CONTEXTUAL TRANSLATION' : 'FINGERSPELL BUFFER'}</Text>
+                <Text style={c.aslWordLabel}>SIGN CONTEXT</Text>
                 <Pressable
-                  onPress={() => speak(displayedTranscript || offlinePhrase?.speech)}
+                  onPress={() => speak(displayedTranscript)}
                   disabled={!displayedTranscript}
                   style={[c.aslSpeakMiniBtn, !displayedTranscript && c.aslSpeakMiniBtnDisabled]}
-                  accessibilityLabel="Speak word buffer"
+                  accessibilityLabel="Speak contextual translation"
                 >
                   <Ionicons name="volume-high" size={15} color="#07110F" />
                   <Text style={c.aslSpeakMiniText}>Speak</Text>
                 </Pressable>
               </View>
-              <Text style={[c.aslWordText, !displayedTranscript && c.aslWordTextEmpty]}>
-                {displayedTranscript || 'Waiting for a complete signed phrase'}
+              <Text style={[c.aslWordText, !displayedTranscript && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
+                {contextBoardText}
                 <Text style={c.aslCursor}>_</Text>
               </Text>
-
-              {phraseSuggestions.length > 0 && (
-                <View style={c.suggestionsRow}>
-                  {phraseSuggestions.map((sug) => (
-                    <Pressable
-                      key={sug.trigger}
-                      onPress={() => speak(sug.speech)}
-                      style={c.suggestionChip}
-                      accessibilityLabel={`Suggest word ${sug.trigger}`}
-                    >
-                      <Ionicons name="sparkles" size={11} color="#07110F" />
-                      <Text style={c.suggestionChipText}>{sug.trigger}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              )}
-
               <View style={c.aslWordActions}>
-                <Pressable onPress={() => aslEngineRef.current?.addSpace()} style={c.aslActionBtn} accessibilityLabel="Add space">
-                  <Ionicons name="return-down-forward-outline" size={16} color="#DDE9E4" />
-                  <Text style={c.aslActionText}>Space</Text>
-                </Pressable>
-                <Pressable onPress={() => aslEngineRef.current?.backspace()} style={c.aslActionBtn} accessibilityLabel="Delete last letter">
-                  <Ionicons name="backspace-outline" size={16} color="#DDE9E4" />
-                  <Text style={c.aslActionText}>Del</Text>
-                </Pressable>
-                <Pressable onPress={() => aslEngineRef.current?.clearText()} style={[c.aslActionBtn, c.aslActionClearBtn]} accessibilityLabel="Clear word buffer">
+                <Pressable onPress={restartContextCapture} style={[c.aslActionBtn, c.aslActionClearBtn]} accessibilityLabel="Clear sign context">
                   <Ionicons name="trash-outline" size={15} color="#FF826F" />
-                  <Text style={[c.aslActionText, c.aslActionClearText]}>Clear</Text>
+                  <Text style={[c.aslActionText, c.aslActionClearText]}>Clear context</Text>
                 </Pressable>
               </View>
             </View>
-          ) : (
+          ) : !usesBrowserHandTracking ? (
             <View style={[c.answer, isSignMode && c.signAnswer]}>
               <View style={[c.answerIcon, isSignMode && c.signAnswerIcon]}><Ionicons name={isSignMode ? 'hand-left' : current.icon} size={25} color="#07110F" /></View>
               <View style={c.answerCopy}>
@@ -449,7 +355,7 @@ export default function CameraScreen() {
                 <Text style={isSignMode ? c.translationDetail : c.answerText}>{isSignMode ? signDetail : current.detail}</Text>
               </View>
             </View>
-          )}
+          ) : null}
 
           {!usesBrowserHandTracking && (
             <>
@@ -690,6 +596,7 @@ const c = StyleSheet.create({
     minHeight: 32,
   },
   aslWordTextEmpty: { color: '#8DA39A', fontWeight: '700' },
+  aslWordTextError: { color: '#FFB0A2', fontSize: 15, lineHeight: 21 },
   aslCursor: {
     color: '#C8FF72',
     fontWeight: '400',

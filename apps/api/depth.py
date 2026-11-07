@@ -36,6 +36,15 @@ class DepthReading:
 
 
 @dataclass(frozen=True)
+class SurfaceDepthReading(DepthReading):
+    """Robust visible-surface depth with a confidence derived from map spread."""
+
+    track_id: int | None
+    confidence: float
+    spread_m: float
+
+
+@dataclass(frozen=True)
 class ApproachingObject:
     label: str
     distance_m: float
@@ -198,6 +207,48 @@ def readings_for_boxes(depth_map, objects: list[Box]) -> list[DepthReading]:
         if not np.isfinite(distance_m) or distance_m <= 0:
             continue
         readings.append(DepthReading(item.label, x, y, box_width, box_height, distance_m, now))
+    return readings
+
+
+def surface_readings_for_boxes(depth_map, objects: list[Box]) -> list[SurfaceDepthReading]:
+    """Measure the object interior rather than a broad box/background mixture.
+
+    The central 50% is deliberately conservative around detector boundaries.
+    Median/MAD provide a measurement-quality signal; they do not calibrate an
+    otherwise relative depth checkpoint.
+    """
+    if depth_map is None:
+        return []
+    import numpy as np
+
+    height, width = depth_map.shape[:2]
+    readings: list[SurfaceDepthReading] = []
+    now = time.monotonic()
+    for item in objects:
+        if None in (item.x, item.y, item.width, item.height):
+            continue
+        x, y, box_width, box_height = item.x, item.y, item.width, item.height
+        left = max(0, min(width - 1, int((x + box_width * 0.25) * width)))
+        right = max(left + 1, min(width, int((x + box_width * 0.75) * width)))
+        top = max(0, min(height - 1, int((y + box_height * 0.25) * height)))
+        bottom = max(top + 1, min(height, int((y + box_height * 0.75) * height)))
+        values = depth_map[top:bottom, left:right]
+        values = values[np.isfinite(values)]
+        if values.size < 9:
+            continue
+        distance_m = float(np.median(values))
+        if not np.isfinite(distance_m) or distance_m <= 0:
+            continue
+        mad = float(np.median(np.abs(values - distance_m)))
+        # The scale is intentionally strict: a depth discontinuity inside the
+        # box reduces confidence instead of becoming an apparently precise range.
+        spread = 1.4826 * mad
+        valid_fraction = min(1.0, values.size / max(9, (bottom - top) * (right - left)))
+        confidence = float(np.clip(valid_fraction * (1.0 - spread / max(distance_m * 0.35, 0.25)), 0, 1))
+        readings.append(SurfaceDepthReading(
+            item.label, x, y, box_width, box_height, distance_m, now,
+            getattr(item, "track_id", None), confidence, spread,
+        ))
     return readings
 
 

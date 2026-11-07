@@ -14,6 +14,24 @@ export type LandmarkTrainingSample = TrainingAnnotation & {
   language: 'ASL';
   fps: number;
   frames: number[][];
+  /**
+   * Uncompressed MediaPipe Holistic observations. These are deliberately
+   * separate from the 281-value CTC representation: downstream models with a
+   * different topology (for example Uni-Sign) must map them explicitly.
+   */
+  raw_holistic?: RawHolisticFrame[];
+};
+
+export type RawHolisticPoint = { x: number; y: number; z: number };
+
+export type RawHolisticFrame = {
+  timestamp_ms: number;
+  left_hand: RawHolisticPoint[] | null;
+  right_hand: RawHolisticPoint[] | null;
+  face: RawHolisticPoint[] | null;
+  pose: RawHolisticPoint[] | null;
+  /** MediaPipe Tasks does not expose per-landmark detector confidences. */
+  confidence_representation: 'not_available_from_mediapipe_tasks';
 };
 
 /**
@@ -23,6 +41,7 @@ export type LandmarkTrainingSample = TrainingAnnotation & {
  */
 export class SignRecorder {
   private frames: number[][] = [];
+  private rawFrames: RawHolisticFrame[] = [];
   private lastTimestamp = -Infinity;
   private active = false;
 
@@ -36,6 +55,7 @@ export class SignRecorder {
 
   start() {
     this.frames = [];
+    this.rawFrames = [];
     this.lastTimestamp = -Infinity;
     this.active = true;
   }
@@ -48,6 +68,14 @@ export class SignRecorder {
     if (!features.every(Number.isFinite)) throw new Error('Landmark features must be finite numbers');
     this.frames.push([...features]);
     this.lastTimestamp = timestamp;
+  }
+
+  addRawHolisticFrame(frame: RawHolisticFrame) {
+    if (!this.active) return;
+    // Keep raw and fused records on the same capture cadence. This preserves
+    // provenance while avoiding a much larger, camera-rate export.
+    if (this.rawFrames.length >= this.frames.length) return;
+    this.rawFrames.push(JSON.parse(JSON.stringify(frame)) as RawHolisticFrame);
   }
 
   stop(annotation: TrainingAnnotation): LandmarkTrainingSample {
@@ -64,8 +92,10 @@ export class SignRecorder {
       text: annotation.text?.trim(),
       fps: this.fps,
       frames: this.frames,
+      raw_holistic: this.rawFrames.length ? this.rawFrames : undefined,
     };
     this.frames = [];
+    this.rawFrames = [];
     return sample;
   }
 }

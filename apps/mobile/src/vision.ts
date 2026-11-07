@@ -16,6 +16,20 @@ export type VisionObject = {
   distance_m?: number | null;
   relative_proximity?: number | null;
   track_id?: number | null;
+  motion?: {
+    trend: 'approaching' | 'receding' | 'stable' | 'unknown';
+    direction: 'left' | 'ahead' | 'right';
+    distance_m?: number | null;
+    relative_depth_velocity_mps?: number | null;
+    time_to_closest_approach_s?: number | null;
+    minimum_separation_m?: number | null;
+    confidence: number;
+    sample_count: number;
+    camera_relative: boolean;
+    world_motion_status: string;
+    world_speed_mps?: number | null;
+    experimental: true;
+  } | null;
 };
 
 export type ApproachingWarning = { label: string; distance_m: number };
@@ -30,6 +44,15 @@ export type VisionResult = {
   task: AssistMode;
   should_speak?: boolean;
   approaching?: ApproachingWarning[];
+};
+
+type TrackingResult = {
+  objects: VisionObject[];
+  tracking_latency_ms: number;
+  detector: 'yolo11-botsort' | 'disabled';
+  metric_depth: boolean;
+  experimental: true;
+  collision_warnings_enabled: false;
 };
 
 export type SignTranslation = {
@@ -92,6 +115,23 @@ async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: str
   return (await response.json()) as VisionResult;
 }
 
+async function trackFrame(uri: string, signal: AbortSignal): Promise<TrackingResult> {
+  const apiUrl = requireApiUrl();
+  const data = new FormData();
+  if (typeof window !== 'undefined') {
+    const imageResponse = await fetch(uri);
+    if (!imageResponse.ok) throw new Error('Camera frame could not be prepared for tracking');
+    data.append('image', await imageResponse.blob(), 'frame.jpg');
+  } else {
+    data.append('image', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
+  }
+  const response = await fetch(`${apiUrl}/v1/track`, {
+    method: 'POST', body: data, headers: { 'X-Session-ID': sessionId }, signal,
+  });
+  if (!response.ok) throw new Error(`Tracking request failed: ${response.status}`);
+  return await response.json() as TrackingResult;
+}
+
 export async function interpretSignSequence(frames: string[], previousTranscript = '', signal?: AbortSignal) {
   const apiUrl = requireApiUrl();
   if (frames.length !== 3) throw new Error('Three sign-language context frames are required');
@@ -140,59 +180,17 @@ export function synthesizeLocalSceneResult(
     y: d.y,
     width: d.width,
     height: d.height,
-    distance_m: d.distance_m ?? null,
-    relative_proximity: d.distance_m != null ? Math.max(0, Math.min(1, 1 - d.distance_m / 4.0)) : null,
+    // Local YOLOX has no calibrated depth source. Its class-height heuristic
+    // remains internal to layout prioritization, but must not be presented as
+    // a real-world range or approaching-object measurement.
+    distance_m: null,
+    relative_proximity: null,
     track_id: d.id ?? null,
   }));
 
-  // 1. Check for approaching hazards (TTC alert)
-  const approachingHazards = detections.filter(
-    (d) => d.is_approaching && d.distance_m != null && d.distance_m <= 2.5
-  );
-
-  if (approachingHazards.length > 0) {
-    const hazard = approachingHazards[0];
-    const distStr = hazard.distance_m ? `${hazard.distance_m.toFixed(1)} meters` : 'close';
-    const speech = `Caution: ${hazard.label} approaching directly ahead at ${distStr}.`;
-    const scene_key = `hazard_${hazard.label}_${Math.round((hazard.distance_m || 1) * 2)}`;
-    return {
-      summary: `Caution: ${hazard.label} approaching (~${distStr})`,
-      speech,
-      scene_key,
-      urgency: 'high',
-      changed: true,
-      objects: visionObjects,
-      task: mode,
-      should_speak: true,
-      approaching: approachingHazards.map((h) => ({
-        label: h.label,
-        distance_m: h.distance_m ?? 1.0,
-      })),
-    };
-  }
-
-  // 2. Check for close obstacles directly in path (< 1.4m)
-  const immediateAhead = detections.filter(
-    (d) => d.direction === 'ahead' && d.distance_m != null && d.distance_m < 1.4
-  );
-
-  if (immediateAhead.length > 0) {
-    const obs = immediateAhead[0];
-    const speech = `Attention: ${obs.label} directly ahead, ${obs.distance_m?.toFixed(1)} meters.`;
-    const scene_key = `obs_${obs.label}_${Math.round((obs.distance_m || 1) * 2)}`;
-    return {
-      summary: `Obstacle ahead: ${obs.label} (${obs.distance_m?.toFixed(1)}m)`,
-      speech,
-      scene_key,
-      urgency: 'medium',
-      changed: scene_key !== previousSceneKey,
-      objects: visionObjects,
-      task: mode,
-      should_speak: scene_key !== previousSceneKey,
-    };
-  }
-
-  // 3. Clear path
+  // Local detections are visual hints, not calibrated obstacle or collision
+  // measurements. Mobility warnings stay disabled until validated separately.
+  // 1. No recognized detections
   if (detections.length === 0) {
     const scene_key = 'empty_path';
     return {
@@ -207,14 +205,14 @@ export function synthesizeLocalSceneResult(
     };
   }
 
-  // 4. Natural spatial narration of detected objects
+  // 2. Natural spatial narration of detected objects
   const ahead = detections.filter((d) => d.direction === 'ahead');
   const left = detections.filter((d) => d.direction === 'left');
   const right = detections.filter((d) => d.direction === 'right');
 
   const parts: string[] = [];
   if (ahead.length > 0) {
-    parts.push(`Ahead: ${ahead.slice(0, 2).map((d) => `${d.label} at ${d.distance_m?.toFixed(1) || '1'}m`).join(', ')}`);
+    parts.push(`Ahead: ${ahead.slice(0, 2).map((d) => d.label).join(', ')}`);
   }
   if (right.length > 0) {
     parts.push(`To your right: ${right.slice(0, 2).map((d) => d.label).join(', ')}`);
@@ -226,7 +224,7 @@ export function synthesizeLocalSceneResult(
   const speech = parts.join('. ') + '.';
   const scene_key = detections
     .slice(0, 4)
-    .map((d) => `${d.label}_${d.direction}_${Math.round(d.distance_m || 1)}`)
+    .map((d) => `${d.label}_${d.direction}`)
     .sort()
     .join('|');
 
@@ -255,6 +253,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const sceneKey = useRef('');
   const localSignature = useRef('');
   const lastCloudAnalysis = useRef(0);
+  const lastTrackingAnalysis = useRef(0);
+  const trackingInFlight = useRef(false);
   const signFrames = useRef<string[]>([]);
   const signTranscript = useRef('');
 
@@ -331,6 +331,25 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       failures.current = 0;
       setState('live');
 
+      // Geometry has its own API path and cadence. It can update tracked boxes
+      // while Groq is describing an earlier frame; it never creates a spoken
+      // collision warning in the client.
+      if (API_URL && now - lastTrackingAnalysis.current >= 900 && !trackingInFlight.current) {
+        trackingInFlight.current = true;
+        const trackingController = new AbortController();
+        void trackFrame(picture.uri, trackingController.signal)
+          .then((tracking) => {
+            if (runGeneration !== generation.current) return;
+            lastTrackingAnalysis.current = Date.now();
+            setResult((previous) => {
+              const base = previous || synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
+              return { ...base, objects: tracking.objects };
+            });
+          })
+          .catch((error) => console.warn('Experimental server tracking unavailable', error))
+          .finally(() => { trackingInFlight.current = false; });
+      }
+
       // In purely offline mode (or while waiting for cloud), synthesize local spatial speech
       if (!API_URL || !shouldUseCloud) {
         const localResult = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
@@ -395,6 +414,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     sceneKey.current = '';
     localSignature.current = '';
     lastCloudAnalysis.current = 0;
+    lastTrackingAnalysis.current = 0;
+    trackingInFlight.current = false;
     signFrames.current = [];
     signTranscript.current = '';
     failures.current = 0;
