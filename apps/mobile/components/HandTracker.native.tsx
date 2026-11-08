@@ -22,6 +22,7 @@ export type HandTrackerProps = {
     addSpace: () => string;
     clearText: () => void;
   } | null>;
+  showLandmarks?: boolean;
 };
 
 export default function HandTracker(_props: HandTrackerProps) {

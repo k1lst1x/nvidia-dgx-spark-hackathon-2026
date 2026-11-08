@@ -103,6 +103,8 @@ type HandTrackerProps = {
   } | null>;
   /** Optional developer capture hook for verified, gloss-labelled samples. */
   trainingRecorder?: SignRecorder;
+  /** Visual-only switch: detection and context capture continue either way. */
+  showLandmarks?: boolean;
 };
 
 async function createHandDetector(runtime: VisionRuntime, vision: unknown): Promise<HandDetector> {
@@ -335,6 +337,7 @@ export default function HandTracker({
   onAslStateChange,
   aslEngineRef,
   trainingRecorder,
+  showLandmarks = true,
 }: HandTrackerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -712,7 +715,11 @@ export default function HandTracker({
   return (
     <div aria-label="Live sign language hand tracking" style={styles.container}>
       <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
-      <canvas ref={canvasRef} style={styles.canvas} />
+      <canvas
+        ref={canvasRef}
+        aria-hidden={!showLandmarks}
+        style={{ ...styles.canvas, visibility: showLandmarks ? 'visible' : 'hidden' }}
+      />
     </div>
   );
 }

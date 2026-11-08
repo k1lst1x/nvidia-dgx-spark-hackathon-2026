@@ -32,6 +32,7 @@ export default function CameraScreen() {
   const [mode, setMode] = useState<AssistMode>(initialMode === 'sign' ? 'sign' : 'scene');
   const [speaking, setSpeaking] = useState(true);
   const [torchEnabled, setTorchEnabled] = useState(false);
+  const [showLandmarks, setShowLandmarks] = useState(true);
   const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
   const [isAnalysingContext, setIsAnalysingContext] = useState(false);
   const [translation, setTranslation] = useState('');
@@ -258,6 +259,7 @@ export default function CameraScreen() {
         <HandTracker
           key={captureVersion}
           aslEngineRef={aslEngineRef}
+          showLandmarks={showLandmarks}
           onContextChange={setSignContext}
           onContextCaptured={interpretLiveContext}
         />
@@ -331,15 +333,25 @@ export default function CameraScreen() {
             <View style={[c.aslWordCard, c.aslWordCardPanel]}>
               <View style={c.aslWordHeader}>
                 <Text style={c.aslWordLabel}>SIGN CONTEXT</Text>
-                <Pressable
-                  onPress={() => speak(displayedTranscript)}
-                  disabled={!displayedTranscript}
-                  style={[c.aslSpeakMiniBtn, !displayedTranscript && c.aslSpeakMiniBtnDisabled]}
-                  accessibilityLabel="Speak contextual translation"
-                >
-                  <Ionicons name="volume-high" size={15} color="#07110F" />
-                  <Text style={c.aslSpeakMiniText}>Speak</Text>
-                </Pressable>
+                <View style={c.aslHeaderActions}>
+                  <Pressable
+                    onPress={() => setShowLandmarks((visible) => !visible)}
+                    style={c.aslOverlayToggle}
+                    accessibilityLabel={showLandmarks ? 'Hide visual tracking lines' : 'Show visual tracking lines'}
+                  >
+                    <Ionicons name={showLandmarks ? 'eye-off-outline' : 'eye-outline'} size={15} color="#DDE9E4" />
+                    <Text style={c.aslOverlayToggleText}>{showLandmarks ? 'Hide lines' : 'Show lines'}</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => speak(displayedTranscript)}
+                    disabled={!displayedTranscript}
+                    style={[c.aslSpeakMiniBtn, !displayedTranscript && c.aslSpeakMiniBtnDisabled]}
+                    accessibilityLabel="Speak contextual translation"
+                  >
+                    <Ionicons name="volume-high" size={15} color="#07110F" />
+                    <Text style={c.aslSpeakMiniText}>Speak</Text>
+                  </Pressable>
+                </View>
               </View>
               <Text style={[c.aslWordText, !displayedTranscript && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
                 {contextBoardText}
@@ -587,6 +599,13 @@ const c = StyleSheet.create({
     paddingVertical: 6,
   },
   aslSpeakMiniBtnDisabled: { opacity: 0.45 },
+  aslHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  aslOverlayToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(221,233,228,.12)', borderRadius: 9,
+    paddingHorizontal: 9, paddingVertical: 6,
+  },
+  aslOverlayToggleText: { color: '#DDE9E4', fontSize: 10, fontWeight: '800' },
   aslSpeakMiniText: {
     color: '#07110F',
     fontSize: 11,
