@@ -324,9 +324,11 @@ async def _call_groq_sign(
         "max_completion_tokens": 260,
         "stream": False,
     }
-    timeout = httpx.Timeout(12.0, connect=4.0)
+    # Sign Context is interactive. Do not leave the camera UI waiting through
+    # three long cloud retries; the next overlapping window can try again.
+    timeout = httpx.Timeout(8.0, connect=3.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 response = await client.post(
                     GROQ_URL,
@@ -334,7 +336,7 @@ async def _call_groq_sign(
                     json=payload,
                 )
                 if response.status_code == 429 or response.status_code >= 500:
-                    if attempt < 2:
+                    if attempt < 1:
                         retry = float(response.headers.get("retry-after", 0))
                         await asyncio.sleep(max(retry, min(0.5 * (2**attempt) + random.random(), 4)))
                         continue
@@ -368,8 +370,8 @@ async def _call_groq_sign(
                     )
                 return result
             except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt == 2:
-                    raise HTTPException(504, "Vision provider timed out")
+                if attempt == 1:
+                    raise HTTPException(504, "Sign translation provider timed out; try the next phrase")
                 await asyncio.sleep(0.5 * (2**attempt) + random.random())
             except (KeyError, json.JSONDecodeError, ValidationError):
                 raise HTTPException(502, "Vision provider returned an invalid response")

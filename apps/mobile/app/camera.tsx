@@ -188,8 +188,10 @@ export default function CameraScreen() {
     translationInFlight.current = true;
     setIsAnalysingContext(true);
     setTranslationError('');
+    const requestController = new AbortController();
+    const timeout = setTimeout(() => requestController.abort(), 18_000);
     try {
-      const interpreted = await interpretSignSequence(frames, lastTranslation.current);
+      const interpreted = await interpretSignSequence(frames, lastTranslation.current, requestController.signal);
       setTranslation(interpreted.transcript);
       if (interpreted.should_speak && interpreted.segment && interpreted.transcript !== lastTranslation.current) {
         speak(interpreted.segment);
@@ -197,9 +199,12 @@ export default function CameraScreen() {
       lastTranslation.current = interpreted.transcript;
     } catch (error) {
       if (hasVisionBackend) {
-        setTranslationError(error instanceof Error ? error.message : 'Live sign interpretation failed.');
+        setTranslationError(requestController.signal.aborted
+          ? 'Sign translation timed out. Keep signing; the next context window will retry.'
+          : error instanceof Error ? error.message : 'Live sign interpretation failed.');
       }
     } finally {
+      clearTimeout(timeout);
       setIsAnalysingContext(false);
       translationInFlight.current = false;
     }
