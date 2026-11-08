@@ -296,32 +296,41 @@ async def _call_groq_sign(
         "type": "text",
         "text": (
             "Previously accepted transcript (preserve exactly): "
-            f"{json.dumps(previous_transcript or '[empty]')}. Decode the next chronological window."
+            f"{json.dumps(previous_transcript or '[empty]')}. The image is a chronological contact sheet: "
+            "read the signing sequence from left to right and decode the next window."
         ),
     }]
-    for image, mime in images:
-        encoded = base64.b64encode(image).decode("ascii")
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{encoded}"},
-        })
+    # Vision providers commonly charge a minimum token budget for *each*
+    # image. Combine the three chronological samples into one compact strip;
+    # it preserves motion order while avoiding triple image-token usage.
+    try:
+        from PIL import Image
+
+        frames = [Image.open(BytesIO(image)).convert("RGB") for image, _ in images]
+        thumb_width = 112
+        thumbs = [frame.resize((thumb_width, max(32, round(frame.height * thumb_width / frame.width)))) for frame in frames]
+        height = max(frame.height for frame in thumbs)
+        strip = Image.new("RGB", (thumb_width * len(thumbs), height), "black")
+        for index, frame in enumerate(thumbs):
+            strip.paste(frame, (index * thumb_width, 0))
+        buffer = BytesIO()
+        strip.save(buffer, format="JPEG", quality=55, optimize=True)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
+    except Exception as error:
+        raise HTTPException(422, "Sign frames could not be prepared") from error
     payload = {
         "model": MODEL,
         "messages": [
             {"role": "system", "content": SIGN_PROMPT},
             {"role": "user", "content": content},
         ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "sign_translation",
-                "strict": True,
-                "schema": SIGN_TRANSLATION_SCHEMA,
-            },
-        },
-        "reasoning_effort": "none",
+        # JSON mode is substantially lower latency than schema-constrained
+        # decoding for multimodal Qwen requests. Pydantic still validates the
+        # response before it reaches the client.
+        "response_format": {"type": "json_object"},
         "temperature": 0.1,
-        "max_completion_tokens": 260,
+        "max_completion_tokens": 120,
         "stream": False,
     }
     # Sign Context is interactive. Do not leave the camera UI waiting through
@@ -335,6 +344,8 @@ async def _call_groq_sign(
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                     json=payload,
                 )
+                if response.status_code == 429:
+                    raise HTTPException(429, "Sign translation is rate-limited by the vision provider. Try again after the reset time in your Groq console.")
                 if response.status_code == 429 or response.status_code >= 500:
                     if attempt < 1:
                         retry = float(response.headers.get("retry-after", 0))

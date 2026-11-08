@@ -599,11 +599,14 @@ export default function HandTracker({
                 totalTrackedFramesRef.current += 1;
                 if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {
                   const snapshot = document.createElement('canvas');
-                  const width = 512;
+                  // Three low-resolution temporal samples are enough for the
+                  // cloud decoder to compare movement, and keep each live
+                  // request small enough to complete during a conversation.
+                  const width = 256;
                   snapshot.width = width;
                   snapshot.height = Math.round(width * video.videoHeight / video.videoWidth);
                   snapshot.getContext('2d')?.drawImage(video, 0, 0, snapshot.width, snapshot.height);
-                  frameImagesRef.current.push(snapshot.toDataURL('image/jpeg', 0.68));
+                  frameImagesRef.current.push(snapshot.toDataURL('image/jpeg', 0.5));
                   if (frameImagesRef.current.length > snapshotCount) frameImagesRef.current.shift();
                 }
                 const now = performance.now();
