@@ -39,6 +39,7 @@ MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "1500000"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "4"))
 MIN_REQUEST_INTERVAL = float(os.getenv("MIN_REQUEST_INTERVAL", "1.5"))
 TRACK_MIN_REQUEST_INTERVAL = float(os.getenv("TRACK_MIN_REQUEST_INTERVAL", "0.7"))
+SIGN_MIN_CONFIDENCE = float(os.getenv("SIGN_MIN_CONFIDENCE", "0.45"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
 YOLO_MODEL = os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
 YOLO_DEVICE = os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu")
@@ -350,9 +351,14 @@ async def _call_groq_sign(
                         is_final=False,
                         should_speak=False,
                     )
+                # Some vision providers fill ``segment`` correctly but omit the
+                # accumulated transcript. Normalize that valid first-window
+                # response instead of silently throwing it away in the UI.
+                if not result.transcript.strip() and result.segment.strip():
+                    result.transcript = f"{previous_transcript} {result.segment}".strip()
                 continuation = result.transcript[len(previous_transcript):].strip()
                 result.segment = continuation
-                if result.confidence < 0.68 or not result.segment.strip():
+                if result.confidence < SIGN_MIN_CONFIDENCE or not result.segment.strip():
                     return SignTranslation(
                         transcript=previous_transcript,
                         segment="",
