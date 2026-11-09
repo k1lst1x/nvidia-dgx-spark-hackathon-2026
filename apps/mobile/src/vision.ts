@@ -68,6 +68,19 @@ type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
 // Local object frames should follow camera movement; cloud narration can update less often.
 const LOCAL_SCAN_INTERVAL_MS = 200;
 
+export function getApiUrl(): string {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const custom = window.localStorage.getItem('guidelens_api_url');
+    if (custom && custom.trim()) return custom.trim().replace(/\/$/, '');
+  }
+  const configured = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+  if (configured) return configured;
+  if (typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)) {
+    return 'http://localhost:8000';
+  }
+  return '';
+}
+
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const API_URL = configuredApiUrl || (
   typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
@@ -78,8 +91,9 @@ export const hasVisionBackend = Boolean(API_URL);
 const sessionId = `gl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
 function requireApiUrl() {
-  if (!API_URL) throw new Error('EXPO_PUBLIC_API_URL is not configured');
-  return API_URL;
+  const url = getApiUrl();
+  if (!url) throw new Error('EXPO_PUBLIC_API_URL is not configured. Configure it in Settings or set EXPO_PUBLIC_API_URL.');
+  return url;
 }
 
 async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: string, signal: AbortSignal) {
@@ -270,11 +284,12 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     if (!enabled || !camera.current || runGeneration !== generation.current) return;
     setState((current) => current === 'offline' ? 'analyzing' : current);
     let nextDelay = mode === 'sign' ? 700 : LOCAL_SCAN_INTERVAL_MS;
+    const activeApiUrl = getApiUrl();
     try {
       const picture = await camera.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
       if (mode === 'sign') {
-        if (!API_URL) {
+        if (!activeApiUrl) {
           setState('offline');
           return;
         }
@@ -326,7 +341,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         .sort()
         .join('|');
       const now = Date.now();
-      const shouldUseCloud = Boolean(API_URL) && (!local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000);
+      const shouldUseCloud = Boolean(activeApiUrl) && (!local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000);
       localSignature.current = signature;
       failures.current = 0;
       setState('live');
@@ -334,7 +349,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       // Geometry has its own API path and cadence. It can update tracked boxes
       // while Groq is describing an earlier frame; it never creates a spoken
       // collision warning in the client.
-      if (API_URL && now - lastTrackingAnalysis.current >= 900 && !trackingInFlight.current) {
+      if (activeApiUrl && now - lastTrackingAnalysis.current >= 900 && !trackingInFlight.current) {
         trackingInFlight.current = true;
         const trackingController = new AbortController();
         void trackFrame(picture.uri, trackingController.signal)
@@ -351,7 +366,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       }
 
       // In purely offline mode (or while waiting for cloud), synthesize local spatial speech
-      if (!API_URL || !shouldUseCloud) {
+      if (!activeApiUrl || !shouldUseCloud) {
         const localResult = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
         sceneKey.current = localResult.scene_key;
         setResult(localResult);

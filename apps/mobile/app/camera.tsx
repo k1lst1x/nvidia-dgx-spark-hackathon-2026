@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
+import { resolveOfflinePhrase } from '../src/offlinePhrasebook';
 import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
@@ -42,6 +43,7 @@ export default function CameraScreen() {
   const lastTranslation = useRef('');
   const lastApproachWarning = useRef('');
   const lastObstacleWarning = useRef('');
+  const lastRecognizedWord = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -125,7 +127,10 @@ export default function CameraScreen() {
               ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} · ${signContext.faceTracked ? 'face' : 'face searching'} · ${signContext.poseTracked ? 'body pose' : 'body searching'} · multimodal movement capture`
               : 'Frame your hands, face, and upper body to sign';
 
+  const offlineWord = signContext.wordState?.currentWord;
+
   const contextBoardText = displayedTranscript
+    || (offlineWord ? `Sign: "${offlineWord.toUpperCase()}" (On-device)` : '')
     || translationError
     || (isAnalysingContext
       ? 'Analyzing the signed phrase…'
@@ -134,7 +139,7 @@ export default function CameraScreen() {
         : signContext.handCount > 0
           ? 'Capturing signed context…'
           : 'Show your hands to begin signing');
-  const contextBoardIsError = Boolean(translationError || signContext.error);
+  const contextBoardIsError = Boolean(!offlineWord && (translationError || signContext.error));
 
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
@@ -238,6 +243,18 @@ export default function CameraScreen() {
       speak(vision.speech);
     }
   }, [isSignMode, vision?.should_speak, vision?.speech, vision?.urgency, vision?.scene_key]);
+
+  useEffect(() => {
+    if (!offlineWord || translation) {
+      lastRecognizedWord.current = '';
+      return;
+    }
+    if (offlineWord !== lastRecognizedWord.current) {
+      lastRecognizedWord.current = offlineWord;
+      const phrase = resolveOfflinePhrase(offlineWord);
+      speak(phrase ? phrase.speech : offlineWord);
+    }
+  }, [offlineWord, translation]);
 
   if (!permission) return <View style={c.fallback} />;
 

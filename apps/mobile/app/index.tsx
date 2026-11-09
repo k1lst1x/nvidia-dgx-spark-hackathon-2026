@@ -179,7 +179,7 @@ function LandingPage() {
           <View style={s.navRight}>
             <View style={s.statusPill} accessibilityLabel="Prototype status: ready for demo">
               <View style={s.statusDot} />
-              <Text style={s.statusText}>v0.1.5 READY</Text>
+              <Text style={s.statusText}>v0.1.6 READY</Text>
             </View>
             <Link href="/hub" asChild>
               <Pressable accessibilityRole="button" accessibilityLabel="Launch Assistant Hub" style={s.navLaunchBtn}>
