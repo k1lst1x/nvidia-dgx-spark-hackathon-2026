@@ -118,7 +118,7 @@ async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: str
       method: 'POST', body: data, headers: { 'X-Session-ID': sessionId }, signal,
     });
   } catch {
-    throw new Error(`Vision server is unavailable at ${apiUrl}. Start the API server and try again.`);
+    throw new Error('Vision server unavailable');
   }
   if (!response.ok) {
     const retryAfter = Number(response.headers.get('retry-after') || 0);
@@ -156,7 +156,7 @@ export async function interpretSignSequence(frames: string[], previousTranscript
       body: JSON.stringify({ frames, previous_transcript: previousTranscript.slice(-600) }), signal,
     });
   } catch {
-    throw new Error(`Translation server is unavailable at ${apiUrl}. Start the API server and try again.`);
+    throw new Error('Sign interpretation server offline');
   }
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { detail?: string } | null;

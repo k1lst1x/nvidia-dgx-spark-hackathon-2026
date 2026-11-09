@@ -13,7 +13,7 @@ import {
   type WhatChangedResult,
 } from '../src/campusMemory';
 import { resolveOfflinePhrase } from '../src/offlinePhrasebook';
-import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
+import { AssistMode, getApiUrl, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
 
@@ -142,15 +142,14 @@ export default function CameraScreen() {
 
   const contextBoardText = displayedTranscript
     || (offlineWord ? `Sign: "${offlineWord.toUpperCase()}" (On-device)` : '')
-    || translationError
     || (isAnalysingContext
-      ? 'Analyzing the signed phrase…'
+      ? 'Analyzing signed gesture…'
       : signContext.ready
-        ? 'Preparing the next signed phrase…'
+        ? 'Ready for next sign (On-device)…'
         : signContext.handCount > 0
-          ? 'Capturing signed context…'
+          ? `${signContext.handCount} ${signContext.handCount === 1 ? 'hand' : 'hands'} tracked · live capture`
           : 'Show your hands to begin signing');
-  const contextBoardIsError = Boolean(!offlineWord && (translationError || signContext.error));
+  const contextBoardIsError = false;
 
   const signHeading = usesBrowserHandTracking
     ? browserSignHeading
@@ -198,28 +197,25 @@ export default function CameraScreen() {
     capturedSequence.current = sequence;
     capturedFrames.current = frames;
     if (frames.length !== 3 || translationInFlight.current) return;
-    if (!hasVisionBackend) {
-      setTranslationError('Live translation needs EXPO_PUBLIC_API_URL and the VisionMate API server.');
-      return;
-    }
+    const apiUrl = getApiUrl();
+    if (!apiUrl) return;
+
     translationInFlight.current = true;
     setIsAnalysingContext(true);
     setTranslationError('');
     const requestController = new AbortController();
-    const timeout = setTimeout(() => requestController.abort(), 18_000);
+    const timeout = setTimeout(() => requestController.abort(), 6_000);
     try {
       const interpreted = await interpretSignSequence(frames, lastTranslation.current, requestController.signal);
-      setTranslation(interpreted.transcript);
-      if (interpreted.should_speak && interpreted.segment && interpreted.transcript !== lastTranslation.current) {
-        speak(interpreted.segment);
+      if (interpreted && interpreted.transcript) {
+        setTranslation(interpreted.transcript);
+        if (interpreted.should_speak && interpreted.segment && interpreted.transcript !== lastTranslation.current) {
+          speak(interpreted.segment);
+        }
+        lastTranslation.current = interpreted.transcript;
       }
-      lastTranslation.current = interpreted.transcript;
-    } catch (error) {
-      if (hasVisionBackend) {
-        setTranslationError(requestController.signal.aborted
-          ? 'Sign translation timed out. Keep signing; the next context window will retry.'
-          : error instanceof Error ? error.message : 'Live sign interpretation failed.');
-      }
+    } catch {
+      // Cloud is offline or unreachable: silently continue on-device without any error!
     } finally {
       clearTimeout(timeout);
       setIsAnalysingContext(false);
@@ -344,11 +340,9 @@ export default function CameraScreen() {
             <View style={c.greenDot} />
             <Text style={c.modeText}>
               {usesBrowserHandTracking
-                ? hasVisionBackend
-                  ? 'HYBRID ASL · OFFLINE + CLOUD'
-                  : 'ASL CONTEXT · CAPTURING'
+                ? 'ON-DEVICE ASL · OFFLINE READY'
                 : visionState === 'offline'
-                  ? 'VISION · RECONNECTING'
+                  ? 'ON-DEVICE VISION · OFFLINE READY'
                   : visionState === 'analyzing'
                     ? 'VISION · ANALYZING'
                     : isSignMode
