@@ -121,7 +121,7 @@ const releaseDownloads = [
     label: 'Linux TAR.GZ',
     detail: 'Portable standalone archive',
     icon: 'archive-outline' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x86_64.tar.gz',
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x64.tar.gz',
   },
 ];
 
