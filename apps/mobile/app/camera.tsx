@@ -344,10 +344,29 @@ export default function CameraScreen() {
         origin: 'detector',
       })));
       const accepted = results.filter((item) => item.status === 'fulfilled').length;
-      const rejected = results.length - accepted;
-      setSightNotice(accepted
-        ? `${accepted} verified ${accepted === 1 ? 'observation' : 'observations'} shared with ${campusLocation}${rejected ? ` · ${rejected} duplicate or rejected` : ''}.`
-        : 'No observations were added. They may be duplicates or the API may be unavailable.');
+      const failures = results.flatMap((result, index) => result.status === 'rejected'
+        ? [{ label: candidates[index].label, message: result.reason instanceof Error ? result.reason.message : String(result.reason) }]
+        : []);
+      const duplicates = failures.filter((item) => /duplicate/i.test(item.message));
+      if (accepted) {
+        const duplicateNote = duplicates.length
+          ? ` · Already shared recently: ${duplicates.map((item) => item.label).join(', ')}`
+          : '';
+        const otherFailure = failures.find((item) => !/duplicate/i.test(item.message));
+        const failureNote = otherFailure ? ` · Could not share ${otherFailure.label}: ${otherFailure.message}` : '';
+        setSightNotice(`${accepted} verified ${accepted === 1 ? 'observation' : 'observations'} shared with ${campusLocation}.${duplicateNote}${failureNote}`);
+      } else if (duplicates.length === failures.length) {
+        setSightNotice(`These detections were already shared recently: ${duplicates.map((item) => item.label).join(', ')}. Try again after a short while if the room has changed.`);
+      } else {
+        const failure = failures[0];
+        const message = failure?.message || 'Unknown server error';
+        const helpfulMessage = /401|403|unauthori[sz]ed|access denied/i.test(message)
+          ? 'Shared Sight access was denied. Check the shared access key and device allowlist in the Hub.'
+          : /failed to fetch|network request failed|connect the dgx spark api/i.test(message)
+            ? `Cannot reach the VisionMate API. Check that the API server is running and reachable. (${message})`
+            : `Could not share ${failure?.label || 'the detections'}: ${message}`;
+        setSightNotice(helpfulMessage);
+      }
     } finally {
       setSharingSight(false);
     }
