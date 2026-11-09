@@ -170,6 +170,7 @@ async function createHolisticDetector(runtime: VisionRuntime, vision: unknown): 
 }
 
 let visionRuntimePromise: Promise<VisionRuntime> | undefined;
+let hasHolisticFailed = false;
 
 function getVisionRuntime(): Promise<VisionRuntime> {
   if (!visionRuntimePromise) {
@@ -457,10 +458,15 @@ export default function HandTracker({
         // timestamped frame. This is essential for temporal signing motion.
         // Some devices/browsers cannot run the composite model, so retain the
         // existing individual-task implementation as a complete fallback.
-        try {
-          holisticDetector = await createHolisticDetector(runtime, vision);
-        } catch (holisticError) {
-          console.warn('Holistic tracker unavailable; using individual MediaPipe trackers.', holisticError);
+        if (!hasHolisticFailed) {
+          try {
+            holisticDetector = await createHolisticDetector(runtime, vision);
+          } catch (holisticError) {
+            hasHolisticFailed = true;
+            console.warn('Holistic tracker unavailable; using individual MediaPipe trackers.', holisticError);
+            await activateIndividualFallback();
+          }
+        } else {
           await activateIndividualFallback();
         }
 
@@ -548,6 +554,7 @@ export default function HandTracker({
                 }
               } catch (error) {
                 if (holisticDetector) {
+                  hasHolisticFailed = true;
                   console.warn('Holistic tracking frame failed; switching to individual trackers.', error);
                   holisticDetector.close();
                   holisticDetector = undefined;
