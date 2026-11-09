@@ -52,6 +52,7 @@ export default function DeafBlindBridgeScreen() {
   const [isListeningMic, setIsListeningMic] = useState(false);
 
   const lastSpokenText = useRef<string>('');
+  const lastSpokenTimestamp = useRef<number>(0);
   const scrollViewRef = useRef<any>(null);
 
   // Load initial conversation history
@@ -78,12 +79,17 @@ export default function DeafBlindBridgeScreen() {
     // If a confident word was recognized from the sign engine
     const detectedWord =
       state.wordState?.currentWord || state.aslState?.currentLetter;
+    const now = Date.now();
+    const isNewWord = detectedWord && detectedWord !== lastSpokenText.current;
+    const cooldownElapsed = now - lastSpokenTimestamp.current > 3500;
+
     if (
       detectedWord &&
-      detectedWord !== lastSpokenText.current &&
+      (isNewWord || cooldownElapsed) &&
       (state.wordState?.currentConfidence ?? 0) >= 0.70
     ) {
       lastSpokenText.current = detectedWord;
+      lastSpokenTimestamp.current = now;
       void handleDeafSigned(detectedWord.toUpperCase());
     }
   };

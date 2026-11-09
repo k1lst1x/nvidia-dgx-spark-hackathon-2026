@@ -55,6 +55,8 @@ export default function CameraScreen() {
   const lastApproachWarning = useRef('');
   const lastObstacleWarning = useRef('');
   const lastRecognizedWord = useRef('');
+  const lastSpokenWordTimestamp = useRef(0);
+  const wordAbsenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -223,7 +225,10 @@ export default function CameraScreen() {
     }
   };
 
-  useEffect(() => () => { void Speech.stop(); }, []);
+  useEffect(() => () => {
+    void Speech.stop();
+    if (wordAbsenceTimer.current) clearTimeout(wordAbsenceTimer.current);
+  }, []);
 
   useEffect(() => {
     if (!usesBrowserHandTracking && isSignMode && vision?.should_speak && vision.speech) {
@@ -253,11 +258,27 @@ export default function CameraScreen() {
 
   useEffect(() => {
     if (!offlineWord || translation) {
-      lastRecognizedWord.current = '';
+      if (!wordAbsenceTimer.current && lastRecognizedWord.current) {
+        wordAbsenceTimer.current = setTimeout(() => {
+          lastRecognizedWord.current = '';
+          wordAbsenceTimer.current = null;
+        }, 1500);
+      }
       return;
     }
-    if (offlineWord !== lastRecognizedWord.current) {
+
+    if (wordAbsenceTimer.current) {
+      clearTimeout(wordAbsenceTimer.current);
+      wordAbsenceTimer.current = null;
+    }
+
+    const now = Date.now();
+    const isDifferentWord = offlineWord !== lastRecognizedWord.current;
+    const cooldownElapsed = now - lastSpokenWordTimestamp.current > 3200;
+
+    if (isDifferentWord || cooldownElapsed) {
       lastRecognizedWord.current = offlineWord;
+      lastSpokenWordTimestamp.current = now;
       const phrase = resolveOfflinePhrase(offlineWord);
       speak(phrase ? phrase.speech : offlineWord);
     }

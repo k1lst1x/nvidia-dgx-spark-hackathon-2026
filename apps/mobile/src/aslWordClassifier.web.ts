@@ -97,9 +97,16 @@ class KinematicGestureRecognizer {
     middleTip: LandmarkPoint;
     thumbTip: LandmarkPoint;
     pinkyTip: LandmarkPoint;
+    handSpan: number;
+    scale: number;
     isFist: boolean;
     isOpen: boolean;
     isWHand: boolean;
+    isThumbsUp: boolean;
+    isThumbsDown: boolean;
+    isPeace: boolean;
+    isOK: boolean;
+    isILY: boolean;
     pinchDist: number;
     timestamp: number;
   }[] = [];
@@ -144,6 +151,11 @@ class KinematicGestureRecognizer {
     const isOpen = indexExt && middleExt && ringExt && pinkyExt;
     const isWHand = indexExt && middleExt && ringExt && !pinkyExt;
     const isILY = thumbExt && indexExt && pinkyExt && !middleExt && !ringExt;
+    const isThumbsUp = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt && thumbTip.y < indexMcp.y - 0.03 * scale;
+    const isThumbsDown = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt && thumbTip.y > wrist.y + 0.02 * scale;
+    const isPeace = indexExt && middleExt && !ringExt && !pinkyExt;
+    const isPinchThumbIndex = dist2d(thumbTip, indexTip) < 0.045 * scale;
+    const isOK = isPinchThumbIndex && middleExt && ringExt && pinkyExt;
     const pinchDist = (dist2d(indexTip, thumbTip) + dist2d(middleTip, thumbTip)) / 2;
 
     // Secondary hand relations (if both hands visible in frame)
@@ -160,20 +172,31 @@ class KinematicGestureRecognizer {
       middleTip,
       thumbTip,
       pinkyTip,
+      handSpan,
+      scale,
       isFist,
       isOpen,
       isWHand,
+      isThumbsUp,
+      isThumbsDown,
+      isPeace,
+      isOK,
+      isILY,
       pinchDist,
       timestamp: performance.now(),
     });
 
     if (this.history.length > 30) this.history.shift();
-    if (this.history.length < 8) return null;
+    if (this.history.length < 6) return null;
 
     const n = this.history.length;
     const recent = this.history[n - 1];
 
-    // 1. "YES" (да) - S-fist nodding vertically (up and down)
+    // 1. "YES" (да) - S-fist nodding vertically OR Thumbs-Up held firmly
+    const thumbsUpFrames = this.history.slice(-8).filter((h) => h.isThumbsUp).length;
+    if (thumbsUpFrames >= 5) {
+      return { label: 'yes', confidence: 0.94 };
+    }
     const fistFrames = this.history.slice(-12).filter((h) => h.isFist).length;
     if (fistFrames >= 6) {
       const yValues = this.history.slice(-16).map((h) => h.wrist.y);
@@ -193,7 +216,11 @@ class KinematicGestureRecognizer {
       }
     }
 
-    // 2. "NO" (нет) - Index + Middle snap shut against thumb (rapid pinch closure)
+    // 2. "NO" (нет) - Index + Middle snap shut against thumb OR Thumbs-Down held
+    const thumbsDownFrames = this.history.slice(-8).filter((h) => h.isThumbsDown).length;
+    if (thumbsDownFrames >= 5) {
+      return { label: 'no', confidence: 0.94 };
+    }
     if (!recent.isFist && !recent.isOpen) {
       const pastPinch = Math.max(...this.history.slice(-14, -4).map((h) => h.pinchDist));
       const currentPinch = Math.min(...this.history.slice(-3).map((h) => h.pinchDist));
@@ -202,53 +229,54 @@ class KinematicGestureRecognizer {
       }
     }
 
-    // 3. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
+    // 3. "PEACE" / "VICTORY" - V-sign (Index and middle extended) held stably
+    const peaceFrames = this.history.slice(-8).filter((h) => h.isPeace).length;
+    if (peaceFrames >= 5) {
+      return { label: 'peace', confidence: 0.93 };
+    }
+
+    // 4. "OKAY" - Thumb and index forming circle with other fingers extended
+    const okFrames = this.history.slice(-8).filter((h) => h.isOK).length;
+    if (okFrames >= 5) {
+      return { label: 'okay', confidence: 0.93 };
+    }
+
+    // 5. "I LOVE YOU" (ILY sign) - Thumb, index, pinky extended
+    const ilyFrames = this.history.slice(-8).filter((h) => h.isILY).length;
+    if (ilyFrames >= 5) {
+      return { label: 'ily', confidence: 0.95 };
+    }
+
+    // 6. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
     const isThumbsUpFist = isFist && thumbTip.y < indexMcp.y - 0.03 * scale;
     if (isThumbsUpFist) {
       const yValues = this.history.slice(-12).map((h) => h.wrist.y);
       const dy = yValues[yValues.length - 1] - yValues[0];
-      if (dy < -0.028 * scale || (hasSecHand && interWristDist < 0.25 * scale)) {
+      if (dy < -0.028 * scale || (hasSecHand && interWristDist < 0.22 * scale && dy < -0.015 * scale)) {
         return { label: 'help', confidence: 0.94 };
       }
     }
 
-    // 4. "STOP" (стоп) - Open flat palm facing forward firmly or chopping on palm
-    if (isOpen) {
-      const isVerticalPalm = indexTip.y < wrist.y - 0.08 * scale;
-      if (hasSecHand && interWristDist < 0.16 * scale) {
-        return { label: 'stop', confidence: 0.95 };
-      }
-      if (isVerticalPalm && recent.wrist.y > 0.35 && recent.wrist.y < 0.80) {
-        const xVar = Math.max(...this.history.slice(-10).map((h) => h.wrist.x)) - Math.min(...this.history.slice(-10).map((h) => h.wrist.x));
-        if (xVar < 0.02 * scale) {
-          return { label: 'stop', confidence: 0.93 };
+    // 7. "STOP" (стоп) - Two-handed ASL chop onto palm, OR intentional rapid forward palm push
+    if (recent.isOpen) {
+      // A. Two-handed ASL chop: Dominant flat hand striking downward toward non-dominant palm
+      if (hasSecHand && interWristDist < 0.18 * scale) {
+        const pastHighDominant = this.history.slice(-12, -4).map((h) => h.wrist.y);
+        const minPastY = Math.min(...pastHighDominant);
+        const dy = recent.wrist.y - minPastY;
+        if (dy > 0.035 * scale) {
+          return { label: 'stop', confidence: 0.95 };
         }
       }
-    }
-
-    // 5. "MORE" (ещё) - Both hands pinched, fingertips tapping together
-    if (hasSecHand && recent.pinchDist < 0.06 * scale && interTipDist < 0.09 * scale) {
-      return { label: 'more', confidence: 0.92 };
-    }
-
-    // 6. "FOOD" / "EAT" (еда) - Flattened O/pinch tapping near mouth/chin
-    const isNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.18 * scale : recent.indexTip.y < 0.44;
-    if (recent.pinchDist < 0.05 * scale && isNearMouth) {
-      const yValues = this.history.slice(-12).map((h) => h.indexTip.y);
-      const ySpan = Math.max(...yValues) - Math.min(...yValues);
-      if (ySpan > 0.012 * scale) {
-        return { label: 'food', confidence: 0.92 };
+      // B. Single-handed intentional forward push: hand span expanding by >25% rapidly toward camera
+      const pastSpans = this.history.slice(-12, -5).map((h) => h.handSpan);
+      if (pastSpans.length >= 4) {
+        const minPastSpan = Math.min(...pastSpans);
+        if (minPastSpan > 0 && (recent.handSpan / minPastSpan) > 1.25) {
+          return { label: 'stop', confidence: 0.92 };
+        }
       }
-    }
-
-    // 7. "PAIN" (боль) - Both index fingers pointing at each other in jabs
-    if (hasSecHand && indexExt && !middleExt && !ringExt && interTipDist < 0.15 * scale) {
-      return { label: 'pain', confidence: 0.93 };
-    }
-
-    // 8. "I LOVE YOU" (ILY sign) - Thumb, index, pinky extended
-    if (isILY) {
-      return { label: 'ily', confidence: 0.95 };
+      // NOTE: A stationary resting open hand is NEUTRAL (readiness pose), NEVER "stop"!
     }
 
     // 9. "HELLO" (привет) - Open flat hand at head/temple level moving/waving
@@ -377,15 +405,17 @@ export class ASLWordEngine {
         kinematicMatch.label !== this.lastCommitted ||
         now - this.lastCommitTime > this.commitCooldownMs
       ) {
-        // Isolated gesture guesses are capture hints only. Sentence text is
-        // produced by the temporal multimodal decoder, never appended here.
         this.lastCommitted = kinematicMatch.label;
         this.lastCommitTime = now;
         this.frames = [];
-        this.kinematic.clear();
       }
       this.emit(kinematicMatch.label, kinematicMatch.confidence, [kinematicMatch]);
       return;
+    }
+
+    // When kinematic gesture finishes and hand returns to neutral, clear candidate smoothly
+    if (!kinematicMatch && this.candidate && this.frames.length < 6) {
+      this.candidate = '';
     }
 
     // 2. Motion Energy Gate (Sign Activity Detection)
