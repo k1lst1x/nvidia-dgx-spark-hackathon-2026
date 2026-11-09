@@ -88,10 +88,10 @@ const releaseDownloads = [
     url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.exe',
   },
   {
-    label: 'Windows Portable',
-    detail: 'Zero-install standalone EXE',
-    icon: 'flash-outline' as const,
-    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.exe',
+    label: 'Windows Portable ZIP',
+    detail: 'Zero-install standalone archive',
+    icon: 'archive-outline' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.zip',
   },
   {
     label: 'macOS Universal',
@@ -116,6 +116,12 @@ const releaseDownloads = [
     detail: 'Ubuntu & Debian package',
     icon: 'cube-outline' as const,
     url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-amd64.deb',
+  },
+  {
+    label: 'Linux TAR.GZ',
+    detail: 'Portable standalone archive',
+    icon: 'archive-outline' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x86_64.tar.gz',
   },
 ];
 
