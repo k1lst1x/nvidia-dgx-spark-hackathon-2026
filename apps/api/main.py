@@ -633,6 +633,8 @@ async def submit_observation(request: Request, body: ObservationCreateRequest):
             confidence=body.confidence,
             privacy_scope=body.privacy_scope,
             verified=body.verified,
+            room_x=body.room_x,
+            room_y=body.room_y,
             expires_in_seconds=body.expires_in_seconds,
             origin=body.origin,
             source_device=device_id,

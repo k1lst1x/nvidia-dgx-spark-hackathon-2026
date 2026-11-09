@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import RoomSketchMap from './RoomSketchMap';
 import {
   currentSightDevice,
   getSightChanges,
@@ -30,6 +31,7 @@ export default function SharedSightDashboard({ zoneId }: Props) {
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [accessKey, setAccessKey] = useState('');
+  const [roomPoint, setRoomPoint] = useState<{ x: number; y: number } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -43,6 +45,7 @@ export default function SharedSightDashboard({ zoneId }: Props) {
   }, [zoneId]);
 
   useEffect(() => {
+    setRoomPoint(null);
     try {
       if (typeof window !== 'undefined' && window.localStorage) {
         setAccessKey(window.localStorage.getItem('guidelens_shared_sight_key') || '');
@@ -66,6 +69,10 @@ export default function SharedSightDashboard({ zoneId }: Props) {
       setNotice('Confirm that you checked the report before sharing it.');
       return;
     }
+    if (scope === 'shared' && !roomPoint) {
+      setNotice('Tap the room sketch to place this shared report.');
+      return;
+    }
     setLoading(true);
     try {
       await submitSightObservation({
@@ -76,9 +83,11 @@ export default function SharedSightDashboard({ zoneId }: Props) {
         confidence: Number(confidence),
         privacy_scope: scope,
         verified,
+        ...(scope === 'shared' && roomPoint ? { room_x: roomPoint.x, room_y: roomPoint.y } : {}),
       });
       setLabel('');
       setDescription('');
+      setRoomPoint(null);
       setNotice(scope === 'shared' ? 'Verified report shared with authorized devices.' : 'Saved to Personal Recall on this session.');
       await refresh();
       if (scope === 'personal') setRecall(await searchPersonalRecall(query));
@@ -129,6 +138,13 @@ export default function SharedSightDashboard({ zoneId }: Props) {
         <Text style={styles.metric}>{dashboard?.tracking_requests_last_5m ?? 0} scans / 5m</Text>
       </View>
       <Text style={styles.deviceNote}>This device: {currentSightDevice()}. Configure SHARED_SIGHT_DEVICE_IDS on the server to restrict access.</Text>
+      <RoomSketchMap
+        zoneId={zoneId}
+        observations={dashboard?.recent_observations ?? []}
+        selectedPoint={scope === 'shared' ? roomPoint : null}
+        onSelectPoint={setRoomPoint}
+        interactive={scope === 'shared'}
+      />
       <TextInput
         value={accessKey}
         onChangeText={(value) => {

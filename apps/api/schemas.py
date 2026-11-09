@@ -133,6 +133,8 @@ class ObservationCreateRequest(BaseModel):
     confidence: float = Field(ge=0, le=1)
     privacy_scope: Literal["personal", "shared"] = "personal"
     verified: bool = False
+    room_x: float | None = Field(default=None, ge=0, le=1)
+    room_y: float | None = Field(default=None, ge=0, le=1)
     expires_in_seconds: int = Field(default=86400, ge=60, le=2592000)
     origin: Literal["manual", "detector"] = "manual"
 
@@ -149,6 +151,8 @@ class Observation(BaseModel):
     confidence: float
     verification_status: Literal["verified", "unverified"]
     privacy_scope: Literal["personal", "shared"]
+    room_x: float | None = Field(default=None, ge=0, le=1)
+    room_y: float | None = Field(default=None, ge=0, le=1)
     expires_at: str
     origin: Literal["manual", "detector"]
 

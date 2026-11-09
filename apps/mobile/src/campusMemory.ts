@@ -45,6 +45,8 @@ export type SightObservation = {
   confidence: number;
   verification_status: 'verified' | 'unverified';
   privacy_scope: 'personal' | 'shared';
+  room_x: number | null;
+  room_y: number | null;
   expires_at: string;
   origin: 'manual' | 'detector';
 };
@@ -94,6 +96,8 @@ export async function submitSightObservation(input: {
   confidence: number;
   privacy_scope: 'personal' | 'shared';
   verified: boolean;
+  room_x?: number;
+  room_y?: number;
   origin?: 'manual' | 'detector';
 }): Promise<SightObservation> {
   return sightJson<SightObservation>('/v1/observations', {

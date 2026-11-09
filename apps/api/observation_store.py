@@ -68,6 +68,8 @@ def init_db() -> None:
                 confidence REAL NOT NULL,
                 verification_status TEXT NOT NULL CHECK (verification_status IN ('verified','unverified')),
                 privacy_scope TEXT NOT NULL CHECK (privacy_scope IN ('personal','shared')),
+                room_x REAL,
+                room_y REAL,
                 expires_at REAL NOT NULL,
                 origin TEXT NOT NULL CHECK (origin IN ('manual','detector')),
                 active INTEGER NOT NULL DEFAULT 1
@@ -83,6 +85,12 @@ def init_db() -> None:
                 last_session TEXT NOT NULL
             );
         """)
+        # Additive migration for databases created before room sketches existed.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(observations)")}
+        if "room_x" not in columns:
+            conn.execute("ALTER TABLE observations ADD COLUMN room_x REAL")
+        if "room_y" not in columns:
+            conn.execute("ALTER TABLE observations ADD COLUMN room_y REAL")
 
 
 def authorize_device(device_id: str | None, session_id: str | None, shared_key: str | None) -> tuple[str, str]:
@@ -105,6 +113,7 @@ def _serialize(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"], "category": row["category"], "label": row["label"],
         "description": row["description"], "zone_id": row["zone_id"],
+        "room_x": row["room_x"], "room_y": row["room_y"],
         "timestamp": _iso(row["observed_at"]), "source_device": row["source_device"],
         "source_session": row["source_session"], "confidence": row["confidence"],
         "verification_status": row["verification_status"], "privacy_scope": row["privacy_scope"],
@@ -137,12 +146,15 @@ def record_tracking_latency(latency_ms: int, now: float | None = None) -> None:
 def create_observation(
     *, zone_id: str, category: str, label: str, description: str, confidence: float,
     privacy_scope: str, verified: bool, expires_in_seconds: int, origin: str,
-    source_device: str, source_session: str, now: float | None = None,
+    source_device: str, source_session: str, room_x: float | None = None,
+    room_y: float | None = None, now: float | None = None,
 ) -> dict[str, Any]:
     if confidence < MIN_CONFIDENCE:
         raise ValueError(f"Observation confidence must be at least {MIN_CONFIDENCE:.2f}")
     if privacy_scope == "shared" and not verified:
         raise ValueError("Shared Sight accepts only user-verified observations")
+    if (room_x is None) != (room_y is None):
+        raise ValueError("room_x and room_y must be provided together")
     current = now or time.time()
     verification = "verified" if verified else "unverified"
     normalized_label = label.strip()
@@ -161,12 +173,12 @@ def create_observation(
             raise DuplicateObservationError(f"Duplicate of recent observation #{duplicate['id']}")
         cursor = conn.execute("""
             INSERT INTO observations(category,label,description,zone_id,observed_at,source_device,
-                source_session,confidence,verification_status,privacy_scope,expires_at,origin)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                source_session,confidence,verification_status,privacy_scope,room_x,room_y,expires_at,origin)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             category.strip().lower(), normalized_label, description.strip(), zone_id.strip(), current,
             source_device, source_session, confidence, verification, privacy_scope,
-            current + expires_in_seconds, origin,
+            room_x, room_y, current + expires_in_seconds, origin,
         ))
         row = conn.execute("SELECT * FROM observations WHERE id=?", (cursor.lastrowid,)).fetchone()
         conn.execute("""
