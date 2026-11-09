@@ -27,7 +27,7 @@ async function serve(request, response) {
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Access-Control-Allow-Origin': '*',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' http://assets; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: http:; worker-src 'self' blob: https://cdn.jsdelivr.net",
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' http://assets; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: http: data: blob:; worker-src 'self' blob: https://cdn.jsdelivr.net",
     });
     response.end(body);
   } catch {

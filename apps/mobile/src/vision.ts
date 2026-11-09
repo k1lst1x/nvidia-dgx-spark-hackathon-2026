@@ -96,6 +96,17 @@ function requireApiUrl() {
   return url;
 }
 
+function dataUriToBlob(uri: string): Blob {
+  const parts = uri.split(',');
+  const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
+  const binary = atob(parts[1]);
+  const array = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    array[i] = binary.charCodeAt(i);
+  }
+  return new Blob([array], { type: mime });
+}
+
 async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: string, signal: AbortSignal) {
   const apiUrl = requireApiUrl();
   const data = new FormData();
@@ -103,9 +114,14 @@ async function analyzeFrame(uri: string, mode: AssistMode, previousSceneKey: str
   // `{ uri, name, type }` object otherwise becomes a text field and FastAPI
   // returns 422 before the vision model ever sees the image.
   if (typeof window !== 'undefined') {
-    const imageResponse = await fetch(uri);
-    if (!imageResponse.ok) throw new Error('Camera frame could not be prepared for analysis');
-    const image = await imageResponse.blob();
+    let image: Blob;
+    if (uri.startsWith('data:')) {
+      image = dataUriToBlob(uri);
+    } else {
+      const imageResponse = await fetch(uri);
+      if (!imageResponse.ok) throw new Error('Camera frame could not be prepared for analysis');
+      image = await imageResponse.blob();
+    }
     data.append('image', image, 'frame.jpg');
   } else {
     data.append('image', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
@@ -133,9 +149,15 @@ async function trackFrame(uri: string, signal: AbortSignal): Promise<TrackingRes
   const apiUrl = requireApiUrl();
   const data = new FormData();
   if (typeof window !== 'undefined') {
-    const imageResponse = await fetch(uri);
-    if (!imageResponse.ok) throw new Error('Camera frame could not be prepared for tracking');
-    data.append('image', await imageResponse.blob(), 'frame.jpg');
+    let image: Blob;
+    if (uri.startsWith('data:')) {
+      image = dataUriToBlob(uri);
+    } else {
+      const imageResponse = await fetch(uri);
+      if (!imageResponse.ok) throw new Error('Camera frame could not be prepared for tracking');
+      image = await imageResponse.blob();
+    }
+    data.append('image', image, 'frame.jpg');
   } else {
     data.append('image', { uri, name: 'frame.jpg', type: 'image/jpeg' } as unknown as Blob);
   }
@@ -166,7 +188,9 @@ export async function interpretSignSequence(frames: string[], previousTranscript
 }
 
 async function imageUriToDataUrl(uri: string) {
-  if (uri.startsWith('data:image/jpeg;base64,')) return uri;
+  if (uri.startsWith('data:')) {
+    return uri.replace(/^data:[^;]*;base64,/, 'data:image/jpeg;base64,');
+  }
   const response = await fetch(uri);
   if (!response.ok) throw new Error('Camera frame could not be prepared for sign translation');
   const blob = await response.blob();
