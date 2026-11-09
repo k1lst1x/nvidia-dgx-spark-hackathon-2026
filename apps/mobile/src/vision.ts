@@ -385,7 +385,10 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
               return { ...base, objects: tracking.objects };
             });
           })
-          .catch((error) => console.warn('Experimental server tracking unavailable', error))
+          .catch((error) => {
+            lastTrackingAnalysis.current = Date.now() + 10_000;
+            console.warn('Experimental server tracking unavailable (backing off 10s)', error);
+          })
           .finally(() => { trackingInFlight.current = false; });
       }
 
@@ -415,7 +418,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
           .catch((error) => {
             if (cloudController.signal.aborted || runGeneration !== generation.current) return;
             // Local detection remains live even when optional cloud narration is unavailable.
-            console.warn('Cloud scene description unavailable', error);
+            lastCloudAnalysis.current = Date.now() + 10_000;
+            console.warn('Cloud scene description unavailable (backing off 10s)', error);
             // Fall back to local synthesis on cloud failure
             const localFallback = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
             sceneKey.current = localFallback.scene_key;
