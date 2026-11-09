@@ -671,17 +671,67 @@ export default function HandTracker({
                 });
               }
 
-              // Render interactive targeting ring around wrist
-              if (currentAslState && currentAslState.currentLetter && smoothed.length > 0) {
+              // Render interactive targeting ring and recognized sign/letter tag above hand
+              if (smoothed.length > 0) {
                 const wrist = smoothed[0][0];
                 if (wrist) {
                   const wx = wrist.x * canvas.width;
                   const wy = wrist.y * canvas.height;
-                  context.beginPath();
-                  context.arc(wx, wy, 24 + currentAslState.holdProgress * 12, 0, 2 * Math.PI);
-                  context.strokeStyle = currentAslState.isHolding ? '#C8FF72' : 'rgba(200, 255, 114, 0.45)';
-                  context.lineWidth = 3.5;
-                  context.stroke();
+
+                  if (currentAslState && currentAslState.currentLetter) {
+                    context.beginPath();
+                    context.arc(wx, wy, 24 + currentAslState.holdProgress * 12, 0, 2 * Math.PI);
+                    context.strokeStyle = currentAslState.isHolding ? '#C8FF72' : 'rgba(200, 255, 114, 0.45)';
+                    context.lineWidth = 3.5;
+                    context.stroke();
+                  }
+
+                  // Find highest landmark (lowest y) of the hand to float the badge above fingers
+                  let minY = wrist.y;
+                  let midX = wrist.x;
+                  for (const pt of smoothed[0]) {
+                    if (pt.y < minY) minY = pt.y;
+                  }
+                  const tagX = midX * canvas.width;
+                  const tagY = Math.max(32, minY * canvas.height - 24);
+
+                  const word = latestWordStateRef.current?.currentWord;
+                  const letter = currentAslState?.currentLetter;
+                  const labelText = word ? word.toUpperCase() : letter ? `ASL: ${letter}` : '';
+
+                  if (labelText) {
+                    context.save();
+                    // Because canvas has CSS transform: scaleX(-1), any text drawn on canvas
+                    // must be un-mirrored with scale(-1, 1) around tagX so it appears normal!
+                    context.translate(tagX, tagY);
+                    context.scale(-1, 1);
+
+                    context.font = 'bold 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+                    const textMetrics = context.measureText(labelText);
+                    const pillWidth = textMetrics.width + 20;
+                    const pillHeight = 28;
+
+                    // Draw rounded background pill
+                    context.fillStyle = 'rgba(7, 24, 18, 0.9)';
+                    context.strokeStyle = '#C8FF72';
+                    context.lineWidth = 1.5;
+                    context.beginPath();
+                    if (typeof (context as any).roundRect === 'function') {
+                      (context as any).roundRect(-pillWidth / 2, -pillHeight / 2, pillWidth, pillHeight, 8);
+                    } else {
+                      context.rect(-pillWidth / 2, -pillHeight / 2, pillWidth, pillHeight);
+                    }
+                    context.fill();
+                    context.stroke();
+
+                    // Draw text
+                    context.fillStyle = '#C8FF72';
+                    context.textAlign = 'center';
+                    context.textBaseline = 'middle';
+                    context.fillText(labelText, 0, 0);
+
+                    context.restore();
+                  }
                 }
               }
             }

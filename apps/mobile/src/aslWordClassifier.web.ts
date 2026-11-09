@@ -102,11 +102,16 @@ class KinematicGestureRecognizer {
     isFist: boolean;
     isOpen: boolean;
     isWHand: boolean;
+    isPoint: boolean;
+    isPeace: boolean;
+    isThree: boolean;
+    isFour: boolean;
+    isFive: boolean;
     isThumbsUp: boolean;
     isThumbsDown: boolean;
-    isPeace: boolean;
     isOK: boolean;
     isILY: boolean;
+    isPhone: boolean;
     pinchDist: number;
     timestamp: number;
   }[] = [];
@@ -140,22 +145,32 @@ class KinematicGestureRecognizer {
     const chin = face?.[152] || (nose ? { x: nose.x, y: nose.y + 0.12 * scale } : undefined);
     const shoulderY = pose && pose.length > 12 ? (pose[11].y + pose[12].y) / 2 : undefined;
 
-    // Finger extensions relative to wrist / MCP
-    const indexExt = dist2d(indexTip, wrist) > dist2d(indexPip, wrist) * 1.15;
-    const middleExt = dist2d(middleTip, wrist) > dist2d(primaryHand[10], wrist) * 1.15;
-    const ringExt = dist2d(ringTip, wrist) > dist2d(primaryHand[14], wrist) * 1.15;
-    const pinkyExt = dist2d(pinkyTip, wrist) > dist2d(primaryHand[18], wrist) * 1.15;
-    const thumbExt = dist2d(thumbTip, wrist) > dist2d(primaryHand[2], wrist) * 1.15;
+    // Invariant finger extensions relative to MCP and wrist
+    const indexMcpDist = dist2d(indexTip, indexMcp);
+    const middleMcpDist = dist2d(middleTip, primaryHand[9]);
+    const ringMcpDist = dist2d(ringTip, primaryHand[13]);
+    const pinkyMcpDist = dist2d(pinkyTip, primaryHand[17]);
+
+    const indexExt = indexMcpDist > 0.07 * scale && dist2d(indexTip, wrist) > dist2d(indexPip, wrist) * 1.08;
+    const middleExt = middleMcpDist > 0.07 * scale && dist2d(middleTip, wrist) > dist2d(primaryHand[10], wrist) * 1.08;
+    const ringExt = ringMcpDist > 0.06 * scale && dist2d(ringTip, wrist) > dist2d(primaryHand[14], wrist) * 1.08;
+    const pinkyExt = pinkyMcpDist > 0.05 * scale && dist2d(pinkyTip, wrist) > dist2d(primaryHand[18], wrist) * 1.08;
+    const thumbExt = dist2d(thumbTip, primaryHand[2]) > 0.045 * scale && dist2d(thumbTip, indexMcp) > 0.045 * scale;
 
     const isFist = !indexExt && !middleExt && !ringExt && !pinkyExt;
     const isOpen = indexExt && middleExt && ringExt && pinkyExt;
     const isWHand = indexExt && middleExt && ringExt && !pinkyExt;
-    const isILY = thumbExt && indexExt && pinkyExt && !middleExt && !ringExt;
+    const isPoint = indexExt && !middleExt && !ringExt && !pinkyExt && !thumbExt;
+    const isPeace = indexExt && middleExt && !ringExt && !pinkyExt && !thumbExt;
+    const isThree = thumbExt && indexExt && middleExt && !ringExt && !pinkyExt;
+    const isFour = !thumbExt && indexExt && middleExt && ringExt && pinkyExt;
+    const isFive = thumbExt && indexExt && middleExt && ringExt && pinkyExt;
     const isThumbsUp = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt && thumbTip.y < indexMcp.y - 0.03 * scale;
     const isThumbsDown = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt && thumbTip.y > wrist.y + 0.02 * scale;
-    const isPeace = indexExt && middleExt && !ringExt && !pinkyExt;
     const isPinchThumbIndex = dist2d(thumbTip, indexTip) < 0.045 * scale;
     const isOK = isPinchThumbIndex && middleExt && ringExt && pinkyExt;
+    const isILY = thumbExt && indexExt && pinkyExt && !middleExt && !ringExt;
+    const isPhone = thumbExt && pinkyExt && !indexExt && !middleExt && !ringExt;
     const pinchDist = (dist2d(indexTip, thumbTip) + dist2d(middleTip, thumbTip)) / 2;
 
     // Secondary hand relations (if both hands visible in frame)
@@ -177,11 +192,16 @@ class KinematicGestureRecognizer {
       isFist,
       isOpen,
       isWHand,
+      isPoint,
+      isPeace,
+      isThree,
+      isFour,
+      isFive,
       isThumbsUp,
       isThumbsDown,
-      isPeace,
       isOK,
       isILY,
+      isPhone,
       pinchDist,
       timestamp: performance.now(),
     });
@@ -194,8 +214,8 @@ class KinematicGestureRecognizer {
 
     // 1. "YES" (да) - S-fist nodding vertically OR Thumbs-Up held firmly
     const thumbsUpFrames = this.history.slice(-8).filter((h) => h.isThumbsUp).length;
-    if (thumbsUpFrames >= 5) {
-      return { label: 'yes', confidence: 0.94 };
+    if (thumbsUpFrames >= 4) {
+      return { label: 'yes', confidence: 0.95 };
     }
     const fistFrames = this.history.slice(-12).filter((h) => h.isFist).length;
     if (fistFrames >= 6) {
@@ -216,10 +236,10 @@ class KinematicGestureRecognizer {
       }
     }
 
-    // 2. "NO" (нет) - Index + Middle snap shut against thumb OR Thumbs-Down held
+    // 2. "NO" (нет) - Index + Middle snap shut against thumb OR Thumbs-Down held OR index wagging
     const thumbsDownFrames = this.history.slice(-8).filter((h) => h.isThumbsDown).length;
-    if (thumbsDownFrames >= 5) {
-      return { label: 'no', confidence: 0.94 };
+    if (thumbsDownFrames >= 4) {
+      return { label: 'no', confidence: 0.95 };
     }
     if (!recent.isFist && !recent.isOpen) {
       const pastPinch = Math.max(...this.history.slice(-14, -4).map((h) => h.pinchDist));
@@ -228,32 +248,70 @@ class KinematicGestureRecognizer {
         return { label: 'no', confidence: 0.95 };
       }
     }
-
-    // 3. "PEACE" / "VICTORY" - V-sign (Index and middle extended) held stably
-    const peaceFrames = this.history.slice(-8).filter((h) => h.isPeace).length;
-    if (peaceFrames >= 5) {
-      return { label: 'peace', confidence: 0.93 };
+    // Index finger wagging left and right (universal "no-no-no")
+    if (recent.isPoint) {
+      const xValues = this.history.slice(-12).map((h) => h.indexTip.x);
+      let xChanges = 0;
+      let lastXDir = 0;
+      for (let i = 1; i < xValues.length; i++) {
+        const diff = xValues[i] - xValues[i - 1];
+        if (Math.abs(diff) > 0.004 * scale) {
+          const dir = Math.sign(diff);
+          if (lastXDir !== 0 && dir !== lastXDir) xChanges++;
+          lastXDir = dir;
+        }
+      }
+      const xSpan = Math.max(...xValues) - Math.min(...xValues);
+      if (xChanges >= 2 && xSpan > 0.02 * scale) {
+        return { label: 'no', confidence: 0.93 };
+      }
     }
 
-    // 4. "OKAY" - Thumb and index forming circle with other fingers extended
+    // 3. "PEACE" / "VICTORY" - V-sign held stably
+    const peaceFrames = this.history.slice(-8).filter((h) => h.isPeace).length;
+    if (peaceFrames >= 4) {
+      return { label: 'peace', confidence: 0.95 };
+    }
+
+    // 4. "OKAY" / "OK" - Thumb and index forming circle with other 3 fingers extended
     const okFrames = this.history.slice(-8).filter((h) => h.isOK).length;
-    if (okFrames >= 5) {
-      return { label: 'okay', confidence: 0.93 };
+    if (okFrames >= 4) {
+      return { label: 'okay', confidence: 0.95 };
     }
 
     // 5. "I LOVE YOU" (ILY sign) - Thumb, index, pinky extended
     const ilyFrames = this.history.slice(-8).filter((h) => h.isILY).length;
-    if (ilyFrames >= 5) {
-      return { label: 'ily', confidence: 0.95 };
+    if (ilyFrames >= 4) {
+      return { label: 'ily', confidence: 0.96 };
     }
 
-    // 6. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
+    // 6. "CALL" / "PHONE" - Y-hand held near ear or chin
+    const isNearEarOrChin = chin ? dist2d(recent.thumbTip, chin) < 0.28 * scale : recent.wrist.y < 0.52;
+    if (recent.isPhone && isNearEarOrChin) {
+      return { label: 'call', confidence: 0.94 };
+    }
+
+    // 7. "ONE", "THREE", "FOUR" (numbers)
+    const pointFrames = this.history.slice(-8).filter((h) => h.isPoint).length;
+    if (pointFrames >= 5 && recent.wrist.y > 0.35) {
+      return { label: 'one', confidence: 0.92 };
+    }
+    const threeFrames = this.history.slice(-8).filter((h) => h.isThree).length;
+    if (threeFrames >= 5) {
+      return { label: 'three', confidence: 0.93 };
+    }
+    const fourFrames = this.history.slice(-8).filter((h) => h.isFour).length;
+    if (fourFrames >= 5) {
+      return { label: 'four', confidence: 0.93 };
+    }
+
+    // 8. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
     const isThumbsUpFist = isFist && thumbTip.y < indexMcp.y - 0.03 * scale;
     if (isThumbsUpFist) {
       const yValues = this.history.slice(-12).map((h) => h.wrist.y);
       const dy = yValues[yValues.length - 1] - yValues[0];
       if (dy < -0.028 * scale || (hasSecHand && interWristDist < 0.22 * scale && dy < -0.015 * scale)) {
-        return { label: 'help', confidence: 0.94 };
+        return { label: 'help', confidence: 0.95 };
       }
     }
 
@@ -333,19 +391,84 @@ class KinematicGestureRecognizer {
         }
         const radius = Math.hypot(recent.wrist.x - avgX, recent.wrist.y - avgY);
         if (Math.abs(totalAngle) > 2.6 && radius > 0.012 * scale) {
-          return { label: 'please', confidence: 0.90 };
+          return { label: 'please', confidence: 0.92 };
         }
       }
     }
 
-    // 12. "WATER" (вода) - W-hand tapping near chin level
+    // 12. "SORRY" (извините) - Closed fist on chest rubbing in a circular path
+    if (isFist && isAtChestLevel) {
+      const points = this.history.slice(-18);
+      if (points.length >= 10) {
+        const avgX = points.reduce((acc, p) => acc + p.wrist.x, 0) / points.length;
+        const avgY = points.reduce((acc, p) => acc + p.wrist.y, 0) / points.length;
+        let totalAngle = 0;
+        let lastAngle: number | null = null;
+        for (const p of points) {
+          const ang = Math.atan2(p.wrist.y - avgY, p.wrist.x - avgX);
+          if (lastAngle !== null) {
+            let diff = ang - lastAngle;
+            if (diff > Math.PI) diff -= 2 * Math.PI;
+            if (diff < -Math.PI) diff += 2 * Math.PI;
+            totalAngle += diff;
+          }
+          lastAngle = ang;
+        }
+        const radius = Math.hypot(recent.wrist.x - avgX, recent.wrist.y - avgY);
+        if (Math.abs(totalAngle) > 2.4 && radius > 0.012 * scale) {
+          return { label: 'sorry', confidence: 0.93 };
+        }
+      }
+    }
+
+    // 13. "WATER" (вода) - W-hand tapping near chin level
     const isWaterNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.22 * scale : recent.indexTip.y < 0.50;
     if (recent.isWHand && isWaterNearMouth) {
       const yValues = this.history.slice(-14).map((h) => h.indexTip.y);
       const ySpan = Math.max(...yValues) - Math.min(...yValues);
       if (ySpan > 0.015 * scale) {
-        return { label: 'water', confidence: 0.91 };
+        return { label: 'water', confidence: 0.93 };
       }
+    }
+
+    // 14. "FOOD" / "EAT" (еда) - Flattened O/pinch tapping near mouth/chin
+    const isNearMouth = chin ? dist2d(recent.indexTip, chin) < 0.18 * scale : recent.indexTip.y < 0.44;
+    if (recent.pinchDist < 0.05 * scale && isNearMouth) {
+      const yValues = this.history.slice(-12).map((h) => h.indexTip.y);
+      const ySpan = Math.max(...yValues) - Math.min(...yValues);
+      if (ySpan > 0.012 * scale) {
+        return { label: 'food', confidence: 0.93 };
+      }
+    }
+
+    // 15. "DRINK" (пить) - C-hand tilting up near chin/mouth
+    const isCupTiltNearMouth = chin ? dist2d(recent.wrist, chin) < 0.26 * scale : recent.wrist.y < 0.52;
+    if (!isFist && !isOpen && thumbTip.y < indexTip.y && isCupTiltNearMouth) {
+      return { label: 'drink', confidence: 0.91 };
+    }
+
+    // 16. "MORE" (ещё) - Both hands pinched, fingertips tapping together
+    if (hasSecHand && recent.pinchDist < 0.06 * scale && interTipDist < 0.09 * scale) {
+      return { label: 'more', confidence: 0.93 };
+    }
+
+    // 17. "DONE" / "FINISH" (всё / готово) - Both hands open flipping outward at chest level
+    if (hasSecHand && recent.isOpen && isAtChestLevel && interWristDist < 0.35 * scale) {
+      const xDominant = this.history.slice(-10).map((h) => h.wrist.x);
+      const dx = xDominant[xDominant.length - 1] - xDominant[0];
+      if (Math.abs(dx) > 0.03 * scale) {
+        return { label: 'done', confidence: 0.92 };
+      }
+    }
+
+    // 18. "PAIN" (боль) - Both index fingers pointing at each other in jabs
+    if (hasSecHand && indexExt && !middleExt && !ringExt && interTipDist < 0.15 * scale) {
+      return { label: 'pain', confidence: 0.94 };
+    }
+
+    // 19. "SAFE" (безопасно) - Both fists crossing and separating
+    if (hasSecHand && isFist && interWristDist < 0.22 * scale) {
+      return { label: 'safe', confidence: 0.91 };
     }
 
     return null;

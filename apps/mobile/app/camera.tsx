@@ -141,9 +141,13 @@ export default function CameraScreen() {
               : 'Frame your hands, face, and upper body to sign';
 
   const offlineWord = signContext.wordState?.currentWord;
+  const currentLetter = signContext.aslState?.currentLetter;
+  const spelledText = signContext.aslState?.spelledText;
 
   const contextBoardText = displayedTranscript
+    || (spelledText ? `Spelled: "${spelledText}"` : '')
     || (offlineWord ? `Sign: "${offlineWord.toUpperCase()}" (On-device)` : '')
+    || (currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
     || (isAnalysingContext
       ? 'Analyzing signed gesture…'
       : signContext.ready
@@ -408,10 +412,58 @@ export default function CameraScreen() {
         <View style={c.reticle}>
           {usesBrowserHandTracking && isSignMode && (
             <View style={c.aslHudContainer}>
-              <View style={c.aslPromptCard}>
-                <Ionicons name="chatbubbles-outline" size={17} color="#C8FF72" />
-                <Text style={c.aslPromptText}>Context-aware sign translation</Text>
-              </View>
+              {currentLetter ? (
+                <View style={c.aslLetterCard}>
+                  <View style={c.aslBadge}>
+                    <Text style={c.aslBadgeLetter}>{currentLetter}</Text>
+                  </View>
+                  <View style={c.aslMeta}>
+                    <View style={c.aslMetaRow}>
+                      <Text style={c.aslConfidenceText}>
+                        {Math.round((signContext.aslState?.currentConfidence ?? 0) * 100)}%
+                      </Text>
+                      <Text style={c.aslChipText}>
+                        {signContext.aslState?.holdProgress === 1 ? 'TYPED' : 'HOLD'}
+                      </Text>
+                    </View>
+                    <View style={c.aslProgressTrack}>
+                      <View
+                        style={[
+                          c.aslProgressFill,
+                          signContext.aslState?.holdProgress === 1 && c.aslProgressFillDone,
+                          { width: `${Math.round((signContext.aslState?.holdProgress ?? 0) * 100)}%` },
+                        ]}
+                      />
+                    </View>
+                  </View>
+                </View>
+              ) : offlineWord ? (
+                <View style={c.aslLetterCard}>
+                  <View style={c.aslBadge}>
+                    <Ionicons name="hand-left" size={24} color="#07110F" />
+                  </View>
+                  <View style={c.aslMeta}>
+                    <View style={c.aslMetaRow}>
+                      <Text style={c.aslConfidenceText}>{offlineWord.toUpperCase()}</Text>
+                      <Text style={c.aslChipText}>GESTURE</Text>
+                    </View>
+                    <View style={c.aslProgressTrack}>
+                      <View
+                        style={[
+                          c.aslProgressFill,
+                          c.aslProgressFillDone,
+                          { width: `${Math.round((signContext.wordState?.currentConfidence ?? 0.9) * 100)}%` },
+                        ]}
+                      />
+                    </View>
+                  </View>
+                </View>
+              ) : (
+                <View style={c.aslPromptCard}>
+                  <Ionicons name="chatbubbles-outline" size={17} color="#C8FF72" />
+                  <Text style={c.aslPromptText}>Context-aware sign translation</Text>
+                </View>
+              )}
             </View>
           )}
         </View>
@@ -431,9 +483,9 @@ export default function CameraScreen() {
                     <Text style={c.aslOverlayToggleText}>{showLandmarks ? 'Hide lines' : 'Show lines'}</Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => speak(displayedTranscript)}
-                    disabled={!displayedTranscript}
-                    style={[c.aslSpeakMiniBtn, !displayedTranscript && c.aslSpeakMiniBtnDisabled]}
+                    onPress={() => speak(displayedTranscript || spelledText || offlineWord)}
+                    disabled={!displayedTranscript && !spelledText && !offlineWord}
+                    style={[c.aslSpeakMiniBtn, !displayedTranscript && !spelledText && !offlineWord && c.aslSpeakMiniBtnDisabled]}
                     accessibilityLabel="Speak contextual translation"
                   >
                     <Ionicons name="volume-high" size={15} color="#07110F" />
@@ -441,14 +493,30 @@ export default function CameraScreen() {
                   </Pressable>
                 </View>
               </View>
-              <Text style={[c.aslWordText, !displayedTranscript && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
+              <Text style={[c.aslWordText, !displayedTranscript && !spelledText && !offlineWord && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
                 {contextBoardText}
                 <Text style={c.aslCursor}>_</Text>
               </Text>
               <View style={c.aslWordActions}>
+                <Pressable
+                  onPress={() => aslEngineRef.current?.addSpace()}
+                  style={c.aslActionBtn}
+                  accessibilityLabel="Add space"
+                >
+                  <Ionicons name="scan-outline" size={14} color="#DDE9E4" />
+                  <Text style={c.aslActionText}>Space</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => aslEngineRef.current?.backspace()}
+                  style={c.aslActionBtn}
+                  accessibilityLabel="Backspace"
+                >
+                  <Ionicons name="backspace-outline" size={14} color="#DDE9E4" />
+                  <Text style={c.aslActionText}>Backspace</Text>
+                </Pressable>
                 <Pressable onPress={restartContextCapture} style={[c.aslActionBtn, c.aslActionClearBtn]} accessibilityLabel="Clear sign context">
-                  <Ionicons name="trash-outline" size={15} color="#FF826F" />
-                  <Text style={[c.aslActionText, c.aslActionClearText]}>Clear context</Text>
+                  <Ionicons name="trash-outline" size={14} color="#FF826F" />
+                  <Text style={[c.aslActionText, c.aslActionClearText]}>Clear</Text>
                 </Pressable>
               </View>
             </View>
