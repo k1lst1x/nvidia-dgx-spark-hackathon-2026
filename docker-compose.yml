@@ -16,6 +16,7 @@ services:
       SHARED_SIGHT_DEVICE_IDS: "${SHARED_SIGHT_DEVICE_IDS:-}"
       CAMPUS_ALERT_TTL_HOURS: "${CAMPUS_ALERT_TTL_HOURS:-12}"
       OBSERVATION_MIN_CONFIDENCE: "${OBSERVATION_MIN_CONFIDENCE:-0.65}"
+      OBSERVATION_VERIFIED_SHARED_MIN_CONFIDENCE: "${OBSERVATION_VERIFIED_SHARED_MIN_CONFIDENCE:-0.40}"
       # Opt in to official Ultralytics YOLO scene detections. The checkpoint is
       # downloaded by the container on first use; see README for AGPL licensing.
       ULTRALYTICS_YOLO_ENABLED: "${ULTRALYTICS_YOLO_ENABLED:-false}"

@@ -322,12 +322,26 @@ export default function CameraScreen() {
   };
 
   const shareCurrentDetections = async () => {
-    const candidates = (vision?.objects?.length ? vision.objects : detections)
-      .filter((item) => item.confidence >= 0.65)
-      .filter((item, index, all) => all.findIndex((other) => other.label.toLowerCase() === item.label.toLowerCase()) === index)
-      .slice(0, 8);
+    // The server tracker and the on-device detector update on different
+    // cadences. Merge them instead of letting a low-confidence server result
+    // hide a stronger local prediction for the same object.
+    const bestByLabel = new Map<string, { label: string; confidence: number }>();
+    for (const item of [...(vision?.objects ?? []), ...detections]) {
+      const label = item.label?.trim();
+      if (!label || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) continue;
+      const key = label.toLowerCase();
+      const previous = bestByLabel.get(key);
+      if (!previous || item.confidence > previous.confidence) {
+        bestByLabel.set(key, { label, confidence: item.confidence });
+      }
+    }
+    const allCandidates = [...bestByLabel.values()].sort((a, b) => b.confidence - a.confidence);
+    const candidates = allCandidates.filter((item) => item.confidence >= 0.40).slice(0, 8);
     if (!candidates.length) {
-      setSightNotice('No confident objects to share. Keep the object fully in frame and try again.');
+      const best = allCandidates.slice(0, 3).map((item) => `${item.label} (${Math.round(item.confidence * 100)}%)`).join(', ');
+      setSightNotice(best
+        ? `No detected object reached the 40% share threshold. Best results: ${best}. Improve framing or lighting and try again.`
+        : 'No objects detected in the latest camera frames. Point at a clear object and try again.');
       return;
     }
     setSharingSight(true);

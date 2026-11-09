@@ -18,6 +18,7 @@ from typing import Any
 
 DB_PATH = Path(os.getenv("VISIONMATE_MEMORY_DB", str(Path(__file__).with_name("visionmate_memory.sqlite3"))))
 MIN_CONFIDENCE = float(os.getenv("OBSERVATION_MIN_CONFIDENCE", "0.65"))
+VERIFIED_SHARED_MIN_CONFIDENCE = float(os.getenv("OBSERVATION_VERIFIED_SHARED_MIN_CONFIDENCE", "0.40"))
 DEDUP_SECONDS = 30
 TRACKING_METRICS: deque[tuple[float, int]] = deque(maxlen=1000)
 
@@ -149,10 +150,13 @@ def create_observation(
     source_device: str, source_session: str, room_x: float | None = None,
     room_y: float | None = None, now: float | None = None,
 ) -> dict[str, Any]:
-    if confidence < MIN_CONFIDENCE:
-        raise ValueError(f"Observation confidence must be at least {MIN_CONFIDENCE:.2f}")
     if privacy_scope == "shared" and not verified:
         raise ValueError("Shared Sight accepts only user-verified observations")
+    minimum_confidence = (
+        VERIFIED_SHARED_MIN_CONFIDENCE if privacy_scope == "shared" and verified else MIN_CONFIDENCE
+    )
+    if confidence < minimum_confidence:
+        raise ValueError(f"Observation confidence must be at least {minimum_confidence:.2f}")
     if (room_x is None) != (room_y is None):
         raise ValueError("room_x and room_y must be provided together")
     current = now or time.time()

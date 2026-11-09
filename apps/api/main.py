@@ -465,6 +465,7 @@ def health():
             "device_allowlist_enabled": bool(os.getenv("SHARED_SIGHT_DEVICE_IDS")),
             "shared_auth_configured": bool(os.getenv("SHARED_SIGHT_TOKEN")),
             "minimum_confidence": observation_store.MIN_CONFIDENCE,
+            "verified_shared_minimum_confidence": observation_store.VERIFIED_SHARED_MIN_CONFIDENCE,
         },
         "time": datetime.now(timezone.utc).isoformat(),
     }
