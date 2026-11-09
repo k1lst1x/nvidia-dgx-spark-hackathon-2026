@@ -143,9 +143,11 @@ export default function CameraScreen() {
   const offlineWord = signContext.wordState?.currentWord;
   const currentLetter = signContext.aslState?.currentLetter;
   const spelledText = signContext.aslState?.spelledText;
+  const isHoldingLetter = signContext.aslState?.isHolding;
 
   const contextBoardText = displayedTranscript
     || (spelledText ? `Spelled: "${spelledText}"` : '')
+    || (isHoldingLetter && currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
     || (offlineWord ? `Sign: "${offlineWord.toUpperCase()}" (On-device)` : '')
     || (currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
     || (isAnalysingContext
@@ -278,9 +280,8 @@ export default function CameraScreen() {
 
     const now = Date.now();
     const isDifferentWord = offlineWord !== lastRecognizedWord.current;
-    const cooldownElapsed = now - lastSpokenWordTimestamp.current > 3200;
 
-    if (isDifferentWord || cooldownElapsed) {
+    if (isDifferentWord) {
       lastRecognizedWord.current = offlineWord;
       lastSpokenWordTimestamp.current = now;
       const phrase = resolveOfflinePhrase(offlineWord);

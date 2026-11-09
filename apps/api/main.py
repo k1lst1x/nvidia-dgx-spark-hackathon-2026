@@ -38,6 +38,7 @@ from schemas import (
     WhatChangedResponse,
 )
 from unisign_backend import UniSignBackend, UniSignBackendError
+from yolo_sign import YoloSignDetector
 from yolo_tracker import YoloTracker
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -78,6 +79,7 @@ _requests: dict[str, deque[float]] = defaultdict(deque)
 _track_requests: dict[str, deque[float]] = defaultdict(deque)
 _depth_model = DepthAnythingMetric()
 _unisign_backend = UniSignBackend()
+_yolo_sign_detector = YoloSignDetector()
 _motion_history = MotionHistory()
 _yolo_tracker = YoloTracker(
     enabled=YOLO_ENABLED, model_path=YOLO_MODEL, device=YOLO_DEVICE,
@@ -521,8 +523,27 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
             raise HTTPException(413, "A sign frame is empty or too large")
         decoded.append((body, "image/jpeg"))
     started = time.monotonic()
-    async with _slots:
-        result = await _call_groq_sign(decoded, sequence.previous_transcript.strip())
+    try:
+        async with _slots:
+            result = await _call_groq_sign(decoded, sequence.previous_transcript.strip())
+    except Exception as exc:
+        # Fallback to local YOLO11 Sign Language Detector on the last frame
+        last_frame_bytes = decoded[-1][0] if decoded else b""
+        detected = _yolo_sign_detector.detect(last_frame_bytes) if last_frame_bytes else []
+        if detected:
+            top = detected[0]
+            sign_word = top.label
+            new_transcript = (sequence.previous_transcript + " " + sign_word).strip() if sequence.previous_transcript else sign_word
+            result = SignTranslation(
+                transcript=new_transcript,
+                segment=sign_word,
+                confidence=top.confidence,
+                is_final=True,
+                should_speak=True,
+            )
+        else:
+            raise exc
+
     logger.info(
         "sign_complete latency_ms=%d frame_count=%d total_bytes=%d",
         int((time.monotonic() - started) * 1000),
@@ -530,6 +551,22 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         sum(len(body) for body, _ in decoded),
     )
     return result
+
+
+@app.post("/v1/detect-sign")
+async def detect_sign_yolo(file: UploadFile = File(...)):
+    """Runs YOLO11 Sign Language detector on an uploaded frame."""
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(400, "Empty image")
+    signs = _yolo_sign_detector.detect(content)
+    primary = signs[0].label if signs else ""
+    conf = signs[0].confidence if signs else 0.0
+    return {
+        "detected_signs": signs,
+        "primary_sign": primary,
+        "confidence": conf,
+    }
 
 
 @app.get("/v1/unisign/status")

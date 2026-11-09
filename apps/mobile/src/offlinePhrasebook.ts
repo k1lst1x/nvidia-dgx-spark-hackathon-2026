@@ -76,11 +76,6 @@ const PHRASES: Record<string, Omit<OfflinePhrase, 'trigger'>> = {
   HEAR: { speech: 'I hear you.', urgency: 'normal' },
   COME: { speech: 'Please come here.', urgency: 'normal' },
   GO: { speech: 'Let us go.', urgency: 'normal' },
-  ONE: { speech: 'One.', urgency: 'normal' },
-  TWO: { speech: 'Two.', urgency: 'normal' },
-  THREE: { speech: 'Three.', urgency: 'normal' },
-  FOUR: { speech: 'Four.', urgency: 'normal' },
-  FIVE: { speech: 'Five.', urgency: 'normal' },
 };
 
 export function resolveOfflinePhrase(spelledText: string): OfflinePhrase | null {

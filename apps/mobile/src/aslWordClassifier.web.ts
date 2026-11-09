@@ -104,8 +104,6 @@ class KinematicGestureRecognizer {
     isWHand: boolean;
     isPoint: boolean;
     isPeace: boolean;
-    isThree: boolean;
-    isFour: boolean;
     isFive: boolean;
     isThumbsUp: boolean;
     isThumbsDown: boolean;
@@ -162,8 +160,6 @@ class KinematicGestureRecognizer {
     const isWHand = indexExt && middleExt && ringExt && !pinkyExt;
     const isPoint = indexExt && !middleExt && !ringExt && !pinkyExt && !thumbExt;
     const isPeace = indexExt && middleExt && !ringExt && !pinkyExt && !thumbExt;
-    const isThree = thumbExt && indexExt && middleExt && !ringExt && !pinkyExt;
-    const isFour = !thumbExt && indexExt && middleExt && ringExt && pinkyExt;
     const isFive = thumbExt && indexExt && middleExt && ringExt && pinkyExt;
     const isThumbsUp = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt && thumbTip.y < indexMcp.y - 0.03 * scale;
     const isThumbsDown = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt && thumbTip.y > wrist.y + 0.02 * scale;
@@ -194,8 +190,6 @@ class KinematicGestureRecognizer {
       isWHand,
       isPoint,
       isPeace,
-      isThree,
-      isFour,
       isFive,
       isThumbsUp,
       isThumbsDown,
@@ -291,21 +285,7 @@ class KinematicGestureRecognizer {
       return { label: 'call', confidence: 0.94 };
     }
 
-    // 7. "ONE", "THREE", "FOUR" (numbers)
-    const pointFrames = this.history.slice(-8).filter((h) => h.isPoint).length;
-    if (pointFrames >= 5 && recent.wrist.y > 0.35) {
-      return { label: 'one', confidence: 0.92 };
-    }
-    const threeFrames = this.history.slice(-8).filter((h) => h.isThree).length;
-    if (threeFrames >= 5) {
-      return { label: 'three', confidence: 0.93 };
-    }
-    const fourFrames = this.history.slice(-8).filter((h) => h.isFour).length;
-    if (fourFrames >= 5) {
-      return { label: 'four', confidence: 0.93 };
-    }
-
-    // 8. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
+    // 7. "HELP" (помощь) - Thumbs-up fist rising, or two-handed fist lifting from palm
     const isThumbsUpFist = isFist && thumbTip.y < indexMcp.y - 0.03 * scale;
     if (isThumbsUpFist) {
       const yValues = this.history.slice(-12).map((h) => h.wrist.y);

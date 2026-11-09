@@ -15,6 +15,8 @@ await cp(join(mobile, 'assets', 'models', 'yolox_nano.onnx'), join(publicDir, 'm
 await cp(join(mobile, 'assets', 'models', 'asl_fingerspelling_landmarks.json'), join(publicDir, 'models', 'asl_fingerspelling_landmarks.json'));
 await cp(join(mobile, 'assets', 'models', 'asl_word_transformer.onnx'), join(publicDir, 'models', 'asl_word_transformer.onnx'));
 await cp(join(mobile, 'assets', 'models', 'asl_word_labels.json'), join(publicDir, 'models', 'asl_word_labels.json'));
+await cp(join(mobile, 'assets', 'models', 'pinto_keypoint.onnx'), join(publicDir, 'models', 'pinto_keypoint.onnx'));
+await cp(join(mobile, 'assets', 'models', 'pinto_point_history.onnx'), join(publicDir, 'models', 'pinto_point_history.onnx'));
 for (const name of ['ort.wasm.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm']) {
   await cp(join(ortDist, name), join(publicDir, 'ort', name));
 }

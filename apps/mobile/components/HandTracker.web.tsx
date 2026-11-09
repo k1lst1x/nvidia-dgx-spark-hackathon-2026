@@ -704,7 +704,14 @@ export default function HandTracker({
 
                   const word = latestWordStateRef.current?.currentWord;
                   const letter = currentAslState?.currentLetter;
-                  const labelText = word ? word.toUpperCase() : letter ? `ASL: ${letter}` : '';
+                  const isHolding = currentAslState?.isHolding;
+                  const labelText = (isHolding && letter)
+                    ? `ASL: ${letter}`
+                    : word
+                      ? word.toUpperCase()
+                      : letter
+                        ? `ASL: ${letter}`
+                        : '';
 
                   if (labelText) {
                     context.save();
