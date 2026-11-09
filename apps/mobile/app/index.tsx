@@ -77,27 +77,45 @@ const pipeline = [
 const releaseDownloads = [
   {
     label: 'Android APK',
-    detail: 'Phones and tablets',
+    detail: 'Universal ARM64 & ARMv7',
     icon: 'logo-android' as const,
     url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-Android.apk',
   },
   {
-    label: 'Windows',
-    detail: '64-bit installer',
+    label: 'Windows Installer',
+    detail: '64-bit EXE (Setup)',
     icon: 'logo-windows' as const,
     url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.exe',
   },
   {
-    label: 'macOS',
-    detail: 'Universal DMG',
+    label: 'Windows Portable',
+    detail: 'Zero-install standalone EXE',
+    icon: 'flash-outline' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-win-x64.exe',
+  },
+  {
+    label: 'macOS Universal',
+    detail: 'Apple Silicon & Intel DMG',
     icon: 'logo-apple' as const,
     url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-mac-universal.dmg',
   },
   {
-    label: 'Linux',
-    detail: '64-bit AppImage',
+    label: 'macOS Intel',
+    detail: 'Dedicated x64 Intel Mac DMG',
+    icon: 'hardware-chip-outline' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-mac-x64.dmg',
+  },
+  {
+    label: 'Linux AppImage',
+    detail: 'All Linux distributions',
     icon: 'logo-tux' as const,
     url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-x86_64.AppImage',
+  },
+  {
+    label: 'Linux DEB',
+    detail: 'Ubuntu & Debian package',
+    icon: 'cube-outline' as const,
+    url: 'https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest/download/GuideLens-linux-amd64.deb',
   },
 ];
 

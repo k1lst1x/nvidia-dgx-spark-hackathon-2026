@@ -25,7 +25,7 @@ jobs:
       matrix:
         include:
           - os: macos-15
-            target: --mac --universal
+            target: --mac --universal --x64 --arm64
             artifact: macOS
           - os: windows-2025
             target: --win
@@ -65,6 +65,7 @@ jobs:
             apps/desktop/release/*.exe
             apps/desktop/release/*.AppImage
             apps/desktop/release/*.deb
+            apps/desktop/release/*.tar.gz
 
   android:
     runs-on: ubuntu-24.04

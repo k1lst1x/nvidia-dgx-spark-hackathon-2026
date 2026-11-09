@@ -33,10 +33,10 @@
         "NSCameraUsageDescription": "GuideLens uses the camera for private on-device object detection."
       }
     },
-    "win": { "icon": "assets/icon.ico", "target": ["nsis"] },
+    "win": { "icon": "assets/icon.ico", "target": ["nsis", "portable"] },
     "linux": {
       "icon": "assets/icon.png",
-      "target": ["AppImage", "deb"],
+      "target": ["AppImage", "deb", "tar.gz"],
       "category": "Utility",
       "maintainer": "GuideLens Hackathon Team <guidelens@users.noreply.github.com>"
     },
