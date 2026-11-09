@@ -12,9 +12,17 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  CAMPUS_LOCATIONS,
+  getCampusAlerts,
+  reportCampusAlert,
+  checkWhatChanged,
+  type CampusAlert,
+  type CampusLocation,
+} from '../src/campusMemory';
 
 type ActiveTab = 'hub' | 'settings' | 'telemetry';
-type SelectedMode = 'scene' | 'sign';
+type SelectedMode = 'scene' | 'sign' | 'bridge';
 
 const isElectron =
   typeof window !== 'undefined' &&
@@ -32,6 +40,59 @@ export default function AssistantHub() {
   const [apiUrl, setApiUrl] = useState('http://localhost:8000');
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'online' | 'offline'>('idle');
   const [pingLatency, setPingLatency] = useState<number | null>(null);
+
+  // Shared Sight & Campus Memory State
+  const [campusLocation, setCampusLocation] = useState<CampusLocation>(() => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const loc = window.localStorage.getItem('guidelens_campus_location') as CampusLocation;
+      if (CAMPUS_LOCATIONS.includes(loc)) return loc;
+    }
+    return 'Library Corridor';
+  });
+  const [campusAlerts, setCampusAlerts] = useState<CampusAlert[]>([]);
+  const [isReportingHazard, setIsReportingHazard] = useState(false);
+  const [hazardLabel, setHazardLabel] = useState('');
+  const [hazardDesc, setHazardDesc] = useState('');
+  const [deltaMessage, setDeltaMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getCampusAlerts(campusLocation).then(setCampusAlerts);
+  }, [campusLocation]);
+
+  const selectCampusLocation = (loc: CampusLocation) => {
+    setCampusLocation(loc);
+    saveSetting('campus_location', loc);
+    if (speechEnabled) {
+      Speech.speak(`Campus location set to ${loc}`, { rate: Number(speechRate) });
+    }
+  };
+
+  const handleQuickReport = async () => {
+    if (!hazardLabel.trim()) return;
+    const added = await reportCampusAlert({
+      location: campusLocation,
+      category: 'hazard',
+      label: hazardLabel.trim(),
+      description: hazardDesc.trim() || `Caution: ${hazardLabel} reported in ${campusLocation}.`,
+      severity: 'high',
+    });
+    setCampusAlerts((prev) => [added, ...prev]);
+    setIsReportingHazard(false);
+    setHazardLabel('');
+    setHazardDesc('');
+    if (speechEnabled) {
+      Speech.speak(`Hazard reported to campus memory: ${added.label}`, { rate: Number(speechRate) });
+    }
+  };
+
+  const handleCheckWhatChanged = async () => {
+    setDeltaMessage(`Analyzing baseline for ${campusLocation}…`);
+    const res = await checkWhatChanged(campusLocation, []);
+    setDeltaMessage(res.delta_summary);
+    if (speechEnabled) {
+      Speech.speak(res.speech, { rate: Number(speechRate) });
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.localStorage) {
@@ -106,6 +167,10 @@ export default function AssistantHub() {
 
   const launchCamera = (modeToLaunch?: SelectedMode) => {
     const target = modeToLaunch || selectedMode;
+    if (target === 'bridge') {
+      router.push('/bridge' as any);
+      return;
+    }
     router.push({
       pathname: '/camera',
       params: { initialMode: target },
@@ -124,7 +189,7 @@ export default function AssistantHub() {
             <View style={s.brandTitleRow}>
               <Text style={s.brandTitle}>GuideLens</Text>
               <View style={s.versionChip}>
-                <Text style={s.versionText}>v0.1.6</Text>
+                <Text style={s.versionText}>v0.1.7</Text>
               </View>
             </View>
             <Text style={s.brandSubtitle}>Spatial Perception & Sign Intelligence</Text>
@@ -267,6 +332,28 @@ export default function AssistantHub() {
                       <Text style={s.modeOptionSub}>ASL gestures & letters</Text>
                     </View>
                   </Pressable>
+
+                  <Pressable
+                    onPress={() => setSelectedMode('bridge')}
+                    style={[s.modeOption, selectedMode === 'bridge' && s.modeOptionActive]}
+                  >
+                    <Ionicons
+                      name="people"
+                      size={18}
+                      color={selectedMode === 'bridge' ? '#B7FF56' : '#88A397'}
+                    />
+                    <View>
+                      <Text
+                        style={[
+                          s.modeOptionTitle,
+                          selectedMode === 'bridge' && s.modeOptionTitleActive,
+                        ]}
+                      >
+                        Deaf–Blind Bridge
+                      </Text>
+                      <Text style={s.modeOptionSub}>Two-way ASL & voice aid</Text>
+                    </View>
+                  </Pressable>
                 </View>
               </View>
 
@@ -282,12 +369,161 @@ export default function AssistantHub() {
                 </View>
                 <View style={s.launchButtonTextCol}>
                   <Text style={s.launchButtonMainText}>
-                    Launch {selectedMode === 'scene' ? 'Scene Assist' : 'Sign Interpreter'}
+                    Launch {selectedMode === 'scene' ? 'Scene Assist' : selectedMode === 'sign' ? 'Sign Interpreter' : 'Deaf–Blind Bridge'}
                   </Text>
                   <Text style={s.launchButtonSubText}>Opens camera with local neural engine</Text>
                 </View>
                 <Ionicons name="arrow-forward" size={20} color="#07110F" />
               </Pressable>
+            </View>
+
+            {/* SECTION: SHARED SIGHT — LIVING CAMPUS MEMORY */}
+            <View style={s.sharedSightCard}>
+              <View style={s.sharedSightHeader}>
+                <View style={s.sharedSightTag}>
+                  <Ionicons name="git-network" size={13} color="#07110F" />
+                  <Text style={s.sharedSightTagText}>SHARED SIGHT · DGX CAMPUS MEMORY</Text>
+                </View>
+                <View style={s.sharedSightLiveBadge}>
+                  <View style={s.livePulseDot} />
+                  <Text style={s.livePulseText}>LIVING MEMORY</Text>
+                </View>
+              </View>
+
+              <Text style={s.sharedSightTitle}>A Campus That Remembers</Text>
+              <Text style={s.sharedSightSubtitle}>
+                Many phones feed one private DGX Spark. When any student spots a hazard, all blind
+                students receive proactive alerts before reaching it.
+              </Text>
+
+              {/* Campus Location Selector */}
+              <Text style={s.locPickerLabel}>CAMPUS ZONE / ROOM:</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.locChipsScroll}>
+                {CAMPUS_LOCATIONS.map((loc) => (
+                  <Pressable
+                    key={loc}
+                    onPress={() => selectCampusLocation(loc)}
+                    style={[s.locChip, campusLocation === loc && s.locChipActive]}
+                  >
+                    <Ionicons
+                      name="location"
+                      size={13}
+                      color={campusLocation === loc ? '#07110F' : '#88A397'}
+                    />
+                    <Text style={[s.locChipText, campusLocation === loc && s.locChipTextActive]}>
+                      {loc}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              {/* Delta Result Card if What Changed was triggered */}
+              {deltaMessage && (
+                <View style={s.deltaCard}>
+                  <View style={s.deltaHeader}>
+                    <Ionicons name="git-compare" size={15} color="#B7FF56" />
+                    <Text style={s.deltaHeaderTitle}>WHAT CHANGED IN {campusLocation.toUpperCase()}:</Text>
+                  </View>
+                  <Text style={s.deltaBodyText}>{deltaMessage}</Text>
+                  <Pressable
+                    onPress={() => handleCheckWhatChanged()}
+                    style={s.deltaRecheckBtn}
+                  >
+                    <Ionicons name="refresh" size={13} color="#07110F" />
+                    <Text style={s.deltaRecheckText}>Re-check Delta</Text>
+                  </Pressable>
+                </View>
+              )}
+
+              {/* Active Alerts List */}
+              <View style={s.alertsHeaderRow}>
+                <Text style={s.alertsHeaderTitle}>
+                  ACTIVE HAZARDS & ROOM STATUS ({campusAlerts.length})
+                </Text>
+                <Pressable
+                  onPress={() => setIsReportingHazard((v) => !v)}
+                  style={s.reportToggleBtn}
+                >
+                  <Ionicons name={isReportingHazard ? 'close' : 'add-circle'} size={14} color="#B7FF56" />
+                  <Text style={s.reportToggleBtnText}>
+                    {isReportingHazard ? 'Cancel' : 'Report Hazard'}
+                  </Text>
+                </Pressable>
+              </View>
+
+              {/* Quick Report Hazard Form */}
+              {isReportingHazard && (
+                <View style={s.reportForm}>
+                  <Text style={s.reportFormTitle}>Report Observation for {campusLocation}:</Text>
+                  <TextInput
+                    style={s.reportInput}
+                    placeholder="e.g. Wet floor sign, chair in hallway, closed room..."
+                    placeholderTextColor="#607B6E"
+                    value={hazardLabel}
+                    onChangeText={setHazardLabel}
+                  />
+                  <TextInput
+                    style={[s.reportInput, s.reportInputDesc]}
+                    placeholder="Optional details for blind navigation brief..."
+                    placeholderTextColor="#607B6E"
+                    value={hazardDesc}
+                    onChangeText={setHazardDesc}
+                  />
+                  <Pressable
+                    onPress={handleQuickReport}
+                    style={s.reportSubmitBtn}
+                  >
+                    <Ionicons name="radio-outline" size={16} color="#07110F" />
+                    <Text style={s.reportSubmitBtnText}>Broadcast to Campus Memory</Text>
+                  </Pressable>
+                </View>
+              )}
+
+              {/* Alerts Cards */}
+              <View style={s.alertsList}>
+                {campusAlerts.slice(0, 4).map((alert) => (
+                  <View key={alert.id} style={s.alertItem}>
+                    <View style={s.alertItemTop}>
+                      <View style={[
+                        s.alertSevBadge,
+                        alert.severity === 'high' ? s.alertSevHigh : s.alertSevMed
+                      ]}>
+                        <Ionicons
+                          name={alert.category === 'hazard' ? 'warning' : alert.category === 'obstacle' ? 'cube' : 'information-circle'}
+                          size={12}
+                          color="#07110F"
+                        />
+                        <Text style={s.alertSevText}>{alert.severity.toUpperCase()}</Text>
+                      </View>
+                      <Text style={s.alertItemLoc}>{alert.location} · {alert.relative_time}</Text>
+                    </View>
+                    <Text style={s.alertItemDesc}>{alert.description}</Text>
+                  </View>
+                ))}
+              </View>
+
+              {/* Dual Action Buttons */}
+              <View style={s.sharedSightActionsRow}>
+                <Pressable
+                  onPress={handleCheckWhatChanged}
+                  style={s.whatChangedActionBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Check What Changed"
+                >
+                  <Ionicons name="git-compare-outline" size={17} color="#07110F" />
+                  <Text style={s.whatChangedActionBtnText}>What Changed? (Delta Scan)</Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => router.push('/bridge' as any)}
+                  style={s.bridgeActionBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open Deaf-Blind Bridge"
+                >
+                  <Ionicons name="people-outline" size={17} color="#B7FF56" />
+                  <Text style={s.bridgeActionBtnText}>Deaf–Blind Bridge</Text>
+                </Pressable>
+              </View>
             </View>
 
             {/* Quick Action Mode Cards */}
@@ -350,6 +586,35 @@ export default function AssistantHub() {
                     Open Sign Interpreter
                   </Text>
                   <Ionicons name="chevron-forward" size={16} color="#C8FF72" />
+                </Pressable>
+              </View>
+
+              {/* Card 3: Deaf–Blind Bridge */}
+              <View style={s.featureCard}>
+                <View style={s.cardTopRow}>
+                  <View style={[s.cardIconCircle, s.cardIconCircleBridge]}>
+                    <Ionicons name="people-outline" size={22} color="#FFD043" />
+                  </View>
+                  <View style={[s.cardTag, s.cardTagBridge]}>
+                    <Text style={[s.cardTagText, s.cardTagTextBridge]}>Two-Way Speech & ASL</Text>
+                  </View>
+                </View>
+
+                <Text style={s.cardTitle}>Deaf–Blind Bridge</Text>
+                <Text style={s.cardBody}>
+                  Direct conversation channel between deaf and blind students: ASL gestures speak aloud to
+                  the blind student, while spoken voice replies display in high-contrast bold yellow text.
+                </Text>
+
+                <Pressable
+                  onPress={() => router.push('/bridge' as any)}
+                  style={[s.cardActionBtn, s.cardActionBtnBridge]}
+                  accessibilityLabel="Launch Deaf-Blind Bridge"
+                >
+                  <Text style={[s.cardActionBtnText, s.cardActionBtnTextBridge]}>
+                    Launch Bridge Channel
+                  </Text>
+                  <Ionicons name="chevron-forward" size={16} color="#07110F" />
                 </Pressable>
               </View>
             </View>
@@ -1202,5 +1467,312 @@ const s = StyleSheet.create({
     color: '#5C746B',
     fontSize: 11,
     fontWeight: '600',
+  },
+
+  // Shared Sight & Campus Memory Cockpit Styles
+  sharedSightCard: {
+    backgroundColor: '#0A1C16',
+    borderWidth: 1.5,
+    borderColor: '#1D3B30',
+    borderRadius: 20,
+    padding: 18,
+    marginTop: 18,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  sharedSightHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  sharedSightTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#B7FF56',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  sharedSightTagText: {
+    color: '#07110F',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  sharedSightLiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(183, 255, 86, 0.12)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  livePulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#B7FF56',
+  },
+  livePulseText: {
+    color: '#B7FF56',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  sharedSightTitle: {
+    color: '#F4FAF6',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  sharedSightSubtitle: {
+    color: '#9BB4A8',
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  locPickerLabel: {
+    color: '#658376',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+  },
+  locChipsScroll: {
+    flexDirection: 'row',
+    marginBottom: 14,
+  },
+  locChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#12261F',
+    borderWidth: 1,
+    borderColor: '#203E33',
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 9,
+    marginRight: 8,
+  },
+  locChipActive: {
+    backgroundColor: '#B7FF56',
+    borderColor: '#B7FF56',
+  },
+  locChipText: {
+    color: '#A9C1B6',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  locChipTextActive: {
+    color: '#07110F',
+  },
+  deltaCard: {
+    backgroundColor: '#0F2C22',
+    borderWidth: 1,
+    borderColor: '#B7FF56',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 14,
+  },
+  deltaHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  deltaHeaderTitle: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  deltaBodyText: {
+    color: '#E8F5EE',
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  deltaRecheckBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    backgroundColor: '#B7FF56',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 7,
+  },
+  deltaRecheckText: {
+    color: '#07110F',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  alertsHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  alertsHeaderTitle: {
+    color: '#658376',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  reportToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(183, 255, 86, 0.14)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  reportToggleBtnText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  reportForm: {
+    backgroundColor: '#12261F',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#264B3E',
+  },
+  reportFormTitle: {
+    color: '#D4E6DC',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  reportInput: {
+    backgroundColor: '#0A1713',
+    borderWidth: 1,
+    borderColor: '#244538',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    color: '#FFFFFF',
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  reportInputDesc: {
+    marginBottom: 10,
+  },
+  reportSubmitBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#B7FF56',
+    borderRadius: 8,
+    paddingVertical: 8,
+  },
+  reportSubmitBtnText: {
+    color: '#07110F',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  alertsList: {
+    gap: 8,
+    marginBottom: 14,
+  },
+  alertItem: {
+    backgroundColor: '#10241E',
+    borderWidth: 1,
+    borderColor: '#1D3B30',
+    borderRadius: 10,
+    padding: 10,
+  },
+  alertItemTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  alertSevBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
+  alertSevHigh: { backgroundColor: '#FFD043' },
+  alertSevMed: { backgroundColor: '#B7FF56' },
+  alertSevText: {
+    color: '#07110F',
+    fontSize: 9,
+    fontWeight: '900',
+  },
+  alertItemLoc: {
+    color: '#849E93',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  alertItemDesc: {
+    color: '#DDECE4',
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  sharedSightActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  whatChangedActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#B7FF56',
+    borderRadius: 10,
+    paddingVertical: 10,
+  },
+  whatChangedActionBtnText: {
+    color: '#07110F',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  bridgeActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: '#132821',
+    borderWidth: 1,
+    borderColor: '#264C3E',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  bridgeActionBtnText: {
+    color: '#B7FF56',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  cardIconCircleBridge: {
+    backgroundColor: 'rgba(255, 208, 67, 0.15)',
+  },
+  cardTagBridge: {
+    backgroundColor: 'rgba(255, 208, 67, 0.14)',
+  },
+  cardTagTextBridge: {
+    color: '#FFD043',
+  },
+  cardActionBtnBridge: {
+    backgroundColor: '#FFD043',
+  },
+  cardActionBtnTextBridge: {
+    color: '#07110F',
+    fontSize: 12,
+    fontWeight: '800',
   },
 });

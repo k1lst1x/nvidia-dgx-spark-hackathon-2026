@@ -4,7 +4,7 @@ module.exports = {
   expo: {
     name: 'GuideLens',
     slug: 'guidelens',
-    version: '0.1.6',
+    version: '0.1.7',
     orientation: 'portrait',
     scheme: 'guidelens',
     userInterfaceStyle: 'dark',
@@ -19,6 +19,7 @@ module.exports = {
     },
     android: {
       package: 'edu.sfbu.guidelens',
+      versionCode: 7,
       permissions: ['CAMERA', 'RECORD_AUDIO'],
     },
     web: {

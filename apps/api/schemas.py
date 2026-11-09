@@ -60,3 +60,55 @@ class SignTranslation(BaseModel):
 class UniSignRawRequest(BaseModel):
     raw_holistic: list[dict[str, object]] = Field(min_length=1, max_length=1024)
     experimental: bool = False
+
+
+class CampusAlert(BaseModel):
+    id: int
+    location: str
+    category: str
+    label: str
+    description: str
+    severity: Literal["low", "medium", "high"]
+    reported_by: str
+    created_at: str
+    relative_time: str
+    is_active: bool
+
+
+class CampusAlertCreateRequest(BaseModel):
+    location: str = Field(min_length=1, max_length=80)
+    category: Literal["hazard", "obstacle", "sign", "room_status"] = "hazard"
+    label: str = Field(min_length=1, max_length=40)
+    description: str = Field(min_length=1, max_length=200)
+    severity: Literal["low", "medium", "high"] = "medium"
+
+
+class WhatChangedRequest(BaseModel):
+    location: str = Field(default="Room 204", max_length=80)
+    current_objects: list[dict[str, object]] = Field(default_factory=list)
+    update_baseline: bool = False
+
+
+class WhatChangedResponse(BaseModel):
+    has_changed: bool
+    delta_summary: str
+    speech: str
+    added_objects: list[str]
+    removed_objects: list[str]
+    moved_objects: list[str]
+
+
+class BridgeMessageRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=64)
+    sender_role: Literal["deaf", "blind"]
+    text: str = Field(min_length=1, max_length=500)
+
+
+class BridgeMessage(BaseModel):
+    id: int
+    session_id: str
+    sender_role: str
+    text: str
+    created_at: str
+    relative_time: str
+

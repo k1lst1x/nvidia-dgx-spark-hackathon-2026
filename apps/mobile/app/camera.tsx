@@ -6,6 +6,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
+import {
+  checkWhatChanged,
+  getCampusAlerts,
+  type CampusAlert,
+  type WhatChangedResult,
+} from '../src/campusMemory';
 import { resolveOfflinePhrase } from '../src/offlinePhrasebook';
 import { AssistMode, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 
@@ -39,6 +45,11 @@ export default function CameraScreen() {
   const [translation, setTranslation] = useState('');
   const [translationError, setTranslationError] = useState('');
   const [captureVersion, setCaptureVersion] = useState(0);
+  const [campusLocation] = useState(() => (typeof window !== 'undefined' && window.localStorage ? window.localStorage.getItem('guidelens_campus_location') || 'Library Corridor' : 'Library Corridor'));
+  const [activeAlert, setActiveAlert] = useState<CampusAlert | null>(null);
+  const [deltaNotice, setDeltaNotice] = useState<string>('');
+  const [isCheckingDelta, setIsCheckingDelta] = useState(false);
+  const hasSpokenAlert = useRef(false);
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
   const lastApproachWarning = useRef('');
@@ -256,6 +267,35 @@ export default function CameraScreen() {
     }
   }, [offlineWord, translation]);
 
+  useEffect(() => {
+    if (mode !== 'scene') return;
+    let isMounted = true;
+    void getCampusAlerts(campusLocation).then((alerts) => {
+      if (!isMounted || alerts.length === 0) return;
+      const highest = alerts[0];
+      setActiveAlert(highest);
+      if (highest && !hasSpokenAlert.current && highest.description) {
+        hasSpokenAlert.current = true;
+        Speech.speak(`Campus alert for ${highest.location}: ${highest.description}`, { rate: 0.95 });
+      }
+    });
+    return () => { isMounted = false; };
+  }, [mode, campusLocation]);
+
+  const handleWhatChanged = async () => {
+    Speech.stop();
+    setIsCheckingDelta(true);
+    try {
+      const res = await checkWhatChanged(campusLocation, detections);
+      setDeltaNotice(res.delta_summary);
+      Speech.speak(res.speech, { rate: 0.95 });
+    } catch {
+      setDeltaNotice('Baseline checked. No changes detected.');
+    } finally {
+      setIsCheckingDelta(false);
+    }
+  };
+
   if (!permission) return <View style={c.fallback} />;
 
   if (!permission.granted) {
@@ -323,6 +363,18 @@ export default function CameraScreen() {
           </Pressable>
         </View>
 
+        {activeAlert && mode === 'scene' && (
+          <View style={c.campusAlertBar}>
+            <View style={c.alertIconBadge}>
+              <Ionicons name="warning" size={13} color="#07110F" />
+            </View>
+            <View style={c.alertTextGroup}>
+              <Text style={c.alertLoc}>{activeAlert.location.toUpperCase()} · {activeAlert.relative_time}:</Text>
+              <Text style={c.alertDesc} numberOfLines={1}>{activeAlert.description}</Text>
+            </View>
+          </View>
+        )}
+
         <View style={c.modeTabs} accessibilityRole="tablist">
           <Pressable accessibilityRole="tab" accessibilityState={{ selected: mode === 'scene' }} onPress={() => switchMode('scene')} style={[c.modeTab, mode === 'scene' && c.modeTabActive]}>
             <Ionicons name="eye-outline" size={17} color={mode === 'scene' ? '#09130D' : '#DDE9E4'} />
@@ -331,6 +383,10 @@ export default function CameraScreen() {
           <Pressable accessibilityRole="tab" accessibilityState={{ selected: mode === 'sign' }} onPress={() => switchMode('sign')} style={[c.modeTab, mode === 'sign' && c.modeTabActive]}>
             <Ionicons name="hand-left-outline" size={17} color={mode === 'sign' ? '#09130D' : '#DDE9E4'} />
             <Text style={[c.modeTabText, mode === 'sign' && c.modeTabTextActive]}>Sign to voice</Text>
+          </Pressable>
+          <Pressable accessibilityRole="tab" onPress={() => router.push('/bridge' as any)} style={c.modeTab}>
+            <Ionicons name="people-outline" size={17} color="#DDE9E4" />
+            <Text style={c.modeTabText}>Bridge</Text>
           </Pressable>
         </View>
 
@@ -391,6 +447,19 @@ export default function CameraScreen() {
             </View>
           ) : null}
 
+          {!usesBrowserHandTracking && deltaNotice ? (
+            <View style={c.deltaNoticeCard}>
+              <View style={c.deltaIconGroup}>
+                <Ionicons name="git-compare" size={16} color="#07110F" />
+                <Text style={c.deltaNoticeLabel}>DELTA (WHAT CHANGED):</Text>
+              </View>
+              <Text style={c.deltaNoticeText}>{deltaNotice}</Text>
+              <Pressable onPress={() => setDeltaNotice('')} style={c.deltaClose}>
+                <Ionicons name="close" size={14} color="#07110F" />
+              </Pressable>
+            </View>
+          ) : null}
+
           {!usesBrowserHandTracking && (
             <>
               <View style={c.controls}>
@@ -398,6 +467,22 @@ export default function CameraScreen() {
                   <Ionicons name="refresh" size={22} color="#EAF6F0" />
                   <Text style={c.controlText}>{isSignMode ? 'Read again' : 'Scan again'}</Text>
                 </Pressable>
+                {!isSignMode && (
+                  <Pressable
+                    onPress={handleWhatChanged}
+                    style={[c.control, isCheckingDelta && c.controlActive]}
+                    accessibilityLabel="Check what changed in this room"
+                  >
+                    <Ionicons
+                      name="git-compare-outline"
+                      size={22}
+                      color={isCheckingDelta ? '#07110F' : '#B7FF56'}
+                    />
+                    <Text style={[c.controlText, c.deltaControlText]}>
+                      {isCheckingDelta ? 'Checking…' : 'Changed?'}
+                    </Text>
+                  </Pressable>
+                )}
                 <Pressable accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'} onPress={() => speak(translation || current.speech)} style={c.speak}>
                   <Ionicons name="volume-high" size={24} color="#07110F" />
                 </Pressable>
@@ -406,7 +491,7 @@ export default function CameraScreen() {
                   <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
                 </Pressable>
               </View>
-              <Text style={c.hint}>{isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap the speaker button to repeat the description'}</Text>
+              <Text style={c.hint}>{isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap Changed? to hear only what is new, or the speaker to repeat'}</Text>
             </>
           )}
         </View>
@@ -688,5 +773,86 @@ const c = StyleSheet.create({
     color: '#07110F',
     fontSize: 11,
     fontWeight: '800',
+  },
+
+  // Shared Sight & What Changed Styling
+  campusAlertBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FFD043',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 10,
+    shadowColor: '#FFD043',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+  },
+  alertIconBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(7, 17, 15, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  alertTextGroup: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  alertLoc: {
+    color: '#07110F',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  alertDesc: {
+    color: '#242111',
+    fontSize: 11,
+    fontWeight: '600',
+    flex: 1,
+  },
+  deltaNoticeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#B7FF56',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 10,
+    shadowColor: '#B7FF56',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+  },
+  deltaIconGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  deltaNoticeLabel: {
+    color: '#07110F',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  deltaNoticeText: {
+    color: '#07110F',
+    fontSize: 12,
+    fontWeight: '700',
+    flex: 1,
+  },
+  deltaClose: {
+    padding: 4,
+  },
+  deltaControlText: {
+    color: '#B7FF56',
+  },
+  controlActive: {
+    backgroundColor: '#B7FF56',
   },
 });

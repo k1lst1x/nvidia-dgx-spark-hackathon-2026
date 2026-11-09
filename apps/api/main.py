@@ -16,6 +16,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
+import campus_memory
 from depth import (
     DepthAnythingMetric,
     relative_proximity_for_boxes,
@@ -23,12 +24,18 @@ from depth import (
 )
 from motion import MotionHistory
 from schemas import (
+    BridgeMessage,
+    BridgeMessageRequest,
+    CampusAlert,
+    CampusAlertCreateRequest,
     DetectedObject,
     SignSequenceRequest,
     SignTranslation,
     TrackingResult,
     UniSignRawRequest,
     VisionResult,
+    WhatChangedRequest,
+    WhatChangedResponse,
 )
 from unisign_backend import UniSignBackend, UniSignBackendError
 from yolo_tracker import YoloTracker
@@ -538,3 +545,63 @@ async def interpret_unisign_experimental(sequence: UniSignRawRequest):
         return _unisign_backend.translate_raw_mediapipe(sequence.raw_holistic, experimental=sequence.experimental)
     except UniSignBackendError as error:
         raise HTTPException(503, str(error)) from error
+
+
+@app.get("/v1/memory/alerts", response_model=list[CampusAlert])
+async def get_campus_alerts(location: str | None = None):
+    """Retrieve active campus memory alerts, shared across student devices."""
+    return [CampusAlert.model_validate(alert) for alert in campus_memory.get_active_alerts(location)]
+
+
+@app.post("/v1/memory/observe", response_model=CampusAlert)
+async def observe_campus_hazard(request: Request, body: CampusAlertCreateRequest):
+    """Record an obstacle, hazard, or room status into shared campus memory."""
+    client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "anonymous")
+    alert = campus_memory.add_alert(
+        location=body.location,
+        category=body.category,
+        label=body.label,
+        description=body.description,
+        severity=body.severity,
+        reported_by=client_id,
+    )
+    return CampusAlert.model_validate(alert)
+
+
+@app.post("/v1/memory/resolve/{alert_id}")
+async def resolve_campus_alert(alert_id: int):
+    """Mark a campus hazard as cleared or resolved."""
+    ok = campus_memory.resolve_alert(alert_id)
+    if not ok:
+        raise HTTPException(404, "Alert not found")
+    return {"status": "resolved", "id": alert_id}
+
+
+@app.post("/v1/memory/what-changed", response_model=WhatChangedResponse)
+async def what_changed(body: WhatChangedRequest):
+    """Compare current objects against baseline memory for the location."""
+    result = campus_memory.detect_what_changed(
+        location=body.location,
+        current_objects=body.current_objects,
+        update_baseline=body.update_baseline,
+    )
+    return WhatChangedResponse.model_validate(result)
+
+
+@app.post("/v1/bridge/message", response_model=BridgeMessage)
+async def post_bridge_message(body: BridgeMessageRequest):
+    """Post a Deaf-Blind bridge message (sign translation or spoken reply)."""
+    msg = campus_memory.add_bridge_message(
+        session_id=body.session_id,
+        sender_role=body.sender_role,
+        text=body.text,
+    )
+    return BridgeMessage.model_validate(msg)
+
+
+@app.get("/v1/bridge/messages", response_model=list[BridgeMessage])
+async def get_bridge_messages(session_id: str, limit: int = 20):
+    """Get recent bridge conversation messages for a session."""
+    messages = campus_memory.get_bridge_messages(session_id=session_id, limit=limit)
+    return [BridgeMessage.model_validate(m) for m in messages]
+

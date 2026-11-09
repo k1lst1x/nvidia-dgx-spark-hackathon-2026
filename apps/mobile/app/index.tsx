@@ -20,22 +20,28 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 const benefits = [
   {
-    icon: 'scan-outline' as const,
-    eyebrow: 'SPATIAL RADAR',
-    title: 'Know what is around you',
-    text: 'Real-time 60fps local YOLOX object detection with ByteTrack IDs, EMA coordinate smoothing, and spatial distance radar.',
+    icon: 'git-network-outline' as const,
+    eyebrow: 'SHARED SIGHT · CAMPUS MEMORY',
+    title: 'A campus that remembers for blind students',
+    text: 'Many phones feed one private DGX Spark. When any student spots a hazard or closed door, all blind students receive proactive spoken warnings before reaching it.',
   },
   {
-    icon: 'hand-left-outline' as const,
-    eyebrow: 'SIGN KINEMATICS',
-    title: 'Bridge sign language barrier',
-    text: 'Body-anchored MediaPipe gesture classification recognizes ASL words offline with motion energy gating.',
+    icon: 'git-compare-outline' as const,
+    eyebrow: 'WHAT CHANGED? · DELTA SCAN',
+    title: 'Hear only what is new, not the whole room',
+    text: 'Blind users already know where walls and doors are. GuideLens compares live vision against room baselines to announce only moved obstacles and new items.',
   },
   {
-    icon: 'volume-high-outline' as const,
-    eyebrow: 'AUDIO & PHRASEBOOK',
-    title: 'Hear the essential detail',
-    text: 'GuideLens delivers concise spoken guidance and 40+ predictive offline emergency phrases designed for rapid accessibility.',
+    icon: 'people-outline' as const,
+    eyebrow: 'DEAF–BLIND BRIDGE',
+    title: 'Direct two-way conversation aid',
+    text: 'Connects two people who could not talk directly: ASL gestures speak aloud to the blind partner, while spoken voice replies appear in high-contrast giant text.',
+  },
+  {
+    icon: 'shield-checkmark-outline' as const,
+    eyebrow: '100% ON-DEVICE PRIVACY',
+    title: 'Runs with or without server',
+    text: 'Zero-latency YOLOX object detection and MediaPipe ASL run privately on your processor with WASM SIMD acceleration and zero network dependency.',
   },
 ];
 
