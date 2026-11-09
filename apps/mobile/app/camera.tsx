@@ -9,6 +9,7 @@ import HandTracker, { type SignContextState } from '../components/HandTracker';
 import {
   checkWhatChanged,
   getCampusAlerts,
+  submitSightObservation,
   type CampusAlert,
   type WhatChangedResult,
 } from '../src/campusMemory';
@@ -49,6 +50,8 @@ export default function CameraScreen() {
   const [activeAlert, setActiveAlert] = useState<CampusAlert | null>(null);
   const [deltaNotice, setDeltaNotice] = useState<string>('');
   const [isCheckingDelta, setIsCheckingDelta] = useState(false);
+  const [sharingSight, setSharingSight] = useState(false);
+  const [sightNotice, setSightNotice] = useState('');
   const hasSpokenAlert = useRef(false);
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
@@ -69,7 +72,7 @@ export default function CameraScreen() {
   const isSignMode = mode === 'sign';
   const showVisionDebug = process.env.EXPO_PUBLIC_VISION_DEBUG === 'true';
   const usesBrowserHandTracking = isSignMode && Platform.OS === 'web';
-  const { result: vision, state: visionState, detections, scanNow } = useVisionLoop(
+  const { result: vision, state: visionState, detections, cameraCoach, scanNow } = useVisionLoop(
     cameraRef,
     mode,
     Boolean(permission?.granted) && !usesBrowserHandTracking,
@@ -318,6 +321,38 @@ export default function CameraScreen() {
     }
   };
 
+  const shareCurrentDetections = async () => {
+    const candidates = (vision?.objects?.length ? vision.objects : detections)
+      .filter((item) => item.confidence >= 0.65)
+      .filter((item, index, all) => all.findIndex((other) => other.label.toLowerCase() === item.label.toLowerCase()) === index)
+      .slice(0, 8);
+    if (!candidates.length) {
+      setSightNotice('No confident objects to share. Keep the object fully in frame and try again.');
+      return;
+    }
+    setSharingSight(true);
+    setSightNotice('');
+    try {
+      const results = await Promise.allSettled(candidates.map((item) => submitSightObservation({
+        zone_id: campusLocation,
+        category: 'object',
+        label: item.label,
+        description: 'Camera detection reviewed and confirmed by the user.',
+        confidence: item.confidence,
+        privacy_scope: 'shared',
+        verified: true,
+        origin: 'detector',
+      })));
+      const accepted = results.filter((item) => item.status === 'fulfilled').length;
+      const rejected = results.length - accepted;
+      setSightNotice(accepted
+        ? `${accepted} verified ${accepted === 1 ? 'observation' : 'observations'} shared with ${campusLocation}${rejected ? ` · ${rejected} duplicate or rejected` : ''}.`
+        : 'No observations were added. They may be duplicates or the API may be unavailable.');
+    } finally {
+      setSharingSight(false);
+    }
+  };
+
   if (!permission) return <View style={c.fallback} />;
 
   if (!permission.granted) {
@@ -409,6 +444,20 @@ export default function CameraScreen() {
             <Text style={c.modeTabText}>Bridge</Text>
           </Pressable>
         </View>
+
+        {!isSignMode && cameraCoach && (
+          <View style={c.coachBanner} accessibilityLiveRegion="polite">
+            <Ionicons name={cameraCoach.blur || cameraCoach.poor_lighting || cameraCoach.overexposed || cameraCoach.cropped_labels.length ? 'camera-outline' : 'checkmark-circle-outline'} size={15} color="#C8FF72" />
+            <Text style={c.coachText}>
+              {[
+                cameraCoach.blur ? 'Image looks blurry; hold steady' : '',
+                cameraCoach.poor_lighting ? 'Lighting is low' : '',
+                cameraCoach.overexposed ? 'Frame is very bright' : '',
+                cameraCoach.cropped_labels.length ? `Move back; ${cameraCoach.cropped_labels.join(', ')} is cropped` : '',
+              ].filter(Boolean).join(' · ') || 'Frame quality looks good'}
+            </Text>
+          </View>
+        )}
 
         <View style={c.reticle}>
           {usesBrowserHandTracking && isSignMode && (
@@ -546,6 +595,15 @@ export default function CameraScreen() {
 
           {!usesBrowserHandTracking && (
             <>
+              {!isSignMode && (detections.length > 0 || (vision?.objects.length ?? 0) > 0) && (
+                <View style={c.shareRow}>
+                  <Pressable onPress={() => void shareCurrentDetections()} disabled={sharingSight} style={[c.shareButton, sharingSight && c.shareButtonDisabled]}>
+                    <Ionicons name="radio-outline" size={15} color="#07110F" />
+                    <Text style={c.shareButtonText}>{sharingSight ? 'Sharing…' : 'I confirm these detections · Share'}</Text>
+                  </Pressable>
+                </View>
+              )}
+              {!!sightNotice && <Text style={c.sightNotice} accessibilityLiveRegion="polite">{sightNotice}</Text>}
               <View style={c.controls}>
                 <Pressable onPress={restartContextCapture} style={c.control}>
                   <Ionicons name="refresh" size={22} color="#EAF6F0" />
@@ -599,6 +657,8 @@ const c = StyleSheet.create({
   modeTabActive: { backgroundColor: '#B7FF56' },
   modeTabText: { color: '#DDE9E4', fontSize: 12, fontWeight: '800' },
   modeTabTextActive: { color: '#09130D' },
+  coachBanner: { alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 7, maxWidth: '92%', backgroundColor: 'rgba(4,20,14,.9)', borderWidth: 1, borderColor: 'rgba(183,255,86,.45)', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, marginTop: 10 },
+  coachText: { color: '#E6F3EB', fontSize: 11, fontWeight: '700', flexShrink: 1 },
   boxesLayer: { ...StyleSheet.absoluteFill, zIndex: 1 },
   reticle: { flex: 1, marginVertical: 12, position: 'relative' },
   box: {
@@ -630,6 +690,11 @@ const c = StyleSheet.create({
     letterSpacing: 0.3,
   },
   bottom: { paddingBottom: 10 },
+  shareRow: { alignItems: 'center', marginTop: 9 },
+  shareButton: { flexDirection: 'row', gap: 7, alignItems: 'center', backgroundColor: '#B7FF56', borderRadius: 12, paddingHorizontal: 13, paddingVertical: 9 },
+  shareButtonDisabled: { opacity: 0.55 },
+  shareButtonText: { color: '#07110F', fontSize: 11, fontWeight: '900' },
+  sightNotice: { color: '#C8FF72', textAlign: 'center', fontSize: 10, marginTop: 5 },
   answer: { flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: 'rgba(5,18,14,.9)', borderWidth: 1, borderColor: 'rgba(183,255,86,.28)', borderRadius: 20, padding: 16 },
   signAnswer: { borderColor: 'rgba(200,255,114,.62)', backgroundColor: 'rgba(5,26,17,.94)' },
   answerIcon: { width: 48, height: 48, borderRadius: 15, backgroundColor: '#B7FF56', alignItems: 'center', justifyContent: 'center' },

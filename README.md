@@ -91,6 +91,16 @@ The app never receives the Groq key. It sends a compressed JPEG to `POST /v1/des
 
 Groq bills each image as input tokens, so cloud analysis is intentionally near-real-time rather than video streaming: one request is allowed in flight and the on-device detector decides when Groq is needed.
 
+## Shared Sight, What Changed, and Personal Recall
+
+Shared Sight uses SQLite at `/data/visionmate_memory.sqlite3` in Docker Compose, persisted under `apps/api/data/`. It stores observation labels and metadata only; it does not store camera images or BoT-SORT track IDs. Reports include room/zone, timestamp, source device/session, confidence, verification status, privacy scope, and expiry. Reports below `OBSERVATION_MIN_CONFIDENCE` are rejected; shared reports also require the user to confirm the detected objects. Duplicate labels in the same zone/scope are rejected for 30 seconds. Expired reports are removed as the store is read or written.
+
+Choose a room from the existing room selector. In Scene Assist, review the displayed object detections and tap **I confirm these detections · Share** to send high-confidence object labels to that room. This action sends labels and confidence only, not the image. The Hub dashboard polls recent verified reports, shows active devices and recent tracking latency, and offers Personal Recall search. Personal Recall is private to the stable device ID and persists across app sessions. The What Changed summary compares verified shared observations from the selected zone across two adjacent time windows. An absence from a window is not treated as proof that an object was removed.
+
+The API supports optional shared-key protection with `SHARED_SIGHT_TOKEN` and device allowlisting with comma-separated `SHARED_SIGHT_DEVICE_IDS`. The device IDs are shown in the Hub. Device IDs are client-asserted identifiers, not credentials by themselves; configure the shared key and allowlist before exposing the server beyond a trusted demo network. When neither is set, Shared Sight is open to clients that can reach the API. SQLite is intended for this single API instance/demo deployment, not multiple API replicas.
+
+The tracking response also includes Camera Coach heuristics for blur, lighting, overexposure, and detector boxes touching image edges. These checks provide framing guidance and are not calibrated quality guarantees. Object detection, tracking, depth, motion, and speech paths remain separate from SQLite writes. Shared Sight is a recent-report feature; it does not provide reliable autonomous navigation or collision avoidance.
+
 ## ASL fingerspelling training
 
 The supplied ASL dataset trains a **static fingerspelling** model for A–I and K–Y. It does not contain full sentence meanings, and J and Z are excluded because they require motion. The trainer streams the archive directly, extracts the same MediaPipe hand-landmark representation used by the web app, and exports a portable softmax classifier.

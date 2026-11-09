@@ -20,6 +20,7 @@ import {
   type CampusAlert,
   type CampusLocation,
 } from '../src/campusMemory';
+import SharedSightDashboard from './SharedSightDashboard';
 
 type ActiveTab = 'hub' | 'settings' | 'telemetry';
 type SelectedMode = 'scene' | 'sign' | 'bridge';
@@ -392,8 +393,7 @@ export default function AssistantHub() {
 
               <Text style={s.sharedSightTitle}>A Campus That Remembers</Text>
               <Text style={s.sharedSightSubtitle}>
-                Many phones feed one private DGX Spark. When any student spots a hazard, all blind
-                students receive proactive alerts before reaching it.
+                Choose a room, confirm camera detections before sharing, and keep private notes in Personal Recall.
               </Text>
 
               {/* Campus Location Selector */}
@@ -416,6 +416,8 @@ export default function AssistantHub() {
                   </Pressable>
                 ))}
               </ScrollView>
+
+              <SharedSightDashboard zoneId={campusLocation} />
 
               {/* Delta Result Card if What Changed was triggered */}
               {deltaMessage && (

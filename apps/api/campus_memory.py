@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from typing import Any
 
 logger = logging.getLogger("guidelens.memory")
 
-DB_PATH = Path(__file__).with_name("campus_memory.db")
+DB_PATH = Path(os.getenv("CAMPUS_MEMORY_DB", str(Path(__file__).with_name("campus_memory.db"))))
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -26,7 +27,7 @@ def _get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Initialize database tables and seed baseline campus memory if empty."""
+    """Initialize empty campus memory tables; never invent campus reports."""
     with _get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS campus_alerts (
@@ -62,80 +63,6 @@ def init_db() -> None:
             );
         """)
         conn.commit()
-
-        # Seed realistic campus alerts if table is empty
-        cursor = conn.execute("SELECT COUNT(*) AS count FROM campus_alerts;")
-        count = cursor.fetchone()["count"]
-        if count == 0:
-            now = time.time()
-            seed_alerts = [
-                (
-                    "Library Corridor",
-                    "hazard",
-                    "wet floor",
-                    "Caution: Yellow wet-floor cone placed outside library entrance.",
-                    "high",
-                    "student_a",
-                    now - 300,  # 5 min ago
-                    1,
-                ),
-                (
-                    "Elevator B",
-                    "room_status",
-                    "out of order",
-                    "Elevator B has an out-of-order service notice on the door.",
-                    "medium",
-                    "student_campus",
-                    now - 3600,  # 1 hour ago
-                    1,
-                ),
-                (
-                    "Hallway 200",
-                    "obstacle",
-                    "utility cart",
-                    "A cleaning utility cart is partially blocking the hallway near Room 204.",
-                    "medium",
-                    "student_pat",
-                    now - 900,  # 15 min ago
-                    1,
-                ),
-                (
-                    "Room 204",
-                    "room_status",
-                    "closed",
-                    "Room 204 reserved for hackathon judging panel.",
-                    "low",
-                    "faculty",
-                    now - 1800,  # 30 min ago
-                    1,
-                ),
-            ]
-            conn.executemany(
-                """
-                INSERT INTO campus_alerts
-                (location, category, label, description, severity, reported_by, created_at, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-                """,
-                seed_alerts,
-            )
-
-            # Seed baselines for Room 204 and Library Corridor
-            baseline_room_204 = [
-                {"label": "table", "x": 0.2, "y": 0.5, "width": 0.6, "height": 0.4},
-                {"label": "chair", "x": 0.25, "y": 0.55, "width": 0.15, "height": 0.25},
-            ]
-            baseline_hallway = [
-                {"label": "door", "x": 0.7, "y": 0.2, "width": 0.25, "height": 0.7},
-            ]
-            conn.execute(
-                "INSERT OR REPLACE INTO location_baselines (location, objects_json, updated_at) VALUES (?, ?, ?);",
-                ("Room 204", json.dumps(baseline_room_204), now - 7200),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO location_baselines (location, objects_json, updated_at) VALUES (?, ?, ?);",
-                ("Hallway 200", json.dumps(baseline_hallway), now - 7200),
-            )
-            conn.commit()
 
 
 def _format_relative_time(timestamp: float) -> str:

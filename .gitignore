@@ -2,6 +2,9 @@ node_modules/
 .expo/
 dist/
 apps/mobile/public/
+apps/api/data/
+apps/api/*.sqlite3*
+apps/api/campus_memory.db
 apps/desktop/web/
 apps/desktop/release/
 web-build/

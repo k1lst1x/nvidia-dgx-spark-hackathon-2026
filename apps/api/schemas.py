@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DetectedObject(BaseModel):
@@ -35,11 +35,21 @@ class VisionResult(BaseModel):
     task: Literal["scene", "sign"]
 
 
+class CameraCoach(BaseModel):
+    blur: bool
+    poor_lighting: bool
+    overexposed: bool
+    cropped_labels: list[str]
+    sharpness_score: float
+    brightness_score: float
+
+
 class TrackingResult(BaseModel):
     objects: list[DetectedObject] = Field(max_length=12)
     tracking_latency_ms: int = Field(ge=0)
     detector: Literal["yolo11-botsort", "disabled"]
     metric_depth: bool
+    camera_coach: CameraCoach | None = None
     experimental: bool = True
     collision_warnings_enabled: bool = False
 
@@ -111,4 +121,52 @@ class BridgeMessage(BaseModel):
     text: str
     created_at: str
     relative_time: str
+
+
+class ObservationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zone_id: str = Field(min_length=1, max_length=80)
+    category: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=240)
+    confidence: float = Field(ge=0, le=1)
+    privacy_scope: Literal["personal", "shared"] = "personal"
+    verified: bool = False
+    expires_in_seconds: int = Field(default=86400, ge=60, le=2592000)
+    origin: Literal["manual", "detector"] = "manual"
+
+
+class Observation(BaseModel):
+    id: int
+    category: str
+    label: str
+    description: str
+    zone_id: str
+    timestamp: str
+    source_device: str
+    source_session: str
+    confidence: float
+    verification_status: Literal["verified", "unverified"]
+    privacy_scope: Literal["personal", "shared"]
+    expires_at: str
+    origin: Literal["manual", "detector"]
+
+
+class ObservationChanges(BaseModel):
+    zone_id: str
+    generated_at: str
+    compared_seconds: int
+    added: list[str]
+    previously_seen: list[str]
+    summary: str
+    verified_only: bool = True
+
+
+class SharedSightDashboard(BaseModel):
+    zone_id: str
+    connected_devices: int
+    recent_observations: list[Observation]
+    tracking_latency_ms: int | None = None
+    tracking_requests_last_5m: int = 0
 

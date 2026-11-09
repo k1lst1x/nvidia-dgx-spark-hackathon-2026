@@ -6,6 +6,11 @@ services:
       GROQ_API_KEY: "${GROQ_API_KEY:?Set GROQ_API_KEY in your local .env}"
       GROQ_VISION_MODEL: "${GROQ_VISION_MODEL:-qwen/qwen3.8-27b}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082}"
+      VISIONMATE_MEMORY_DB: "/data/visionmate_memory.sqlite3"
+      CAMPUS_MEMORY_DB: "/data/campus_memory.sqlite3"
+      SHARED_SIGHT_TOKEN: "${SHARED_SIGHT_TOKEN:-}"
+      SHARED_SIGHT_DEVICE_IDS: "${SHARED_SIGHT_DEVICE_IDS:-}"
+      OBSERVATION_MIN_CONFIDENCE: "${OBSERVATION_MIN_CONFIDENCE:-0.65}"
       # Opt in to official Ultralytics YOLO scene detections. The checkpoint is
       # downloaded by the container on first use; see README for AGPL licensing.
       ULTRALYTICS_YOLO_ENABLED: "${ULTRALYTICS_YOLO_ENABLED:-false}"
@@ -26,6 +31,7 @@ services:
       # checking model weights into source control.
       - ultralytics-model-cache:/root/.cache/ultralytics
       - ./apps/api/models:/models:ro
+      - ./apps/api/data:/data
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s

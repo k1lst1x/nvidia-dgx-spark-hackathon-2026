@@ -1,6 +1,7 @@
 """Unit tests for Campus Memory & Shared Sight & Deaf-Blind Bridge."""
 
 import os
+import uuid
 from fastapi.testclient import TestClient
 
 os.environ.pop("GROQ_API_KEY", None)
@@ -10,26 +11,23 @@ from main import app  # noqa: E402
 client = TestClient(app)
 
 
-def test_get_campus_alerts_returns_seeded_memory():
+def test_get_campus_alerts_returns_only_real_reports():
     response = client.get("/v1/memory/alerts")
     assert response.status_code == 200
     alerts = response.json()
     assert isinstance(alerts, list)
-    assert len(alerts) >= 1
-    # Check alert structure
-    first = alerts[0]
-    assert "id" in first
-    assert "location" in first
-    assert "category" in first
-    assert "description" in first
-    assert "relative_time" in first
+    for item in alerts:
+        assert "id" in item
+        assert "location" in item
+        assert "category" in item
+        assert "description" in item
+        assert "relative_time" in item
 
 
 def test_filter_alerts_by_location():
     response = client.get("/v1/memory/alerts?location=Library")
     assert response.status_code == 200
     alerts = response.json()
-    assert len(alerts) >= 1
     for a in alerts:
         assert "Library" in a["location"] or a["location"] == "All Campus"
 
@@ -60,8 +58,16 @@ def test_post_observation_and_resolve():
 
 
 def test_what_changed_detects_delta():
-    # Baseline for Room 204 exists from seed (table, chair)
-    # Send a new layout with a box placed in the room
+    location = "integration-test-delta-room"
+    baseline = [
+        {"label": "table", "x": 0.2, "y": 0.5, "width": 0.6, "height": 0.4},
+        {"label": "chair", "x": 0.25, "y": 0.55, "width": 0.15, "height": 0.25},
+    ]
+    first = client.post(
+        "/v1/memory/what-changed",
+        json={"location": location, "current_objects": baseline, "update_baseline": True},
+    )
+    assert first.status_code == 200
     current = [
         {"label": "table", "x": 0.2, "y": 0.5, "width": 0.6, "height": 0.4},
         {"label": "chair", "x": 0.25, "y": 0.55, "width": 0.15, "height": 0.25},
@@ -69,7 +75,7 @@ def test_what_changed_detects_delta():
     ]
     res = client.post(
         "/v1/memory/what-changed",
-        json={"location": "Room 204", "current_objects": current, "update_baseline": False},
+        json={"location": location, "current_objects": current, "update_baseline": False},
     )
     assert res.status_code == 200
     body = res.json()
@@ -79,7 +85,7 @@ def test_what_changed_detects_delta():
 
 
 def test_bridge_messages_lifecycle():
-    session_id = "test-bridge-session-123"
+    session_id = f"test-bridge-session-{uuid.uuid4().hex}"
 
     # 1. Deaf signs "THANK YOU"
     r1 = client.post(

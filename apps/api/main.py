@@ -17,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
 import campus_memory
+import observation_store
+from camera_coach import assess_frame
 from depth import (
     DepthAnythingMetric,
     relative_proximity_for_boxes,
@@ -26,11 +28,16 @@ from motion import MotionHistory
 from schemas import (
     BridgeMessage,
     BridgeMessageRequest,
+    CameraCoach,
     CampusAlert,
     CampusAlertCreateRequest,
     DetectedObject,
     SignSequenceRequest,
     SignTranslation,
+    Observation,
+    ObservationChanges,
+    ObservationCreateRequest,
+    SharedSightDashboard,
     TrackingResult,
     UniSignRawRequest,
     VisionResult,
@@ -70,8 +77,8 @@ app.add_middleware(
     allow_origins=os.getenv(
         "CORS_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082"
     ).split(","),
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Session-ID"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-Session-ID", "X-Device-ID", "X-Shared-Sight-Key"],
 )
 
 _slots = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -428,6 +435,12 @@ def health():
             "requires_metric_depth_for_motion": True,
             "collision_warnings_enabled": MOBILITY_COLLISION_WARNINGS_ENABLED,
         },
+        "shared_sight": {
+            "enabled": True,
+            "device_allowlist_enabled": bool(os.getenv("SHARED_SIGHT_DEVICE_IDS")),
+            "shared_auth_configured": bool(os.getenv("SHARED_SIGHT_TOKEN")),
+            "minimum_confidence": observation_store.MIN_CONFIDENCE,
+        },
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -451,11 +464,18 @@ async def track_scene(request: Request, image: UploadFile = File(...)):
     async with _slots:
         objects = await asyncio.to_thread(_yolo_tracker.detect, body, client_id)
         objects = await asyncio.to_thread(_add_depth_and_motion, objects, body, client_id)
+        try:
+            camera_coach = await asyncio.to_thread(assess_frame, body, objects)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+    latency_ms = int((time.monotonic() - started) * 1000)
+    observation_store.record_tracking_latency(latency_ms)
     return TrackingResult(
         objects=objects,
-        tracking_latency_ms=int((time.monotonic() - started) * 1000),
+        tracking_latency_ms=latency_ms,
         detector="yolo11-botsort" if YOLO_ENABLED else "disabled",
         metric_depth=_depth_model.ready and _depth_model.is_metric,
+        camera_coach=camera_coach,
         collision_warnings_enabled=False,
     )
 
@@ -588,6 +608,72 @@ async def interpret_unisign_experimental(sequence: UniSignRawRequest):
 async def get_campus_alerts(location: str | None = None):
     """Retrieve active campus memory alerts, shared across student devices."""
     return [CampusAlert.model_validate(alert) for alert in campus_memory.get_active_alerts(location)]
+
+
+def _authorize_sight(request: Request) -> tuple[str, str]:
+    try:
+        return observation_store.authorize_device(
+            request.headers.get("X-Device-ID"),
+            request.headers.get("X-Session-ID"),
+            request.headers.get("X-Shared-Sight-Key"),
+        )
+    except observation_store.ObservationAccessError as error:
+        raise HTTPException(401, str(error)) from error
+
+
+@app.post("/v1/observations", response_model=Observation)
+async def submit_observation(request: Request, body: ObservationCreateRequest):
+    device_id, session_id = _authorize_sight(request)
+    try:
+        result = observation_store.create_observation(
+            zone_id=body.zone_id,
+            category=body.category,
+            label=body.label,
+            description=body.description,
+            confidence=body.confidence,
+            privacy_scope=body.privacy_scope,
+            verified=body.verified,
+            expires_in_seconds=body.expires_in_seconds,
+            origin=body.origin,
+            source_device=device_id,
+            source_session=session_id,
+        )
+    except observation_store.DuplicateObservationError as error:
+        raise HTTPException(409, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return Observation.model_validate(result)
+
+
+@app.get("/v1/observations/changes", response_model=ObservationChanges)
+async def get_observation_changes(request: Request, zone_id: str, compared_seconds: int = 3600):
+    _authorize_sight(request)
+    if not zone_id.strip() or len(zone_id) > 80:
+        raise HTTPException(422, "zone_id must contain 1 to 80 characters")
+    return ObservationChanges.model_validate(observation_store.changes(zone_id, compared_seconds))
+
+
+@app.get("/v1/personal/observations", response_model=list[Observation])
+async def search_personal_observations(request: Request, query: str = "", limit: int = 50):
+    device_id, _ = _authorize_sight(request)
+    return [Observation.model_validate(item) for item in observation_store.search_personal(device_id, query, limit)]
+
+
+@app.delete("/v1/observations/{observation_id}")
+async def remove_owned_observation(request: Request, observation_id: int):
+    device_id, _ = _authorize_sight(request)
+    if not observation_store.delete_owned(observation_id, device_id):
+        raise HTTPException(404, "Observation not found or not owned by this device")
+    return {"status": "removed", "id": observation_id}
+
+
+@app.get("/v1/shared-sight/dashboard", response_model=SharedSightDashboard)
+async def shared_sight_dashboard(request: Request, zone_id: str, limit: int = 20):
+    device_id, session_id = _authorize_sight(request)
+    if not zone_id.strip() or len(zone_id) > 80:
+        raise HTTPException(422, "zone_id must contain 1 to 80 characters")
+    observation_store.touch_device(device_id, session_id)
+    return SharedSightDashboard.model_validate(observation_store.dashboard(zone_id, limit))
 
 
 @app.post("/v1/memory/observe", response_model=CampusAlert)

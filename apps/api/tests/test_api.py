@@ -1,4 +1,7 @@
 import os
+from io import BytesIO
+
+from PIL import Image
 
 from fastapi.testclient import TestClient
 
@@ -40,11 +43,9 @@ def test_tracking_endpoint_is_independent_of_groq_configuration():
     # A tiny valid PNG proves the low-latency endpoint does not require or call
     # the cloud narrator. YOLO is disabled in unit tests, so it returns an
     # explicit empty/disabled result rather than fabricating detections.
-    image = (
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0"
-        b"\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), color=(40, 60, 80)).save(buffer, format="PNG")
+    image = buffer.getvalue()
     response = client.post(
         "/v1/track",
         headers={"X-Session-ID": "tracking-test"},

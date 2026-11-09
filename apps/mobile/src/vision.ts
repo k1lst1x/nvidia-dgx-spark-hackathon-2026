@@ -34,6 +34,15 @@ export type VisionObject = {
 
 export type ApproachingWarning = { label: string; distance_m: number };
 
+export type CameraCoachResult = {
+  blur: boolean;
+  poor_lighting: boolean;
+  overexposed: boolean;
+  cropped_labels: string[];
+  sharpness_score: number;
+  brightness_score: number;
+};
+
 export type VisionResult = {
   summary: string;
   speech: string;
@@ -51,6 +60,7 @@ type TrackingResult = {
   tracking_latency_ms: number;
   detector: 'yolo11-botsort' | 'disabled';
   metric_depth: boolean;
+  camera_coach: CameraCoachResult | null;
   experimental: true;
   collision_warnings_enabled: false;
 };
@@ -283,6 +293,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const [state, setState] = useState<VisionState>('starting');
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [detections, setDetections] = useState<LocalDetection[]>([]);
+  const [cameraCoach, setCameraCoach] = useState<CameraCoachResult | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controller = useRef<AbortController | null>(null);
   const cloudInFlight = useRef(false);
@@ -380,6 +391,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
           .then((tracking) => {
             if (runGeneration !== generation.current) return;
             lastTrackingAnalysis.current = Date.now();
+            setCameraCoach(tracking.camera_coach || null);
             setResult((previous) => {
               const base = previous || synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
               return { ...base, objects: tracking.objects };
@@ -463,6 +475,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     signTranscript.current = '';
     failures.current = 0;
     setResult(null);
+    setCameraCoach(null);
     if (!enabled) {
       setState('paused');
       return stop;
@@ -472,5 +485,5 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     return stop;
   }, [enabled, mode, run, stop]);
 
-  return { result, state, lastUpdated, detections, scanNow };
+  return { result, state, lastUpdated, detections, cameraCoach, scanNow };
 }

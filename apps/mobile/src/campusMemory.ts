@@ -1,4 +1,5 @@
 import { getApiUrl } from './vision';
+import { getSightDeviceId, getSightHeaders, getSightSessionId } from './sightIdentity';
 import type { LocalDetection } from './detector.types';
 
 export type CampusAlert = {
@@ -32,6 +33,92 @@ export type BridgeMessage = {
   relative_time: string;
 };
 
+export type SightObservation = {
+  id: number;
+  category: string;
+  label: string;
+  description: string;
+  zone_id: string;
+  timestamp: string;
+  source_device: string;
+  source_session: string;
+  confidence: number;
+  verification_status: 'verified' | 'unverified';
+  privacy_scope: 'personal' | 'shared';
+  expires_at: string;
+  origin: 'manual' | 'detector';
+};
+
+export type SightDashboard = {
+  zone_id: string;
+  connected_devices: number;
+  recent_observations: SightObservation[];
+  tracking_latency_ms: number | null;
+  tracking_requests_last_5m: number;
+};
+
+export type SightChanges = {
+  zone_id: string;
+  generated_at: string;
+  compared_seconds: number;
+  added: string[];
+  previously_seen: string[];
+  summary: string;
+  verified_only: boolean;
+};
+
+export const currentSightSession = getSightSessionId;
+export const currentSightDevice = getSightDeviceId;
+
+async function sightJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const apiUrl = getApiUrl();
+  if (!apiUrl) throw new Error('Connect the DGX Spark API to use Shared Sight');
+  const headers = new Headers(getSightHeaders());
+  new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  const response = await fetch(`${apiUrl}${path}`, {
+    ...init,
+    headers,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail || `Shared Sight request failed (${response.status})`);
+  }
+  return await response.json() as T;
+}
+
+export async function submitSightObservation(input: {
+  zone_id: string;
+  category: string;
+  label: string;
+  description?: string;
+  confidence: number;
+  privacy_scope: 'personal' | 'shared';
+  verified: boolean;
+  origin?: 'manual' | 'detector';
+}): Promise<SightObservation> {
+  return sightJson<SightObservation>('/v1/observations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getSightDashboard(zoneId: string): Promise<SightDashboard> {
+  return sightJson<SightDashboard>(`/v1/shared-sight/dashboard?zone_id=${encodeURIComponent(zoneId)}`);
+}
+
+export async function getSightChanges(zoneId: string): Promise<SightChanges> {
+  return sightJson<SightChanges>(`/v1/observations/changes?zone_id=${encodeURIComponent(zoneId)}`);
+}
+
+export async function searchPersonalRecall(query: string): Promise<SightObservation[]> {
+  return sightJson<SightObservation[]>(`/v1/personal/observations?query=${encodeURIComponent(query)}`);
+}
+
+export async function removeSightObservation(id: number): Promise<void> {
+  await sightJson<{ status: string }>(`/v1/observations/${id}`, { method: 'DELETE' });
+}
+
 export const CAMPUS_LOCATIONS = [
   'Library Corridor',
   'Hallway 200',
@@ -43,58 +130,9 @@ export const CAMPUS_LOCATIONS = [
 
 export type CampusLocation = (typeof CAMPUS_LOCATIONS)[number];
 
-const SEED_ALERTS: CampusAlert[] = [
-  {
-    id: 1,
-    location: 'Library Corridor',
-    category: 'hazard',
-    label: 'wet floor',
-    description: 'Caution: Yellow wet-floor sign outside library entrance, reported recently.',
-    severity: 'high',
-    reported_by: 'student_a',
-    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
-    relative_time: '5m ago',
-    is_active: true,
-  },
-  {
-    id: 2,
-    location: 'Elevator B',
-    category: 'room_status',
-    label: 'out of order',
-    description: 'Elevator B has an out-of-order service notice posted since 9 AM.',
-    severity: 'medium',
-    reported_by: 'student_campus',
-    created_at: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-    relative_time: '45m ago',
-    is_active: true,
-  },
-  {
-    id: 3,
-    location: 'Hallway 200',
-    category: 'obstacle',
-    label: 'utility cart',
-    description: 'A custodial cart is partially blocking the hallway walkway near Room 204.',
-    severity: 'medium',
-    reported_by: 'student_pat',
-    created_at: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-    relative_time: '15m ago',
-    is_active: true,
-  },
-  {
-    id: 4,
-    location: 'Room 204',
-    category: 'room_status',
-    label: 'closed',
-    description: 'Room 204 reserved for hackathon judging and mentor reviews.',
-    severity: 'low',
-    reported_by: 'faculty',
-    created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-    relative_time: '30m ago',
-    is_active: true,
-  },
-];
+const SEED_ALERTS: CampusAlert[] = [];
 
-const LOCAL_STORAGE_KEY_ALERTS = 'guidelens_campus_alerts';
+const LOCAL_STORAGE_KEY_ALERTS = 'guidelens_campus_alerts_v2';
 const LOCAL_STORAGE_KEY_BASELINES = 'guidelens_room_baselines';
 const LOCAL_STORAGE_KEY_BRIDGE = 'guidelens_bridge_messages';
 

@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN git clone --depth 1 https://github.com/DepthAnything/Depth-Anything-V2.git /opt/depth-anything-v2
 COPY main.py .
 COPY schemas.py .
+COPY observation_store.py .
+COPY camera_coach.py .
 COPY yolo_tracker.py .
 COPY depth.py .
 COPY motion.py .
