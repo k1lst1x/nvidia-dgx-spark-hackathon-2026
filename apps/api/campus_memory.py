@@ -54,15 +54,6 @@ def init_db() -> None:
                 updated_at REAL NOT NULL
             );
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS bridge_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                sender_role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                created_at REAL NOT NULL
-            );
-        """)
         conn.commit()
 
 
@@ -264,55 +255,7 @@ def detect_what_changed(
     }
 
 
-def add_bridge_message(session_id: str, sender_role: str, text: str) -> dict[str, Any]:
-    """Store a conversational message in the Deaf-Blind bridge."""
-    now = time.time()
-    with _get_connection() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO bridge_messages (session_id, sender_role, text, created_at)
-            VALUES (?, ?, ?, ?);
-            """,
-            (session_id, sender_role, text.strip(), now),
-        )
-        conn.commit()
-        msg_id = cursor.lastrowid
-
-    return {
-        "id": msg_id,
-        "session_id": session_id,
-        "sender_role": sender_role,
-        "text": text.strip(),
-        "created_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
-        "relative_time": "just now",
-    }
-
-
-def get_bridge_messages(session_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    """Retrieve recent bridge messages for a session."""
-    with _get_connection() as conn:
-        cursor = conn.execute(
-            """
-            SELECT id, session_id, sender_role, text, created_at
-            FROM bridge_messages
-            WHERE session_id = ?
-            ORDER BY created_at ASC
-            LIMIT ?;
-            """,
-            (session_id, limit),
-        )
-        rows = cursor.fetchall()
-        return [
-            {
-                "id": r["id"],
-                "session_id": r["session_id"],
-                "sender_role": r["sender_role"],
-                "text": r["text"],
-                "created_at": datetime.fromtimestamp(r["created_at"], timezone.utc).isoformat(),
-                "relative_time": _format_relative_time(r["created_at"]),
-            }
-            for r in rows
-        ]
+# Deaf-Blind bridge messages moved to observation_store.py (the shared store).
 
 
 # Initialize schema and seed data on module import

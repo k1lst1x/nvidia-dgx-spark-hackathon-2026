@@ -31,6 +31,7 @@ from segmentation import YoloSegmenter
 from slam import OrbSlamClient
 from visualization import RerunView
 from schemas import (
+    BridgeConversation,
     BridgeMessage,
     BridgeMessageRequest,
     CameraCoach,
@@ -901,22 +902,66 @@ async def what_changed(request: Request, body: WhatChangedRequest):
     return WhatChangedResponse.model_validate(result)
 
 
+def _bridge_call(action, *args, **kwargs):
+    try:
+        return action(*args, **kwargs)
+    except observation_store.BridgeNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
+    except observation_store.BridgeFullError as error:
+        raise HTTPException(409, str(error)) from error
+    except observation_store.BridgeAccessError as error:
+        raise HTTPException(403, str(error)) from error
+
+
+def _bridge_code(code: str) -> str:
+    if len(code) != 6 or not code.isdigit():
+        raise HTTPException(422, "A bridge code is six digits")
+    return code
+
+
+@app.post("/v1/bridge/conversations", response_model=BridgeConversation)
+async def create_bridge_conversation(request: Request):
+    """Start a Deaf-Blind bridge conversation and get a 6-digit code to share."""
+    device_id, _session_id = _authorize_sight(request)
+    return BridgeConversation.model_validate(observation_store.create_bridge(device_id))
+
+
+@app.post("/v1/bridge/conversations/{code}/join", response_model=BridgeConversation)
+async def join_bridge_conversation(request: Request, code: str):
+    """Join a conversation as its second device (one pair per conversation)."""
+    device_id, _session_id = _authorize_sight(request)
+    return BridgeConversation.model_validate(
+        _bridge_call(observation_store.join_bridge, _bridge_code(code), device_id)
+    )
+
+
+@app.get("/v1/bridge/conversations/{code}", response_model=BridgeConversation)
+async def get_bridge_conversation(request: Request, code: str):
+    device_id, _session_id = _authorize_sight(request)
+    return BridgeConversation.model_validate(
+        _bridge_call(observation_store.bridge_status, _bridge_code(code), device_id)
+    )
+
+
 @app.post("/v1/bridge/message", response_model=BridgeMessage)
 async def post_bridge_message(request: Request, body: BridgeMessageRequest):
     """Post a Deaf-Blind bridge message (sign translation or spoken reply)."""
-    _authorize_sight(request)
-    msg = campus_memory.add_bridge_message(
-        session_id=body.session_id,
-        sender_role=body.sender_role,
-        text=body.text,
+    device_id, _session_id = _authorize_sight(request)
+    msg = _bridge_call(
+        observation_store.add_bridge_message,
+        body.session_id, device_id, body.sender_role, body.text, body.client_id,
     )
     return BridgeMessage.model_validate(msg)
 
 
 @app.get("/v1/bridge/messages", response_model=list[BridgeMessage])
-async def get_bridge_messages(request: Request, session_id: str, limit: int = 20):
-    """Get recent bridge conversation messages for a session."""
-    _authorize_sight(request)
-    messages = campus_memory.get_bridge_messages(session_id=session_id, limit=limit)
+async def get_bridge_messages(
+    request: Request, session_id: str, after_id: int | None = None, limit: int = 50,
+):
+    """The newest messages in time order, or only those after ``after_id`` for live refresh."""
+    device_id, _session_id = _authorize_sight(request)
+    messages = _bridge_call(
+        observation_store.list_bridge_messages, _bridge_code(session_id), device_id, after_id, limit,
+    )
     return [BridgeMessage.model_validate(m) for m in messages]
 

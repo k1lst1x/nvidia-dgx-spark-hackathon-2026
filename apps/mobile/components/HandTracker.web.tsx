@@ -3,14 +3,65 @@ import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
 import { ASLWordEngine, type ASLWordState } from '../src/aslWordClassifier.web';
 import { TEMPORAL_FEATURE_COUNT, type RawHolisticFrame, type SignRecorder } from '../src/landmarkRecorder.web';
 
-const wasmRoot = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
-const modelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-const faceModelPath = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-const poseModelPath = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+// Public CDN copies. The app serves its own copies under /mediapipe (see
+// scripts/prepare-web-assets.mjs) and prefers them, so sign tracking works
+// with no internet; these are the fallback when a local file is missing.
 // Pin the task asset version. `latest` is not a supported GCS model version
 // and caused the holistic path to be silently unreachable in some browsers.
-const holisticModelPath = 'https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task';
-const visionModule = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs';
+const CDN_ASSETS = {
+  visionModule: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/vision_bundle.mjs',
+  wasmRoot: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm',
+  hand: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+  face: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+  pose: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  holistic: 'https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task',
+};
+type MediaPipeAssets = typeof CDN_ASSETS;
+let mediapipeAssets: MediaPipeAssets = CDN_ASSETS;
+
+function localAssetUrl(path: string) {
+  const base = document.querySelector('script[src*="/_expo/"]')?.getAttribute('src')?.split('/_expo/')[0] || '';
+  return new URL(`${base}/${path}`.replace(/([^:]\/)\/+/, '$1'), window.location.href).href;
+}
+
+/** True when the app really serves the file (not an index.html fallback). */
+async function isServed(url: string) {
+  try {
+    const response = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    return response.ok && !(response.headers.get('content-type') || '').includes('text/html');
+  } catch {
+    return false;
+  }
+}
+
+async function resolveMediaPipeAssets(): Promise<MediaPipeAssets> {
+  const local = {
+    visionModule: localAssetUrl('mediapipe/vision_bundle.mjs'),
+    wasmRoot: localAssetUrl('mediapipe/wasm'),
+    hand: localAssetUrl('mediapipe/models/hand_landmarker.task'),
+    face: localAssetUrl('mediapipe/models/face_landmarker.task'),
+    pose: localAssetUrl('mediapipe/models/pose_landmarker_lite.task'),
+    holistic: localAssetUrl('mediapipe/models/holistic_landmarker.task'),
+  };
+  const [bundle, wasm, hand, face, pose, holistic] = await Promise.all([
+    isServed(local.visionModule),
+    isServed(`${local.wasmRoot}/vision_wasm_internal.wasm`),
+    isServed(local.hand),
+    isServed(local.face),
+    isServed(local.pose),
+    isServed(local.holistic),
+  ]);
+  // The runtime and its wasm must come from the same place to match versions.
+  const runtimeLocal = bundle && wasm;
+  return {
+    visionModule: runtimeLocal ? local.visionModule : CDN_ASSETS.visionModule,
+    wasmRoot: runtimeLocal ? local.wasmRoot : CDN_ASSETS.wasmRoot,
+    hand: hand ? local.hand : CDN_ASSETS.hand,
+    face: face ? local.face : CDN_ASSETS.face,
+    pose: pose ? local.pose : CDN_ASSETS.pose,
+    holistic: holistic ? local.holistic : CDN_ASSETS.holistic,
+  };
+}
 const framesPerGesture = 30;
 const contextGestures = 6;
 const maxContextFrames = framesPerGesture * contextGestures;
@@ -109,7 +160,7 @@ type HandTrackerProps = {
 
 async function createHandDetector(runtime: VisionRuntime, vision: unknown): Promise<HandDetector> {
   const options = (delegate: 'GPU' | 'CPU') => ({
-    baseOptions: { modelAssetPath: modelPath, delegate },
+    baseOptions: { modelAssetPath: mediapipeAssets.hand, delegate },
     runningMode: 'VIDEO',
     numHands: 2,
     minHandDetectionConfidence: 0.45,
@@ -126,7 +177,7 @@ async function createHandDetector(runtime: VisionRuntime, vision: unknown): Prom
 
 async function createFaceDetector(runtime: VisionRuntime, vision: unknown): Promise<FaceDetector> {
   const options = (delegate: 'GPU' | 'CPU') => ({
-    baseOptions: { modelAssetPath: faceModelPath, delegate },
+    baseOptions: { modelAssetPath: mediapipeAssets.face, delegate },
     runningMode: 'VIDEO',
     numFaces: 1,
     outputFaceBlendshapes: true,
@@ -140,7 +191,7 @@ async function createFaceDetector(runtime: VisionRuntime, vision: unknown): Prom
 
 async function createPoseDetector(runtime: VisionRuntime, vision: unknown): Promise<PoseDetector> {
   const options = (delegate: 'GPU' | 'CPU') => ({
-    baseOptions: { modelAssetPath: poseModelPath, delegate },
+    baseOptions: { modelAssetPath: mediapipeAssets.pose, delegate },
     runningMode: 'VIDEO',
     numPoses: 1,
   });
@@ -153,7 +204,7 @@ async function createPoseDetector(runtime: VisionRuntime, vision: unknown): Prom
 
 async function createHolisticDetector(runtime: VisionRuntime, vision: unknown): Promise<HolisticDetector> {
   const options = (delegate: 'GPU' | 'CPU') => ({
-    baseOptions: { modelAssetPath: holisticModelPath, delegate },
+    baseOptions: { modelAssetPath: mediapipeAssets.holistic, delegate },
     runningMode: 'VIDEO',
     outputFaceBlendshapes: true,
     minFaceDetectionConfidence: 0.4,
@@ -175,7 +226,10 @@ let hasHolisticFailed = false;
 function getVisionRuntime(): Promise<VisionRuntime> {
   if (!visionRuntimePromise) {
     const importFromUrl = new Function('url', 'return import(url);') as (url: string) => Promise<VisionRuntime>;
-    visionRuntimePromise = importFromUrl(visionModule);
+    visionRuntimePromise = resolveMediaPipeAssets().then((assets) => {
+      mediapipeAssets = assets;
+      return importFromUrl(assets.visionModule);
+    });
   }
   return visionRuntimePromise;
 }
@@ -434,7 +488,7 @@ export default function HandTracker({
     async function initialise() {
       try {
         const runtime = await getVisionRuntime();
-        const vision = await runtime.FilesetResolver.forVisionTasks(wasmRoot);
+        const vision = await runtime.FilesetResolver.forVisionTasks(mediapipeAssets.wasmRoot);
         let fallbackSetup: Promise<void> | undefined;
         const activateIndividualFallback = () => {
           if (!fallbackSetup) {

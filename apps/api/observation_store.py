@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import secrets
 import sqlite3
 import time
 from collections import deque
@@ -20,6 +21,11 @@ DB_PATH = Path(os.getenv("VISIONMATE_MEMORY_DB", str(Path(__file__).with_name("v
 MIN_CONFIDENCE = float(os.getenv("OBSERVATION_MIN_CONFIDENCE", "0.65"))
 VERIFIED_SHARED_MIN_CONFIDENCE = float(os.getenv("OBSERVATION_VERIFIED_SHARED_MIN_CONFIDENCE", "0.40"))
 DEDUP_SECONDS = 30
+# Deaf-Blind bridge: a conversation is one pair of devices (or one laptop) and
+# is forgotten after this long without a new message.
+BRIDGE_TTL_SECONDS = float(os.getenv("BRIDGE_TTL_HOURS", "12")) * 3600
+BRIDGE_MAX_DEVICES = 2
+BRIDGE_PAGE_LIMIT = 100
 TRACKING_METRICS: deque[tuple[float, int]] = deque(maxlen=1000)
 
 
@@ -28,6 +34,18 @@ class ObservationAccessError(PermissionError):
 
 
 class DuplicateObservationError(ValueError):
+    pass
+
+
+class BridgeNotFoundError(LookupError):
+    pass
+
+
+class BridgeAccessError(PermissionError):
+    pass
+
+
+class BridgeFullError(PermissionError):
     pass
 
 
@@ -85,6 +103,29 @@ def init_db() -> None:
                 last_seen REAL NOT NULL,
                 last_session TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS bridge_conversations (
+                code TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                created_by TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS bridge_members (
+                code TEXT NOT NULL REFERENCES bridge_conversations(code) ON DELETE CASCADE,
+                device_id TEXT NOT NULL,
+                joined_at REAL NOT NULL,
+                PRIMARY KEY (code, device_id)
+            );
+            CREATE TABLE IF NOT EXISTS bridge_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL REFERENCES bridge_conversations(code) ON DELETE CASCADE,
+                sender_role TEXT NOT NULL CHECK (sender_role IN ('deaf','blind')),
+                text TEXT NOT NULL,
+                source_device TEXT NOT NULL,
+                client_id TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE (code, client_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_bridge_messages_code_id ON bridge_messages(code, id);
         """)
         # Additive migration for databases created before room sketches existed.
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(observations)")}
@@ -127,6 +168,7 @@ def cleanup_expired(now: float | None = None) -> int:
     with db_connection() as conn:
         result = conn.execute("DELETE FROM observations WHERE expires_at <= ?", (current,))
         conn.execute("DELETE FROM sight_devices WHERE last_seen < ?", (current - 86400,))
+        conn.execute("DELETE FROM bridge_conversations WHERE expires_at <= ?", (current,))
         return result.rowcount
 
 
@@ -260,6 +302,165 @@ def dashboard(zone_id: str, limit: int = 20, now: float | None = None) -> dict[s
         "zone_id": zone_id, "connected_devices": connected, "recent_observations": observations,
         "tracking_latency_ms": average, "tracking_requests_last_5m": len(values),
     }
+
+
+# ---------------------------------------------------------------------------
+# Deaf-Blind bridge
+# ---------------------------------------------------------------------------
+
+
+def _relative_time(timestamp: float, now: float) -> str:
+    seconds = max(0, int(now - timestamp))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    return f"{seconds // 3600} h ago"
+
+
+def _bridge_conversation(conn: sqlite3.Connection, code: str, device_id: str, now: float) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT code, created_at, expires_at FROM bridge_conversations WHERE code = ? AND expires_at > ?",
+        (code, now),
+    ).fetchone()
+    if row is None:
+        raise BridgeNotFoundError("No active bridge conversation with that code")
+    members = [r["device_id"] for r in conn.execute(
+        "SELECT device_id FROM bridge_members WHERE code = ? ORDER BY joined_at", (code,)
+    )]
+    return {
+        "code": row["code"],
+        "created_at": _iso(row["created_at"]),
+        "expires_at": _iso(row["expires_at"]),
+        "devices": len(members),
+        "max_devices": BRIDGE_MAX_DEVICES,
+        "partner_joined": len(members) >= 2,
+        "is_member": device_id in members,
+    }
+
+
+def _require_member(conn: sqlite3.Connection, code: str, device_id: str, now: float) -> dict[str, Any]:
+    conversation = _bridge_conversation(conn, code, device_id, now)
+    if not conversation["is_member"]:
+        raise BridgeAccessError("This device has not joined that bridge conversation")
+    return conversation
+
+
+def create_bridge(device_id: str, now: float | None = None) -> dict[str, Any]:
+    """Start a conversation and return its 6-digit code (easy to read aloud)."""
+    current = now or time.time()
+    with db_connection() as conn:
+        conn.execute("DELETE FROM bridge_conversations WHERE expires_at <= ?", (current,))
+        for _attempt in range(20):
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            try:
+                conn.execute(
+                    "INSERT INTO bridge_conversations(code, created_at, expires_at, created_by) VALUES (?,?,?,?)",
+                    (code, current, current + BRIDGE_TTL_SECONDS, device_id),
+                )
+            except sqlite3.IntegrityError:
+                continue
+            conn.execute(
+                "INSERT INTO bridge_members(code, device_id, joined_at) VALUES (?,?,?)",
+                (code, device_id, current),
+            )
+            return _bridge_conversation(conn, code, device_id, current)
+    raise RuntimeError("Could not allocate a bridge code")
+
+
+def join_bridge(code: str, device_id: str, now: float | None = None) -> dict[str, Any]:
+    """Join as the second device. Rejoining from the same device is a no-op."""
+    current = now or time.time()
+    with db_connection() as conn:
+        conversation = _bridge_conversation(conn, code, device_id, current)
+        if conversation["is_member"]:
+            return conversation
+        if conversation["devices"] >= BRIDGE_MAX_DEVICES:
+            raise BridgeFullError("That bridge conversation already has two devices")
+        conn.execute(
+            "INSERT INTO bridge_members(code, device_id, joined_at) VALUES (?,?,?)",
+            (code, device_id, current),
+        )
+        return _bridge_conversation(conn, code, device_id, current)
+
+
+def bridge_status(code: str, device_id: str, now: float | None = None) -> dict[str, Any]:
+    current = now or time.time()
+    with db_connection() as conn:
+        return _require_member(conn, code, device_id, current)
+
+
+def _serialize_bridge_message(row: sqlite3.Row, device_id: str, now: float) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["code"],
+        "sender_role": row["sender_role"],
+        "text": row["text"],
+        "client_id": row["client_id"],
+        "from_this_device": row["source_device"] == device_id,
+        "created_at": _iso(row["created_at"]),
+        "relative_time": _relative_time(row["created_at"], now),
+    }
+
+
+def add_bridge_message(
+    code: str,
+    device_id: str,
+    sender_role: str,
+    text: str,
+    client_id: str | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Store a message. A retried send with the same client_id returns the original."""
+    current = now or time.time()
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("Message text is empty")
+    with db_connection() as conn:
+        _require_member(conn, code, device_id, current)
+        if client_id:
+            existing = conn.execute(
+                "SELECT * FROM bridge_messages WHERE code = ? AND client_id = ?", (code, client_id)
+            ).fetchone()
+            if existing is not None:
+                return _serialize_bridge_message(existing, device_id, current)
+        cursor = conn.execute(
+            """INSERT INTO bridge_messages(code, sender_role, text, source_device, client_id, created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (code, sender_role, cleaned, device_id, client_id, current),
+        )
+        # Every message keeps the conversation alive for another TTL window.
+        conn.execute(
+            "UPDATE bridge_conversations SET expires_at = ? WHERE code = ?",
+            (current + BRIDGE_TTL_SECONDS, code),
+        )
+        row = conn.execute("SELECT * FROM bridge_messages WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _serialize_bridge_message(row, device_id, current)
+
+
+def list_bridge_messages(
+    code: str,
+    device_id: str,
+    after_id: int | None = None,
+    limit: int = 50,
+    now: float | None = None,
+) -> list[dict[str, Any]]:
+    """Messages in time order: the newest ``limit``, or only those after ``after_id``."""
+    current = now or time.time()
+    limit = max(1, min(BRIDGE_PAGE_LIMIT, limit))
+    with db_connection() as conn:
+        _require_member(conn, code, device_id, current)
+        if after_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM bridge_messages WHERE code = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                (code, after_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bridge_messages WHERE code = ? ORDER BY id DESC LIMIT ?",
+                (code, limit),
+            ).fetchall()[::-1]
+        return [_serialize_bridge_message(row, device_id, current) for row in rows]
 
 
 init_db()

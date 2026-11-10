@@ -117,18 +117,33 @@ class WhatChangedResponse(BaseModel):
 
 
 class BridgeMessageRequest(BaseModel):
-    session_id: str = Field(min_length=1, max_length=64)
+    # The conversation code; the field keeps its original name for older clients.
+    session_id: str = Field(pattern=r"^\d{6}$")
     sender_role: Literal["deaf", "blind"]
     text: str = Field(min_length=1, max_length=500)
+    # Set by the client so a retried send is stored once.
+    client_id: str | None = Field(default=None, max_length=64)
 
 
 class BridgeMessage(BaseModel):
     id: int
     session_id: str
-    sender_role: str
+    sender_role: Literal["deaf", "blind"]
     text: str
+    client_id: str | None = None
+    from_this_device: bool = False
     created_at: str
     relative_time: str
+
+
+class BridgeConversation(BaseModel):
+    code: str
+    created_at: str
+    expires_at: str
+    devices: int
+    max_devices: int
+    partner_joined: bool
+    is_member: bool
 
 
 class ObservationCreateRequest(BaseModel):

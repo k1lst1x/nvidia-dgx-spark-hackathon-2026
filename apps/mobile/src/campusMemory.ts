@@ -24,14 +24,31 @@ export type WhatChangedResult = {
   moved_objects: string[];
 };
 
+export type BridgeRole = 'deaf' | 'blind';
+
 export type BridgeMessage = {
+  /** Server id; negative for a message that has not reached the server yet. */
   id: number;
+  /** The conversation code. */
   session_id: string;
-  sender_role: 'deaf' | 'blind';
+  sender_role: BridgeRole;
   text: string;
+  client_id?: string | null;
+  from_this_device?: boolean;
   created_at: string;
   relative_time: string;
-  delivery_status?: 'sent' | 'local';
+  /** True while the message waits in this device's outbox. */
+  pending?: boolean;
+};
+
+export type BridgeConversation = {
+  code: string;
+  created_at: string;
+  expires_at: string;
+  devices: number;
+  max_devices: number;
+  partner_joined: boolean;
+  is_member: boolean;
 };
 
 export type SightObservation = {
@@ -139,7 +156,6 @@ const SEED_ALERTS: CampusAlert[] = [];
 
 const LOCAL_STORAGE_KEY_ALERTS = 'guidelens_campus_alerts_v2';
 const LOCAL_STORAGE_KEY_BASELINES = 'guidelens_room_baselines';
-const LOCAL_STORAGE_KEY_BRIDGE = 'guidelens_bridge_messages';
 
 const inMemoryCache: Record<string, string> = {};
 
@@ -398,88 +414,162 @@ export async function checkWhatChanged(
 }
 
 /**
- * Deaf-Blind Bridge message management.
+ * Deaf-Blind Bridge.
+ *
+ * A conversation is one pair of devices joined by a 6-digit code, or a single
+ * device with no sync (LOCAL_BRIDGE_CODE). Every message is written to this
+ * device first and sent from a small outbox, so a dropped connection never
+ * loses a message and a retry is stored once (the server dedupes client_id).
  */
-export async function sendBridgeMessage(
-  sessionId: string,
-  senderRole: 'deaf' | 'blind',
-  text: string
-): Promise<BridgeMessage> {
-  const newMsg: BridgeMessage = {
-    id: Date.now(),
-    session_id: sessionId,
-    sender_role: senderRole,
-    text: text.trim(),
-    created_at: new Date().toISOString(),
-    relative_time: 'just now',
-  };
+export const LOCAL_BRIDGE_CODE = 'local';
+const BRIDGE_STORAGE_PREFIX = 'guidelens_bridge_v2:';
+const BRIDGE_REQUEST_TIMEOUT_MS = 3000;
+const BRIDGE_LOCAL_HISTORY = 100;
 
-  const stored = getStoredJson<BridgeMessage[]>(LOCAL_STORAGE_KEY_BRIDGE, []);
+export class BridgeGoneError extends Error {}
 
-  const apiUrl = getApiUrl();
-  if (apiUrl) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1500);
-      const res = await fetch(`${apiUrl}/v1/bridge/message`, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', ...getSightHeaders() },
-        body: JSON.stringify({
-          session_id: sessionId,
-          sender_role: senderRole,
-          text: text.trim(),
-        }),
-      });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const saved = { ...(await res.json() as BridgeMessage), delivery_status: 'sent' as const };
-        setStoredJson(LOCAL_STORAGE_KEY_BRIDGE, [...stored, saved].slice(-50));
-        return saved;
-      }
-    } catch {}
-  }
+type StoredBridge = { messages: BridgeMessage[] };
 
-  const localMessage = { ...newMsg, delivery_status: 'local' as const };
-  setStoredJson(LOCAL_STORAGE_KEY_BRIDGE, [...stored, localMessage].slice(-50));
-  return localMessage;
+function bridgeKey(code: string) {
+  return `${BRIDGE_STORAGE_PREFIX}${code}`;
 }
 
-export async function getBridgeMessages(sessionId: string): Promise<BridgeMessage[]> {
-  const local = getStoredJson<BridgeMessage[]>(LOCAL_STORAGE_KEY_BRIDGE, []);
-  const apiUrl = getApiUrl();
-  if (apiUrl) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1500);
-      const res = await fetch(`${apiUrl}/v1/bridge/messages?session_id=${encodeURIComponent(sessionId)}`, {
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', ...getSightHeaders() },
-      });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const msgs = (await res.json()) as BridgeMessage[];
-        if (Array.isArray(msgs) && msgs.length > 0) {
-          setStoredJson(LOCAL_STORAGE_KEY_BRIDGE, msgs);
-          return msgs;
-        }
-      }
-    } catch {}
-  }
-  return local.filter((m) => m.session_id === sessionId);
+function readBridge(code: string): StoredBridge {
+  const stored = getStoredJson<StoredBridge>(bridgeKey(code), { messages: [] });
+  return Array.isArray(stored?.messages) ? stored : { messages: [] };
 }
 
-export async function checkBridgeApiConnection(): Promise<boolean> {
+function writeBridge(code: string, value: StoredBridge) {
+  setStoredJson(bridgeKey(code), { messages: value.messages.slice(-BRIDGE_LOCAL_HISTORY) });
+}
+
+async function bridgeRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const apiUrl = getApiUrl();
-  if (!apiUrl) return false;
+  if (!apiUrl) throw new Error('No GuideLens server is configured');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2500);
+  const timeout = setTimeout(() => controller.abort(), BRIDGE_REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${apiUrl}/health`, { signal: controller.signal });
-    return response.ok;
-  } catch {
-    return false;
+    const headers = new Headers(getSightHeaders());
+    headers.set('Content-Type', 'application/json');
+    const response = await fetch(`${apiUrl}${path}`, { ...init, headers, signal: controller.signal });
+    if (response.status === 403 || response.status === 404 || response.status === 409) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new BridgeGoneError(body?.detail || 'That bridge conversation is not available');
+    }
+    if (!response.ok) throw new Error(`Bridge request failed (${response.status})`);
+    return await response.json() as T;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function bridgeServerConfigured(): boolean {
+  return Boolean(getApiUrl());
+}
+
+export function createBridgeConversation(): Promise<BridgeConversation> {
+  return bridgeRequest<BridgeConversation>('/v1/bridge/conversations', { method: 'POST' });
+}
+
+export function joinBridgeConversation(code: string): Promise<BridgeConversation> {
+  return bridgeRequest<BridgeConversation>(`/v1/bridge/conversations/${encodeURIComponent(code)}/join`, { method: 'POST' });
+}
+
+export function getBridgeConversation(code: string): Promise<BridgeConversation> {
+  return bridgeRequest<BridgeConversation>(`/v1/bridge/conversations/${encodeURIComponent(code)}`);
+}
+
+function sameMessage(left: BridgeMessage, right: BridgeMessage) {
+  if (left.client_id && right.client_id) return left.client_id === right.client_id;
+  return left.id === right.id;
+}
+
+/** Merge by client_id (or id); server messages in id order, unsent ones last. */
+export function mergeBridgeMessages(existing: BridgeMessage[], incoming: BridgeMessage[]): BridgeMessage[] {
+  const merged = [...existing];
+  incoming.forEach((message) => {
+    const index = merged.findIndex((item) => sameMessage(item, message));
+    if (index >= 0) merged[index] = { ...merged[index], ...message, pending: message.pending ?? false };
+    else merged.push(message);
+  });
+  const sent = merged.filter((item) => !item.pending).sort((left, right) => left.id - right.id);
+  const pending = merged.filter((item) => item.pending);
+  return [...sent, ...pending];
+}
+
+/** This device's copy of a conversation, including messages not yet sent. */
+export function loadLocalBridgeMessages(code: string): BridgeMessage[] {
+  return readBridge(code).messages;
+}
+
+function storeBridgeMessages(code: string, incoming: BridgeMessage[]) {
+  const stored = readBridge(code);
+  writeBridge(code, { messages: mergeBridgeMessages(stored.messages, incoming) });
+}
+
+function newClientId() {
+  return `${getSightDeviceId().slice(0, 24)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function deliver(code: string, message: BridgeMessage): Promise<BridgeMessage> {
+  const sent = await bridgeRequest<BridgeMessage>('/v1/bridge/message', {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: code,
+      sender_role: message.sender_role,
+      text: message.text,
+      client_id: message.client_id,
+    }),
+  });
+  const delivered = { ...sent, pending: false };
+  storeBridgeMessages(code, [delivered]);
+  return delivered;
+}
+
+/**
+ * Save a message on this device and try to send it once. When the send fails
+ * the message stays pending; flushBridgeOutbox retries it later.
+ */
+export async function sendBridgeMessage(code: string, senderRole: BridgeRole, text: string): Promise<BridgeMessage> {
+  const now = new Date();
+  const local: BridgeMessage = {
+    id: -now.getTime(),
+    session_id: code,
+    sender_role: senderRole,
+    text: text.trim(),
+    client_id: newClientId(),
+    from_this_device: true,
+    created_at: now.toISOString(),
+    relative_time: 'just now',
+    pending: code !== LOCAL_BRIDGE_CODE,
+  };
+  storeBridgeMessages(code, [local]);
+  if (code === LOCAL_BRIDGE_CODE || !bridgeServerConfigured()) return local;
+  try {
+    return await deliver(code, local);
+  } catch (error) {
+    if (error instanceof BridgeGoneError) throw error;
+    return local;
+  }
+}
+
+/** Retry unsent messages in order. Returns the ones that went through. */
+export async function flushBridgeOutbox(code: string): Promise<BridgeMessage[]> {
+  if (code === LOCAL_BRIDGE_CODE || !bridgeServerConfigured()) return [];
+  const delivered: BridgeMessage[] = [];
+  for (const message of readBridge(code).messages.filter((item) => item.pending)) {
+    delivered.push(await deliver(code, message));
+  }
+  return delivered;
+}
+
+/** Newest messages from the server, or only those after afterId. Throws when offline. */
+export async function fetchBridgeMessages(code: string, afterId?: number): Promise<BridgeMessage[]> {
+  const query = afterId != null && afterId > 0 ? `&after_id=${afterId}` : '';
+  const messages = await bridgeRequest<BridgeMessage[]>(
+    `/v1/bridge/messages?session_id=${encodeURIComponent(code)}${query}&limit=50`,
+  );
+  const received = messages.map((message) => ({ ...message, pending: false }));
+  storeBridgeMessages(code, received);
+  return received;
 }
