@@ -5,17 +5,33 @@ import type { ObstacleFrame, VisionObject, VisionPerformance } from '../src/visi
 
 type MapDetection = Pick<VisionObject, 'label' | 'confidence' | 'x' | 'y' | 'width' | 'height' | 'distance_m' | 'track_id' | 'spatial'>;
 type Props = { detections: MapDetection[]; obstacles?: ObstacleFrame | null; performance: VisionPerformance };
-type Anchor = { label: string; x: number; y: number; z: number; firstSeenAt: number; lastSeenAt: number; seenTick: number };
+type Anchor = {
+  label: string;
+  x: number; y: number; z: number;
+  /** Smoothed position actually drawn, so pins glide instead of jumping at 4 Hz. */
+  sx: number; sy: number; sz: number;
+  firstSeenAt: number;
+  /** Last time a measured distance confirmed this object. */
+  lastSeenAt: number;
+  /** Last time the detector saw it in this direction without a distance. */
+  bearingSeenAt: number;
+  seenTick: number;
+};
+/** A detection with a direction but no measured distance. */
+type Ray = { label: string; angle: number; shown: number; seenAt: number };
 type Dot = { x: number; y: number; z: number; seenAt: number; hits: number };
-type Nearest = { label: string; distance: number; direction: string } | null;
+type Sighting = { label: string; distance: number; bearing: number; direction: string };
 type MapStats = {
   liveObjects: number;
   rememberedObjects: number;
+  directionOnly: number;
   depthObjects: number;
   dots: number;
   mapHz: number;
   renderFps: number;
-  nearest: Nearest;
+  nearest: Sighting | null;
+  others: Sighting[];
+  inView: string[];
 };
 type ViewMode = 'top' | 'orbit';
 type PanelSize = 'mini' | 'small' | 'large';
@@ -31,6 +47,10 @@ const MAX_OBJECT_ANCHORS = 24;
 // Untracked detections (or a tracker that re-issued an ID) are merged with a
 // remembered anchor of the same label within this radius.
 const OBJECT_MATCH_RADIUS_M = 0.8;
+// A direction-only detection within this angle of a remembered object of the
+// same label is treated as that object still being in view.
+const BEARING_MATCH_DEG = 12;
+const MAX_RAYS = 8;
 
 // Obstacle dots: unlabeled surfaces (walls, trees, poles) from metric depth.
 // Only near surfaces are kept, each is forgotten after a few seconds, dots are
@@ -39,19 +59,24 @@ const OBSTACLE_RANGE_M = 4.5;
 const OBSTACLE_MEMORY_MS = 8000;
 const OBSTACLE_VOXEL_M = 0.15;
 const MAX_OBSTACLE_DOTS = 1200;
-// Only what was seen this recently counts for the "Nearest" readout.
+// Only what was measured this recently counts for the "Nearest" readout.
 const NEAREST_WINDOW_MS = 2500;
+const DANGER_M = 1.5;
+const CAUTION_M = 3;
 
 // The camera's horizontal field of view drawn on the floor. 60° matches the
 // server's uncalibrated webcam stand-in (point_cloud.camera_intrinsics).
 const FOV_DEG = 60;
+const FOV_RAD = (FOV_DEG * Math.PI) / 180;
 const RING_DISTANCES_M = [1, 2, 3, OBSTACLE_RANGE_M];
+const RING_LABEL_BEARING = (-52 * Math.PI) / 180;
 
-const BACKGROUND = new THREE.Color(0x07110c);
+const BACKGROUND = new THREE.Color(0x060f0b);
+const FLOOR_CENTER = new THREE.Color(0x10281d);
 const NEAR_COLOR = new THREE.Color(0xff6b4a);
 const FAR_COLOR = new THREE.Color(0x56c8ff);
-const LIVE_OBJECT_COLOR = new THREE.Color(0xb7ff56);
-const REMEMBERED_OBJECT_COLOR = new THREE.Color(0x7d9686);
+const BLACK = new THREE.Color(0x000000);
+const URGENT = { near: '#FF6B4A', mid: '#FFD043', far: '#B7FF56', memory: '#7D9686', ray: '#8FD3FF' };
 
 const VIEW_STORAGE_KEY = 'guidelens_live_map_view';
 const SIZE_STORAGE_KEY = 'guidelens_live_map_size';
@@ -73,48 +98,13 @@ function writePreference(key: string, value: string) {
   }
 }
 
-function textSprite(text: string, options: { color?: string; background?: string; border?: string; height?: number } = {}) {
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  if (!context) return new THREE.Sprite();
-  const font = '700 30px sans-serif';
-  context.font = font;
-  const width = Math.min(512, Math.ceil(context.measureText(text).width) + 28);
-  canvas.width = width;
-  canvas.height = 48;
-  context.font = font;
-  if (options.background) {
-    context.fillStyle = options.background;
-    context.beginPath();
-    context.roundRect?.(2, 2, width - 4, 44, 10);
-    if (!context.roundRect) context.rect(2, 2, width - 4, 44);
-    context.fill();
-    if (options.border) {
-      context.strokeStyle = options.border;
-      context.lineWidth = 2;
-      context.stroke();
-    }
-  }
-  context.fillStyle = options.color ?? '#F4FFE4';
-  context.textBaseline = 'middle';
-  context.fillText(text, 14, 25);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
-  const height = options.height ?? 0.26;
-  sprite.scale.set((height * width) / 48, height, 1);
-  sprite.userData.baseScale = [(height * width) / 48, height];
-  sprite.renderOrder = 10;
-  return sprite;
-}
-
 function disposeObject(object: THREE.Object3D) {
   object.traverse((child) => {
     const mesh = child as THREE.Mesh;
     mesh.geometry?.dispose?.();
     const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
     (Array.isArray(material) ? material : material ? [material] : []).forEach((item) => {
-      (item as THREE.SpriteMaterial).map?.dispose?.();
+      (item as THREE.PointsMaterial).map?.dispose?.();
       item.dispose();
     });
   });
@@ -137,30 +127,90 @@ function distanceFromCamera(point: { x: number; y: number; z: number }) {
   return Math.hypot(point.x, point.y - EYE_HEIGHT_M, point.z);
 }
 
-/** Clock-free direction words for a scene point (forward is -z). */
-function directionOf(point: { x: number; z: number }) {
-  const angle = (Math.atan2(point.x, -point.z) * 180) / Math.PI;
+/** Radians, positive to the right of straight ahead (forward is -z). */
+function bearingOf(point: { x: number; z: number }) {
+  return Math.atan2(point.x, -point.z);
+}
+
+/** Clock-free direction words for a bearing. */
+function directionWords(bearing: number) {
+  const angle = (bearing * 180) / Math.PI;
   if (Math.abs(angle) <= 12) return 'ahead';
   if (Math.abs(angle) <= 40) return angle < 0 ? 'ahead-left' : 'ahead-right';
-  return angle < 0 ? 'left' : 'right';
+  if (Math.abs(angle) <= 135) return angle < 0 ? 'left' : 'right';
+  return 'behind';
 }
 
 function urgencyColor(distance: number) {
-  if (distance < 1.5) return '#FF8A6B';
-  if (distance < 3) return '#FFD043';
-  return '#B7FF56';
+  if (distance < DANGER_M) return URGENT.near;
+  if (distance < CAUTION_M) return URGENT.mid;
+  return URGENT.far;
+}
+
+function onFloor(radius: number, bearing: number, y = 0.01) {
+  return new THREE.Vector3(Math.sin(bearing) * radius, y, -Math.cos(bearing) * radius);
 }
 
 function ringLine(radius: number, color: number, opacity: number) {
-  const points = Array.from({ length: 97 }, (_, index) => {
-    const angle = (index / 96) * Math.PI * 2;
-    return new THREE.Vector3(Math.cos(angle) * radius, 0.01, Math.sin(angle) * radius);
-  });
+  const points = Array.from({ length: 129 }, (_, index) => onFloor(radius, (index / 128) * Math.PI * 2));
   return new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
     new THREE.LineBasicMaterial({ color, transparent: true, opacity }),
   );
 }
+
+/** A floor sector (forward-centered) whose color fades from `center` at the origin to `rim`. */
+function fadedSector(radius: number, width: number, center: THREE.Color, rim: THREE.Color, segments = 48) {
+  const geometry = new THREE.CircleGeometry(radius, segments, Math.PI / 2 - width / 2, width);
+  const positions = geometry.getAttribute('position');
+  const colors = new Float32Array(positions.count * 3);
+  const mixed = new THREE.Color();
+  for (let index = 0; index < positions.count; index += 1) {
+    const r = Math.min(1, Math.hypot(positions.getX(index), positions.getY(index)) / radius);
+    mixed.copy(rim).lerp(center, Math.pow(1 - r, 0.85));
+    colors.set([mixed.r, mixed.g, mixed.b], index * 3);
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.rotateX(-Math.PI / 2);
+  return geometry;
+}
+
+function glowMaterial(opacity = 1) {
+  return new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  });
+}
+
+function dotTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 64;
+  const context = canvas.getContext('2d');
+  if (context) {
+    const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.45, 'rgba(255,255,255,0.85)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 64, 64);
+  }
+  return new THREE.CanvasTexture(canvas);
+}
+
+type LabelKind = 'object' | 'ray' | 'ring' | 'compass';
+type MapLabel = {
+  el: HTMLDivElement;
+  kind: LabelKind;
+  signature: string;
+  width: number;
+  height: number;
+  priority: number;
+  world: () => THREE.Vector3;
+};
+
+const LABEL_BASE_STYLE = [
+  'position:absolute', 'left:0', 'top:0', 'white-space:nowrap', 'pointer-events:none', 'will-change:transform',
+  'font-family:system-ui,-apple-system,Segoe UI,sans-serif', 'transition:opacity 120ms linear',
+].join(';');
 
 export default function LiveSceneMap({ detections, obstacles = null, performance }: Props) {
   const window_ = useWindowDimensions();
@@ -174,7 +224,8 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
   const [showDetails, setShowDetails] = useState(false);
   const viewRef = useRef(view);
   const [stats, setStats] = useState<MapStats>({
-    liveObjects: 0, rememberedObjects: 0, depthObjects: 0, dots: 0, mapHz: 0, renderFps: 0, nearest: null,
+    liveObjects: 0, rememberedObjects: 0, directionOnly: 0, depthObjects: 0, dots: 0, mapHz: 0, renderFps: 0,
+    nearest: null, others: [], inView: [],
   });
   detectionsRef.current = detections;
   obstaclesRef.current = obstacles;
@@ -186,70 +237,104 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
   useEffect(() => {
     const container = host.current;
     if (!container) return undefined;
+    const reducedMotion = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 
     const scene = new THREE.Scene();
     scene.background = BACKGROUND.clone();
-    scene.fog = new THREE.Fog(0x07110c, 9, 20);
-    const camera = new THREE.PerspectiveCamera(48, 1, 0.05, 60);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(pixelRatio);
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.touchAction = 'none';
     container.appendChild(renderer.domElement);
+    // Crisp HTML labels drawn over the canvas; placed every frame without overlaps.
+    const labelLayer = document.createElement('div');
+    labelLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none';
+    container.appendChild(labelLayer);
 
-    // --- Static floor: faint grid, distance rings with labels, field of view.
+    // Top view: a true radar (orthographic, forward is up, no parallax).
+    const topCamera = new THREE.OrthographicCamera(-5, 5, 3, -3, 0.1, 60);
+    const TOP_CENTER_Z = -(OBSTACLE_RANGE_M - 0.9) / 2 - 0.2;
+    let topZoom = 1;
+    // 3D view: an orbit around the space ahead.
+    const orbitCamera = new THREE.PerspectiveCamera(46, 1, 0.05, 80);
+    let viewWidth = 1;
+    let viewHeight = 1;
+
+    // --- Floor: soft radial glow, polar grid, distance rings, field of view.
     const floor = new THREE.Group();
     scene.add(floor);
-    const grid = new THREE.GridHelper(12, 24, 0x12271d, 0x0f2119);
-    floor.add(grid);
+    const floorDisc = new THREE.Mesh(
+      fadedSector(OBSTACLE_RANGE_M + 1.2, Math.PI * 2, FLOOR_CENTER, BACKGROUND, 96),
+      new THREE.MeshBasicMaterial({ vertexColors: true, depthWrite: false }),
+    );
+    floorDisc.position.y = -0.002;
+    floor.add(floorDisc);
+    const spokes: THREE.Vector3[] = [];
+    for (let degrees = 0; degrees < 360; degrees += 30) {
+      const bearing = (degrees * Math.PI) / 180;
+      spokes.push(onFloor(0.45, bearing, 0.004), onFloor(OBSTACLE_RANGE_M, bearing, 0.004));
+    }
+    floor.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(spokes),
+      new THREE.LineBasicMaterial({ color: 0x1a3a2b, transparent: true, opacity: 0.55 }),
+    ));
     RING_DISTANCES_M.forEach((radius) => {
       const outer = radius === OBSTACLE_RANGE_M;
-      floor.add(ringLine(radius, outer ? 0x4f8a64 : 0x2b4a39, outer ? 0.95 : 0.8));
-      const label = textSprite(`${radius} m`, { color: outer ? '#9FD9A8' : '#6E9A7E', height: 0.22 });
-      const angle = (24 * Math.PI) / 180;
-      label.position.set(Math.sin(angle) * radius + 0.18, 0.05, -Math.cos(angle) * radius);
-      floor.add(label);
+      floor.add(ringLine(radius, outer ? 0x4f8a64 : 0x24453a, outer ? 1 : 0.85));
     });
-    const fovRadians = (FOV_DEG * Math.PI) / 180;
-    const fov = new THREE.Mesh(
-      new THREE.CircleGeometry(OBSTACLE_RANGE_M, 48, Math.PI / 2 - fovRadians / 2, fovRadians),
-      new THREE.MeshBasicMaterial({ color: 0xb7ff56, transparent: true, opacity: 0.07, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    fov.rotation.x = -Math.PI / 2;
+    // Everything inside DANGER_M glows red while something measured is that close.
+    const dangerMaterial = glowMaterial(0);
+    const dangerZone = new THREE.Mesh(fadedSector(DANGER_M, Math.PI * 2, new THREE.Color(0x5a1408), new THREE.Color(0x2a0804), 64), dangerMaterial);
+    dangerZone.position.y = 0.003;
+    floor.add(dangerZone);
+    const fov = new THREE.Mesh(fadedSector(OBSTACLE_RANGE_M, FOV_RAD, new THREE.Color(0x2c4a12), BLACK), glowMaterial());
     fov.position.y = 0.005;
     floor.add(fov);
-    const fovEdges = new THREE.Line(
+    floor.add(new THREE.Line(
       new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-Math.sin(fovRadians / 2) * OBSTACLE_RANGE_M, 0.012, -Math.cos(fovRadians / 2) * OBSTACLE_RANGE_M),
-        new THREE.Vector3(0, 0.012, 0),
-        new THREE.Vector3(Math.sin(fovRadians / 2) * OBSTACLE_RANGE_M, 0.012, -Math.cos(fovRadians / 2) * OBSTACLE_RANGE_M),
+        onFloor(OBSTACLE_RANGE_M, -FOV_RAD / 2, 0.012), new THREE.Vector3(0, 0.012, 0), onFloor(OBSTACLE_RANGE_M, FOV_RAD / 2, 0.012),
       ]),
-      new THREE.LineBasicMaterial({ color: 0x6fae4f, transparent: true, opacity: 0.6 }),
-    );
-    floor.add(fovEdges);
+      new THREE.LineBasicMaterial({ color: 0x6fae4f, transparent: true, opacity: 0.7 }),
+    ));
+    // A slow sweep across the field of view: shows the map is live, not frozen.
+    const sweep = new THREE.Mesh(fadedSector(OBSTACLE_RANGE_M, (7 * Math.PI) / 180, new THREE.Color(0x3d6b1a), BLACK, 12), glowMaterial());
+    sweep.position.y = 0.007;
+    sweep.visible = !reducedMotion;
+    floor.add(sweep);
 
-    // The user: a heading chevron on the floor and a marker at eye height.
+    // The user: a heading chevron with a halo, and an eye marker for the 3D view.
     const chevronShape = new THREE.Shape();
-    chevronShape.moveTo(0, 0.34);
-    chevronShape.lineTo(0.22, -0.2);
-    chevronShape.lineTo(0, -0.08);
-    chevronShape.lineTo(-0.22, -0.2);
+    chevronShape.moveTo(0, 0.3);
+    chevronShape.lineTo(0.2, -0.18);
+    chevronShape.lineTo(0, -0.07);
+    chevronShape.lineTo(-0.2, -0.18);
     chevronShape.closePath();
-    const chevron = new THREE.Mesh(new THREE.ShapeGeometry(chevronShape), new THREE.MeshBasicMaterial({ color: 0xb7ff56, side: THREE.DoubleSide }));
-    chevron.rotation.x = -Math.PI / 2;
+    const chevronGeometry = new THREE.ShapeGeometry(chevronShape);
+    chevronGeometry.rotateX(-Math.PI / 2);
+    const chevron = new THREE.Mesh(chevronGeometry, new THREE.MeshBasicMaterial({ color: 0xb7ff56, side: THREE.DoubleSide }));
     chevron.position.y = 0.02;
     floor.add(chevron);
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 12), new THREE.MeshBasicMaterial({ color: 0xb7ff56 }));
+    const userHaloGeometry = new THREE.RingGeometry(0.34, 0.38, 48);
+    userHaloGeometry.rotateX(-Math.PI / 2);
+    const userHalo = new THREE.Mesh(userHaloGeometry, new THREE.MeshBasicMaterial({ color: 0xb7ff56, transparent: true, opacity: 0.35, side: THREE.DoubleSide }));
+    userHalo.position.y = 0.015;
+    floor.add(userHalo);
+    const eye = new THREE.Group();
+    eye.add(
+      new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 12), new THREE.MeshBasicMaterial({ color: 0xb7ff56 })),
+      new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -EYE_HEIGHT_M, 0), new THREE.Vector3(0, 0, 0)]),
+        new THREE.LineBasicMaterial({ color: 0x4f8a64 }),
+      ),
+    );
     eye.position.set(0, EYE_HEIGHT_M, 0);
     floor.add(eye);
-    const eyeStem = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, EYE_HEIGHT_M, 0)]),
-      new THREE.LineBasicMaterial({ color: 0x4f8a64 }),
-    );
-    floor.add(eyeStem);
 
     const objectGroup = new THREE.Group();
     scene.add(objectGroup);
+    const rayGroup = new THREE.Group();
+    scene.add(rayGroup);
 
     // One preallocated point buffer for every obstacle dot: no per-dot meshes,
     // no allocation per frame, and a fixed upper bound on GPU work.
@@ -261,16 +346,23 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
     dotGeometry.setAttribute('position', positionAttribute);
     dotGeometry.setAttribute('color', colorAttribute);
     dotGeometry.setDrawRange(0, 0);
-    const dotMaterial = new THREE.PointsMaterial({ size: 0.09, vertexColors: true, sizeAttenuation: true, depthWrite: false });
+    const dotMaterial = new THREE.PointsMaterial({
+      size: 0.12, map: dotTexture(), vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
     const dotCloud = new THREE.Points(dotGeometry, dotMaterial);
     dotCloud.frustumCulled = false;
     scene.add(dotCloud);
 
-    type ObjectVisual = { group: THREE.Group; marker: THREE.Mesh; stem: THREE.Line; base: THREE.Mesh; label: THREE.Sprite; text: string };
+    type ObjectVisual = { group: THREE.Group; pin: THREE.Mesh; halo: THREE.Mesh; stem: THREE.Line; marker: THREE.Mesh; color: THREE.Color };
+    type RayVisual = { line: THREE.Line; tip: THREE.Mesh };
     const anchors = new Map<string, Anchor>();
     const anchorVisuals = new Map<string, ObjectVisual>();
+    const rays = new Map<string, Ray>();
+    const rayVisuals = new Map<string, RayVisual>();
     // Insertion order doubles as age order: a refreshed dot is re-inserted at the end.
     const dots = new Map<string, Dot>();
+    const labels = new Map<string, MapLabel>();
+    let nearestKey: string | null = null;
     let lastObstacleSequence = -1;
     let anchorCounter = 0;
     let tickCounter = 0;
@@ -279,28 +371,123 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
     let measuredMapHz = 0;
     let renderedFrames = 0;
     let renderStarted = performanceNow();
+    let dangerLevel = 0;
     const fadeColor = new THREE.Color();
+    const scratch = new THREE.Vector3();
 
+    // ------------------------------------------------------------------ labels
+    const ensureLabel = (key: string, kind: LabelKind, world: () => THREE.Vector3) => {
+      let label = labels.get(key);
+      if (!label) {
+        const el = document.createElement('div');
+        el.style.cssText = LABEL_BASE_STYLE;
+        el.style.opacity = '0';
+        labelLayer.appendChild(el);
+        label = { el, kind, signature: '', width: 0, height: 0, priority: 0, world };
+        labels.set(key, label);
+      }
+      label.world = world;
+      return label;
+    };
+
+    /** Re-render a label only when its content changes, then measure it once. */
+    const setLabel = (label: MapLabel, parts: Array<{ text: string; color: string; weight?: number }>, style: string) => {
+      const signature = `${style}|${parts.map((part) => `${part.text}:${part.color}`).join('|')}`;
+      if (signature === label.signature) return;
+      label.signature = signature;
+      label.el.style.cssText = `${LABEL_BASE_STYLE};${style};opacity:${label.el.style.opacity || 0}`;
+      label.el.replaceChildren(...parts.map((part, index) => {
+        const span = document.createElement('span');
+        span.textContent = index ? ` ${part.text}` : part.text;
+        span.style.color = part.color;
+        span.style.fontWeight = String(part.weight ?? 600);
+        return span;
+      }));
+      label.width = label.el.offsetWidth;
+      label.height = label.el.offsetHeight;
+    };
+
+    const removeLabel = (key: string) => {
+      const label = labels.get(key);
+      if (!label) return;
+      label.el.remove();
+      labels.delete(key);
+    };
+
+    RING_DISTANCES_M.forEach((radius) => {
+      const point = onFloor(radius, RING_LABEL_BEARING, 0.02);
+      const label = ensureLabel(`ring:${radius}`, 'ring', () => point);
+      label.priority = 500 + radius;
+      setLabel(label, [{ text: `${radius} m`, color: radius === OBSTACLE_RANGE_M ? '#9FD9A8' : '#5F8A72', weight: 700 }], 'font-size:10px');
+    });
+    const aheadPoint = onFloor(OBSTACLE_RANGE_M + 0.32, 0, 0.02);
+    const aheadLabel = ensureLabel('compass:ahead', 'compass', () => aheadPoint);
+    aheadLabel.priority = 400;
+    setLabel(aheadLabel, [{ text: 'AHEAD', color: '#7FB98F', weight: 800 }], 'font-size:9px;letter-spacing:1.5px');
+
+    const placeLabels = (camera: THREE.Camera) => {
+      const width = viewWidth;
+      const height = viewHeight;
+      const taken: Array<[number, number, number, number]> = [];
+      const fits = (left: number, top: number, w: number, h: number) => {
+        if (left < 2 || top < 2 || left + w > width - 2 || top + h > height - 2) return false;
+        return taken.every(([l, t, r, b]) => left + w + 3 <= l || left >= r + 3 || top + h + 2 <= t || top >= b + 2);
+      };
+      const project = (point: THREE.Vector3) => {
+        scratch.copy(point).project(camera);
+        if (scratch.z < -1 || scratch.z > 1) return null;
+        return [((scratch.x + 1) / 2) * width, ((1 - scratch.y) / 2) * height] as const;
+      };
+      // Keep the user's own marker clear of labels.
+      const user = project(new THREE.Vector3(0, 0, 0));
+      if (user) taken.push([user[0] - 16, user[1] - 16, user[0] + 16, user[1] + 16]);
+      [...labels.values()].sort((left, right) => left.priority - right.priority).forEach((label) => {
+        const anchorPoint = project(label.world());
+        let placed: [number, number] | null = null;
+        if (anchorPoint) {
+          const [px, py] = anchorPoint;
+          const w = label.width;
+          const h = label.height;
+          const candidates: Array<[number, number]> = label.kind === 'object' || label.kind === 'ray'
+            ? [[px - w / 2, py - h - 10], [px + 11, py - h / 2], [px - w - 11, py - h / 2], [px - w / 2, py + 10]]
+            : [[px - w / 2, py - h / 2]];
+          placed = candidates.find(([left, top]) => fits(left, top, w, h)) ?? null;
+          if (placed) taken.push([placed[0], placed[1], placed[0] + w, placed[1] + h]);
+        }
+        if (placed) {
+          label.el.style.transform = `translate3d(${Math.round(placed[0])}px, ${Math.round(placed[1])}px, 0)`;
+          label.el.style.opacity = '1';
+        } else {
+          label.el.style.opacity = '0';
+        }
+      });
+    };
+
+    // ----------------------------------------------------------------- objects
     const createVisual = (): ObjectVisual => {
       const group = new THREE.Group();
-      const marker = new THREE.Mesh(
-        new THREE.OctahedronGeometry(0.13),
-        new THREE.MeshBasicMaterial({ color: LIVE_OBJECT_COLOR, transparent: true }),
-      );
+      const pinGeometry = new THREE.CircleGeometry(0.11, 32);
+      pinGeometry.rotateX(-Math.PI / 2);
+      const pin = new THREE.Mesh(pinGeometry, new THREE.MeshBasicMaterial({ color: 0xb7ff56, transparent: true, depthWrite: false }));
+      pin.position.y = 0.03;
+      const haloGeometry = new THREE.RingGeometry(0.17, 0.215, 40);
+      haloGeometry.rotateX(-Math.PI / 2);
+      const halo = new THREE.Mesh(haloGeometry, new THREE.MeshBasicMaterial({ color: 0xb7ff56, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+      halo.position.y = 0.025;
       const stem = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0)]),
-        new THREE.LineBasicMaterial({ color: LIVE_OBJECT_COLOR, transparent: true }),
+        new THREE.LineBasicMaterial({ color: 0xb7ff56, transparent: true }),
       );
-      const base = new THREE.Mesh(
-        new THREE.RingGeometry(0.16, 0.22, 32),
-        new THREE.MeshBasicMaterial({ color: LIVE_OBJECT_COLOR, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
-      );
-      base.rotation.x = -Math.PI / 2;
-      const label = new THREE.Sprite();
-      group.add(stem, base, marker, label);
+      const marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.12), new THREE.MeshBasicMaterial({ color: 0xb7ff56, transparent: true }));
+      group.add(halo, pin, stem, marker);
       objectGroup.add(group);
-      return { group, marker, stem, base, label, text: '' };
+      return { group, pin, halo, stem, marker, color: new THREE.Color(0xb7ff56) };
     };
+
+    const objectLabelPoint = (anchor: Anchor) => () => (viewRef.current === 'top'
+      ? scratchLabel.set(anchor.sx, 0, anchor.sz)
+      : scratchLabel.set(anchor.sx, Math.max(0.05, anchor.sy) + 0.16, anchor.sz));
+    const scratchLabel = new THREE.Vector3();
 
     const syncObjects = (now: number) => {
       anchors.forEach((anchor, key) => {
@@ -309,44 +496,82 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
           visual = createVisual();
           anchorVisuals.set(key, visual);
         }
-        const age = now - anchor.lastSeenAt;
-        const live = age <= OBJECT_FRESH_MS;
-        // Remembered objects dim from 70% to 15% over their memory window.
-        const memoryProgress = live ? 0 : Math.min(1, (age - OBJECT_FRESH_MS) / (OBJECT_MEMORY_MS - OBJECT_FRESH_MS));
-        const opacity = live ? 1 : 0.7 - memoryProgress * 0.55;
-        const color = live ? LIVE_OBJECT_COLOR : REMEMBERED_OBJECT_COLOR;
-        const height = Math.max(0.05, anchor.y);
-        visual.group.position.set(anchor.x, 0, anchor.z);
-        visual.marker.position.y = height;
-        visual.stem.scale.y = height;
-        visual.base.position.y = 0.015;
-        [visual.marker, visual.stem, visual.base].forEach((part) => {
-          const material = part.material as THREE.MeshBasicMaterial | THREE.LineBasicMaterial;
-          material.color.copy(color);
-          material.opacity = part === visual!.base ? opacity * 0.8 : opacity;
-        });
-        // Re-draw the label only when its text changes (0.1 m steps).
+        const measuredAge = now - anchor.lastSeenAt;
+        const measured = measuredAge <= OBJECT_FRESH_MS;
+        // Seen in this direction just now, but its distance is from earlier.
+        const inView = !measured && now - anchor.bearingSeenAt <= OBJECT_FRESH_MS;
         const distance = distanceFromCamera(anchor);
-        const text = `${anchor.label} · ${distance.toFixed(1)} m${live ? '' : ' · seen earlier'}`;
-        if (text !== visual.text) {
-          visual.group.remove(visual.label);
-          disposeObject(visual.label);
-          visual.label = textSprite(text, {
-            color: live ? '#F4FFE4' : '#B7C9BC',
-            background: 'rgba(8, 16, 12, 0.88)',
-            border: live ? '#B7FF56' : '#4E6B58',
-          });
-          visual.group.add(visual.label);
-          visual.text = text;
+        const memoryProgress = measured || inView ? 0 : Math.min(1, (measuredAge - OBJECT_FRESH_MS) / (OBJECT_MEMORY_MS - OBJECT_FRESH_MS));
+        const opacity = measured ? 1 : inView ? 0.85 : 0.7 - memoryProgress * 0.5;
+        visual.color.set(measured ? urgencyColor(distance) : inView ? '#D9F99D' : URGENT.memory);
+        [visual.pin, visual.halo, visual.stem, visual.marker].forEach((part) => {
+          const material = part.material as THREE.MeshBasicMaterial | THREE.LineBasicMaterial;
+          material.color.copy(visual!.color);
+          material.opacity = part === visual!.halo ? opacity * 0.6 : opacity;
+        });
+
+        const label = ensureLabel(`object:${key}`, 'object', objectLabelPoint(anchor));
+        // Nearest measured objects claim label space first; memories last.
+        label.priority = measured ? distance : inView ? 50 + distance : 100 + measuredAge / 1000;
+        const name = anchor.label.charAt(0).toUpperCase() + anchor.label.slice(1);
+        if (measured) {
+          const color = urgencyColor(distance);
+          const accent = key === nearestKey;
+          setLabel(label, [{ text: name, color: '#EEF8F1' }, { text: `${distance.toFixed(1)} m`, color, weight: 800 }],
+            `font-size:${accent ? 12 : 11}px;padding:3px 7px;border-radius:8px;background:rgba(6,14,10,.9);border:1px solid ${accent ? color : 'rgba(183,255,86,.35)'}`);
+        } else if (inView) {
+          setLabel(label, [{ text: name, color: '#E4F2E8' }, { text: `~${distance.toFixed(1)} m`, color: '#D9F99D', weight: 700 }],
+            'font-size:11px;padding:3px 7px;border-radius:8px;background:rgba(6,14,10,.86);border:1px dashed rgba(217,249,157,.5)');
+        } else {
+          setLabel(label, [{ text: name, color: '#A9BDB0' }, { text: `· ${Math.max(1, Math.round(measuredAge / 1000))}s ago`, color: '#6F887A' }],
+            'font-size:10px;padding:2px 6px;border-radius:7px;background:rgba(6,14,10,.72);border:1px solid rgba(125,150,134,.3)');
         }
-        (visual.label.material as THREE.SpriteMaterial).opacity = live ? 1 : Math.max(0.35, opacity);
-        visual.label.position.set(0, height + 0.32, 0);
       });
       anchorVisuals.forEach((visual, key) => {
         if (anchors.has(key)) return;
         objectGroup.remove(visual.group);
         disposeObject(visual.group);
         anchorVisuals.delete(key);
+        removeLabel(`object:${key}`);
+      });
+    };
+
+    const syncRays = (now: number) => {
+      rays.forEach((ray, key) => {
+        let visual = rayVisuals.get(key);
+        if (!visual) {
+          const line = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0.02, -0.4), new THREE.Vector3(0, 0.02, -OBSTACLE_RANGE_M)]),
+            new THREE.LineDashedMaterial({ color: 0x8fd3ff, dashSize: 0.16, gapSize: 0.12, transparent: true, opacity: 0.85 }),
+          );
+          line.computeLineDistances();
+          const tipGeometry = new THREE.ConeGeometry(0.09, 0.22, 3);
+          tipGeometry.rotateX(-Math.PI / 2);
+          const tip = new THREE.Mesh(tipGeometry, new THREE.MeshBasicMaterial({ color: 0x8fd3ff, transparent: true, opacity: 0.9 }));
+          tip.position.set(0, 0.02, -OBSTACLE_RANGE_M);
+          const holder = new THREE.Group();
+          holder.add(line, tip);
+          rayGroup.add(holder);
+          visual = { line, tip };
+          rayVisuals.set(key, visual);
+        }
+        const age = now - ray.seenAt;
+        const opacity = Math.max(0.2, 1 - age / OBJECT_FRESH_MS);
+        (visual.line.material as THREE.LineDashedMaterial).opacity = 0.85 * opacity;
+        (visual.tip.material as THREE.MeshBasicMaterial).opacity = 0.9 * opacity;
+        const label = ensureLabel(`ray:${key}`, 'ray', () => scratchLabel.copy(onFloor(OBSTACLE_RANGE_M * 0.86, ray.shown, 0.02)));
+        label.priority = 70 + Math.abs(ray.angle);
+        const name = ray.label.charAt(0).toUpperCase() + ray.label.slice(1);
+        setLabel(label, [{ text: name, color: '#DDF0FB' }, { text: '· no distance', color: '#8FD3FF' }],
+          'font-size:10px;padding:2px 6px;border-radius:7px;background:rgba(6,14,18,.86);border:1px dashed rgba(143,211,255,.45)');
+      });
+      rayVisuals.forEach((visual, key) => {
+        if (rays.has(key)) return;
+        const holder = visual.line.parent!;
+        rayGroup.remove(holder);
+        disposeObject(holder);
+        rayVisuals.delete(key);
+        removeLabel(`ray:${key}`);
       });
     };
 
@@ -367,21 +592,55 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       return best;
     };
 
+    /** A remembered object of this label in about this direction, if any. */
+    const matchBearing = (key: string | null, label: string, angle: number): Anchor | null => {
+      if (key && anchors.has(key)) return anchors.get(key)!;
+      let best: Anchor | null = null;
+      let bestDelta = (BEARING_MATCH_DEG * Math.PI) / 180;
+      for (const anchor of anchors.values()) {
+        if (anchor.label !== label || anchor.seenTick === tickCounter) continue;
+        const delta = Math.abs(bearingOf(anchor) - angle);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          best = anchor;
+        }
+      }
+      return best;
+    };
+
     const integrateObjects = (now: number) => {
       let depthObjects = 0;
-      detectionsRef.current.slice(0, 8).forEach((item) => {
+      detectionsRef.current.slice(0, 10).forEach((item) => {
         const center = item.spatial?.center_m;
         const validCenter = Array.isArray(center) && center.length >= 3 && center.slice(0, 3).every(Number.isFinite);
         const depth = typeof item.distance_m === 'number' && Number.isFinite(item.distance_m) && item.distance_m > 0 ? item.distance_m : null;
-        // Do not invent a default 2–3m range. Show only observations with an actual depth result.
-        if (!validCenter && depth == null) return;
-        depthObjects += 1;
         const nx = ((item.x ?? 0.5) + (item.width ?? 0) / 2 - 0.5) * 2;
+        const trackKey = item.track_id != null ? `track:${item.track_id}` : null;
+        if (!validCenter && depth == null) {
+          // No distance: never invent one. Draw the direction only, from where
+          // the box sits in the camera's field of view.
+          const angle = Math.atan(Math.max(-1, Math.min(1, nx)) * Math.tan(FOV_RAD / 2));
+          const remembered = matchBearing(trackKey, item.label, angle);
+          if (remembered) {
+            remembered.bearingSeenAt = now;
+            remembered.seenTick = tickCounter;
+            return;
+          }
+          const key = trackKey ?? `${item.label}:${Math.round((angle * 180) / Math.PI / 10)}`;
+          const previous = rays.get(key);
+          if (previous) {
+            previous.angle = angle;
+            previous.seenAt = now;
+          } else {
+            rays.set(key, { label: item.label, angle, shown: angle, seenAt: now });
+          }
+          return;
+        }
+        depthObjects += 1;
         const ny = (0.5 - ((item.y ?? 0.5) + (item.height ?? 0) / 2)) * 2;
         const point = validCenter
           ? new THREE.Vector3(center![0], EYE_HEIGHT_M - center![1], -Math.abs(center![2]))
           : new THREE.Vector3(nx * depth! * 0.55, EYE_HEIGHT_M + ny * depth! * 0.42, -depth!);
-        const trackKey = item.track_id != null ? `track:${item.track_id}` : null;
         const matched = matchAnchor(trackKey, item.label, point);
         const previous = matched ? anchors.get(matched) : undefined;
         if (previous && matched) {
@@ -390,6 +649,7 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
           previous.z = previous.z * 0.35 + point.z * 0.65;
           previous.label = item.label;
           previous.lastSeenAt = now;
+          previous.bearingSeenAt = now;
           previous.seenTick = tickCounter;
           // A tracker that re-issued an ID takes over the remembered anchor.
           if (trackKey && matched !== trackKey) {
@@ -400,20 +660,34 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
               anchorVisuals.delete(matched);
               anchorVisuals.set(trackKey, visual);
             }
+            const label = labels.get(`object:${matched}`);
+            if (label) {
+              labels.delete(`object:${matched}`);
+              labels.set(`object:${trackKey}`, label);
+            }
           }
         } else {
           anchorCounter += 1;
           anchors.set(trackKey ?? `seen:${item.label}:${anchorCounter}`, {
-            label: item.label, x: point.x, y: point.y, z: point.z, firstSeenAt: now, lastSeenAt: now, seenTick: tickCounter,
+            label: item.label, x: point.x, y: point.y, z: point.z, sx: point.x, sy: point.y, sz: point.z,
+            firstSeenAt: now, lastSeenAt: now, bearingSeenAt: now, seenTick: tickCounter,
           });
         }
       });
+      // A distance is only trusted for OBJECT_MEMORY_MS, even if the object stays in view.
       anchors.forEach((anchor, key) => { if (now - anchor.lastSeenAt > OBJECT_MEMORY_MS) anchors.delete(key); });
       if (anchors.size > MAX_OBJECT_ANCHORS) {
         [...anchors.entries()]
           .sort((left, right) => left[1].lastSeenAt - right[1].lastSeenAt)
           .slice(0, anchors.size - MAX_OBJECT_ANCHORS)
           .forEach(([key]) => anchors.delete(key));
+      }
+      rays.forEach((ray, key) => { if (now - ray.seenAt > OBJECT_FRESH_MS) rays.delete(key); });
+      if (rays.size > MAX_RAYS) {
+        [...rays.entries()]
+          .sort((left, right) => left[1].seenAt - right[1].seenAt)
+          .slice(0, rays.size - MAX_RAYS)
+          .forEach(([key]) => rays.delete(key));
       }
       return depthObjects;
     };
@@ -453,10 +727,10 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
         dotPositions[offset] = dot.x;
         dotPositions[offset + 1] = dot.y;
         dotPositions[offset + 2] = dot.z;
-        // Red when close, blue toward the range limit; fades into the background as it ages.
+        // Red when close, blue toward the range limit; fades out as it ages.
         const nearness = 1 - Math.min(1, distanceFromCamera(dot) / OBSTACLE_RANGE_M);
         const freshness = 1 - Math.min(1, (now - dot.seenAt) / OBSTACLE_MEMORY_MS);
-        fadeColor.copy(FAR_COLOR).lerp(NEAR_COLOR, nearness).lerp(BACKGROUND, (1 - freshness) * 0.85);
+        fadeColor.copy(FAR_COLOR).lerp(NEAR_COLOR, nearness).lerp(BLACK, (1 - freshness) * 0.8);
         dotColors[offset] = fadeColor.r;
         dotColors[offset + 1] = fadeColor.g;
         dotColors[offset + 2] = fadeColor.b;
@@ -468,16 +742,30 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       return index;
     };
 
-    /** The closest thing seen just now, by distance along the floor. */
-    const findNearest = (now: number): Nearest => {
-      let best: Nearest = null;
-      const consider = (label: string, point: { x: number; z: number }) => {
-        const distance = Math.hypot(point.x, point.z);
-        if (!best || distance < best.distance) best = { label, distance, direction: directionOf(point) };
-      };
-      anchors.forEach((anchor) => { if (now - anchor.lastSeenAt <= NEAREST_WINDOW_MS) consider(anchor.label, anchor); });
-      dots.forEach((dot) => { if (now - dot.seenAt <= NEAREST_WINDOW_MS) consider('obstacle', dot); });
-      return best;
+    /** Closest measured things right now, by distance along the floor. */
+    const findSightings = (now: number) => {
+      const found: Array<Sighting & { key: string | null }> = [];
+      anchors.forEach((anchor, key) => {
+        if (now - anchor.lastSeenAt > NEAREST_WINDOW_MS) return;
+        const bearing = bearingOf(anchor);
+        found.push({ key, label: anchor.label, distance: Math.hypot(anchor.x, anchor.z), bearing, direction: directionWords(bearing) });
+      });
+      let closestDot: Dot | null = null;
+      let closestDotDistance = Infinity;
+      for (const dot of dots.values()) {
+        if (now - dot.seenAt > NEAREST_WINDOW_MS) continue;
+        const distance = Math.hypot(dot.x, dot.z);
+        if (distance < closestDotDistance) {
+          closestDotDistance = distance;
+          closestDot = dot;
+        }
+      }
+      if (closestDot) {
+        const bearing = bearingOf(closestDot);
+        found.push({ key: null, label: 'obstacle', distance: closestDotDistance, bearing, direction: directionWords(bearing) });
+      }
+      found.sort((left, right) => left.distance - right.distance);
+      return found;
     };
 
     const integrate = () => {
@@ -485,9 +773,17 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       tickCounter += 1;
       const depthObjects = integrateObjects(now);
       const dotCount = integrateObstacles(now);
+      const sightings = findSightings(now);
+      nearestKey = sightings[0]?.key ?? null;
+      dangerLevel = sightings[0] && sightings[0].distance < DANGER_M ? 1 : 0;
       syncObjects(now);
+      syncRays(now);
       let liveObjects = 0;
-      anchors.forEach((anchor) => { if (now - anchor.lastSeenAt <= OBJECT_FRESH_MS) liveObjects += 1; });
+      let directionOnly = rays.size;
+      anchors.forEach((anchor) => {
+        if (now - anchor.lastSeenAt <= OBJECT_FRESH_MS) liveObjects += 1;
+        else if (now - anchor.bearingSeenAt <= OBJECT_FRESH_MS) directionOnly += 1;
+      });
       integrationCount += 1;
       const elapsed = performanceNow() - integrationStarted;
       if (elapsed >= 1000) {
@@ -495,47 +791,66 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
         integrationCount = 0;
         integrationStarted = performanceNow();
       }
-      const nearest = findNearest(now);
+      const inView = [...rays.values()].sort((left, right) => left.angle - right.angle)
+        .map((ray) => `${ray.label} ${directionWords(ray.angle)}`);
       setStats((previous) => ({
         ...previous,
         liveObjects,
-        rememberedObjects: anchors.size - liveObjects,
+        rememberedObjects: anchors.size - liveObjects - (directionOnly - rays.size),
+        directionOnly,
         depthObjects,
         dots: dotCount,
         mapHz: measuredMapHz,
-        nearest,
+        nearest: sightings[0] ?? null,
+        others: sightings.slice(1, 3),
+        inView: inView.slice(0, 3),
       }));
     };
 
-    // --- Camera: a top-down radar (forward is up) or a free orbit.
+    // ------------------------------------------------------------------ camera
     const pivot = new THREE.Vector3(0, 0.4, -2.0);
-    let orbitYaw = 0;
-    let orbitPitch = 0.55;
-    let orbitDistance = 6.2;
+    let orbitYaw = 0.5;
+    let orbitPitch = 0.62;
+    let orbitDistance = 6.4;
     const desiredPosition = new THREE.Vector3();
-    const desiredTarget = new THREE.Vector3();
-    const currentTarget = pivot.clone();
-    const desiredUp = new THREE.Vector3();
-    const updateDesiredCamera = () => {
-      if (viewRef.current === 'top') {
-        desiredPosition.set(0, 8.0, -1.8);
-        desiredTarget.set(0, 0, -1.8);
-        desiredUp.set(0, 0, -1);
-      } else {
-        desiredPosition.set(
-          pivot.x + Math.sin(orbitYaw) * Math.cos(orbitPitch) * orbitDistance,
-          pivot.y + Math.sin(orbitPitch) * orbitDistance,
-          pivot.z + Math.cos(orbitYaw) * Math.cos(orbitPitch) * orbitDistance,
-        );
-        desiredTarget.copy(pivot);
-        desiredUp.set(0, 1, 0);
-      }
+    const orbitTarget = pivot.clone();
+
+    const updateTopFrustum = () => {
+      const aspect = viewWidth / Math.max(1, viewHeight);
+      // Fit the whole range ring side to side and from just behind the user to past the far ring.
+      const halfHeight = Math.max((OBSTACLE_RANGE_M + 1.3) / 2, (OBSTACLE_RANGE_M + 0.5) / aspect) * topZoom;
+      topCamera.left = -halfHeight * aspect;
+      topCamera.right = halfHeight * aspect;
+      topCamera.top = halfHeight;
+      topCamera.bottom = -halfHeight;
+      topCamera.position.set(0, 20, TOP_CENTER_Z);
+      topCamera.up.set(0, 0, -1);
+      topCamera.lookAt(0, 0, TOP_CENTER_Z);
+      topCamera.updateProjectionMatrix();
     };
-    updateDesiredCamera();
-    camera.position.copy(desiredPosition);
-    camera.up.copy(desiredUp);
-    currentTarget.copy(desiredTarget);
-    camera.lookAt(currentTarget);
+    const updateOrbitTarget = () => {
+      desiredPosition.set(
+        pivot.x + Math.sin(orbitYaw) * Math.cos(orbitPitch) * orbitDistance,
+        pivot.y + Math.sin(orbitPitch) * orbitDistance,
+        pivot.z + Math.cos(orbitYaw) * Math.cos(orbitPitch) * orbitDistance,
+      );
+    };
+    updateOrbitTarget();
+    orbitCamera.position.copy(desiredPosition);
+    orbitCamera.lookAt(orbitTarget);
+
+    let appliedView: ViewMode | null = null;
+    const applyView = (mode: ViewMode) => {
+      if (appliedView === mode) return;
+      appliedView = mode;
+      const top = mode === 'top';
+      // Orthographic points are sized in pixels; perspective ones in meters.
+      dotMaterial.sizeAttenuation = !top;
+      dotMaterial.size = top ? 9 * pixelRatio : 0.13;
+      dotMaterial.needsUpdate = true;
+      eye.visible = !top;
+      anchorVisuals.forEach(({ stem, marker }) => { stem.visible = !top; marker.visible = !top; });
+    };
 
     let dragging: { x: number; y: number } | null = null;
     const onPointerDown = (event: PointerEvent) => {
@@ -551,9 +866,14 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
     };
     const onPointerUp = () => { dragging = null; };
     const onWheel = (event: WheelEvent) => {
-      if (viewRef.current !== 'orbit') return;
       event.preventDefault();
-      orbitDistance = Math.min(12, Math.max(3, orbitDistance * (event.deltaY > 0 ? 1.08 : 0.93)));
+      const factor = event.deltaY > 0 ? 1.08 : 0.93;
+      if (viewRef.current === 'top') {
+        topZoom = Math.min(1.5, Math.max(0.45, topZoom * factor));
+        updateTopFrustum();
+      } else {
+        orbitDistance = Math.min(12, Math.max(2.5, orbitDistance * factor));
+      }
     };
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
     renderer.domElement.addEventListener('pointermove', onPointerMove);
@@ -561,17 +881,22 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
     renderer.domElement.addEventListener('pointercancel', onPointerUp);
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
     resetViewRef.current = () => {
-      orbitYaw = 0;
-      orbitPitch = 0.55;
-      orbitDistance = 6.2;
+      orbitYaw = 0.5;
+      orbitPitch = 0.62;
+      orbitDistance = 6.4;
+      topZoom = 1;
+      updateTopFrustum();
     };
 
     const resize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
       if (width < 10 || height < 10) return;
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
+      viewWidth = width;
+      viewHeight = height;
+      orbitCamera.aspect = width / height;
+      orbitCamera.updateProjectionMatrix();
+      updateTopFrustum();
       renderer.setSize(width, height, false);
       renderer.domElement.style.width = `${width}px`;
       renderer.domElement.style.height = `${height}px`;
@@ -581,21 +906,49 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
     observer.observe(container);
     const timer = window.setInterval(integrate, MAP_INTERVAL_MS);
     let frame = 0;
+    const started = performanceNow();
     const tick = () => {
       frame = requestAnimationFrame(tick);
       // Hidden (mini) panel: keep the map's memory, skip drawing.
       if (container.clientHeight < 10) return;
-      updateDesiredCamera();
-      camera.position.lerp(desiredPosition, 0.18);
-      camera.up.lerp(desiredUp, 0.18).normalize();
-      currentTarget.lerp(desiredTarget, 0.18);
-      camera.lookAt(currentTarget);
-      // Keep object labels readable from straight above.
-      const labelScale = viewRef.current === 'top' ? 1.7 : 1;
-      anchorVisuals.forEach(({ label }) => {
-        const base = label.userData.baseScale as [number, number] | undefined;
-        if (base) label.scale.set(base[0] * labelScale, base[1] * labelScale, 1);
+      const mode = viewRef.current;
+      applyView(mode);
+      const seconds = (performanceNow() - started) / 1000;
+
+      anchors.forEach((anchor, key) => {
+        anchor.sx += (anchor.x - anchor.sx) * 0.2;
+        anchor.sy += (anchor.y - anchor.sy) * 0.2;
+        anchor.sz += (anchor.z - anchor.sz) * 0.2;
+        const visual = anchorVisuals.get(key);
+        if (!visual) return;
+        visual.group.position.set(anchor.sx, 0, anchor.sz);
+        const height = Math.max(0.05, anchor.sy);
+        visual.marker.position.y = height;
+        visual.stem.scale.y = height;
+        visual.stem.visible = visual.marker.visible = mode !== 'top';
+        // The nearest measured object pulses so the eye finds it first.
+        const pulse = key === nearestKey && !reducedMotion ? 1 + 0.35 * (0.5 + 0.5 * Math.sin(seconds * 5)) : 1;
+        visual.halo.scale.set(pulse, 1, pulse);
       });
+      rays.forEach((ray, key) => {
+        ray.shown += (ray.angle - ray.shown) * 0.2;
+        const visual = rayVisuals.get(key);
+        if (visual) visual.line.parent!.rotation.y = -ray.shown;
+      });
+      if (!reducedMotion) sweep.rotation.y = -Math.sin(seconds * 1.6) * (FOV_RAD / 2 - 0.06);
+      dangerMaterial.opacity += ((dangerLevel ? 0.55 + 0.35 * Math.sin(seconds * 6) : 0) - dangerMaterial.opacity) * 0.15;
+      userHalo.scale.setScalar(reducedMotion ? 1 : 1 + 0.06 * Math.sin(seconds * 2));
+
+      let camera: THREE.Camera = topCamera;
+      if (mode === 'orbit') {
+        updateOrbitTarget();
+        orbitCamera.position.lerp(desiredPosition, 0.2);
+        orbitCamera.lookAt(orbitTarget);
+        camera = orbitCamera;
+      }
+      renderer.render(scene, camera);
+      placeLabels(camera);
+
       renderedFrames += 1;
       const now = performanceNow();
       if (now - renderStarted >= 1000) {
@@ -604,23 +957,24 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
         renderStarted = now;
         setStats((previous) => ({ ...previous, renderFps }));
       }
-      renderer.render(scene, camera);
     };
     tick();
     integrate();
 
     resetRef.current = () => {
       anchors.clear();
-      anchorVisuals.forEach((visual) => {
-        objectGroup.remove(visual.group);
-        disposeObject(visual.group);
-      });
-      anchorVisuals.clear();
+      rays.clear();
       dots.clear();
+      syncObjects(Date.now());
+      syncRays(Date.now());
+      nearestKey = null;
+      dangerLevel = 0;
       // Do not re-ingest the frame that was on screen when Clear was pressed.
       lastObstacleSequence = obstaclesRef.current?.sequence ?? lastObstacleSequence;
       dotGeometry.setDrawRange(0, 0);
-      setStats((previous) => ({ ...previous, liveObjects: 0, rememberedObjects: 0, depthObjects: 0, dots: 0, nearest: null }));
+      setStats((previous) => ({
+        ...previous, liveObjects: 0, rememberedObjects: 0, directionOnly: 0, depthObjects: 0, dots: 0, nearest: null, others: [], inView: [],
+      }));
     };
 
     return () => {
@@ -633,29 +987,42 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       renderer.domElement.removeEventListener('pointercancel', onPointerUp);
       renderer.domElement.removeEventListener('wheel', onWheel);
       disposeObject(objectGroup);
+      disposeObject(rayGroup);
       disposeObject(floor);
       dotGeometry.dispose();
+      dotMaterial.map?.dispose();
       dotMaterial.dispose();
       renderer.dispose();
+      labels.clear();
       container.replaceChildren();
     };
   }, []);
 
-  const panelWidth = size === 'large' ? Math.min(640, window_.width - 24) : Math.min(320, window_.width - 24);
+  const panelWidth = size === 'large' ? Math.min(640, window_.width - 24) : Math.min(360, window_.width - 24);
   // Large fills the space between the top bar and the bottom card instead of
   // a fixed height, so it never slides under the camera screen's controls.
   const canvasStyle = size === 'mini' ? styles.canvasHidden : size === 'large' ? styles.canvasFill : styles.canvasSmall;
-  const nearest = stats.nearest;
-  const nearestText = nearest
-    ? `${nearest.label === 'obstacle' ? 'Obstacle' : nearest.label} ${nearest.distance.toFixed(1)} m ${nearest.direction}`
-    : `Nothing seen within ${OBSTACLE_RANGE_M} m`;
+  const { nearest, others, inView } = stats;
+  const nearestColor = nearest ? urgencyColor(nearest.distance) : '#7D9686';
+  const nearestName = nearest ? (nearest.label === 'obstacle' ? 'Obstacle' : nearest.label.charAt(0).toUpperCase() + nearest.label.slice(1)) : '';
+  const secondary = others.length
+    ? `then ${others.map((item) => `${item.label} ${item.distance.toFixed(1)} m ${item.direction}`).join(' · ')}`
+    : inView.length
+      ? `in view, no distance: ${inView.join(' · ')}`
+      : '';
+  const spoken = nearest
+    ? `Nearest: ${nearestName}, ${nearest.distance.toFixed(1)} meters, ${nearest.direction}. ${secondary}`
+    : `Nothing measured within ${OBSTACLE_RANGE_M} meters. ${secondary}`;
 
   return (
     <View style={[styles.panel, { width: panelWidth }, size === 'large' && styles.panelFill]}>
       <View style={styles.header}>
         <View style={styles.titleBlock}>
-          <Text style={styles.kicker}>LIVE MAP</Text>
-          <Text style={styles.subtle}>camera-relative</Text>
+          <View style={styles.titleRow}>
+            <View style={styles.liveDot} />
+            <Text style={styles.kicker}>LIVE MAP</Text>
+          </View>
+          <Text style={styles.subtle} numberOfLines={1}>moves with the camera</Text>
         </View>
         <View style={styles.segment} accessibilityRole="radiogroup" accessibilityLabel="Map view">
           {(['top', 'orbit'] as const).map((mode) => (
@@ -665,9 +1032,9 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
               style={[styles.segmentButton, view === mode && styles.segmentButtonActive]}
               accessibilityRole="radio"
               accessibilityState={{ selected: view === mode }}
-              accessibilityLabel={mode === 'top' ? 'Top-down view' : '3D view, drag to rotate'}
+              accessibilityLabel={mode === 'top' ? 'Top-down radar view' : '3D view, drag to rotate'}
             >
-              <Text style={[styles.segmentText, view === mode && styles.segmentTextActive]}>{mode === 'top' ? 'Top' : '3D'}</Text>
+              <Text style={[styles.segmentText, view === mode && styles.segmentTextActive]}>{mode === 'top' ? 'Radar' : '3D'}</Text>
             </Pressable>
           ))}
         </View>
@@ -689,12 +1056,29 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
         </Pressable>
       </View>
 
-      <View style={styles.nearestRow} accessibilityLiveRegion="polite" accessibilityLabel={`Nearest: ${nearestText}`}>
-        <View style={[styles.nearestDot, { backgroundColor: nearest ? urgencyColor(nearest.distance) : '#4E6B58' }]} />
-        <Text style={styles.nearestLabel}>NEAREST</Text>
-        <Text style={[styles.nearestText, { color: nearest ? urgencyColor(nearest.distance) : '#B7C9BC' }]} numberOfLines={1}>
-          {nearestText}
-        </Text>
+      <View
+        style={[styles.nearestCard, { borderColor: nearest ? `${nearestColor}66` : 'rgba(125,150,134,.25)' }]}
+        accessibilityLiveRegion="polite"
+        accessibilityLabel={spoken}
+      >
+        <View style={[styles.arrowBadge, { backgroundColor: nearest ? `${nearestColor}22` : '#0F2119' }]}>
+          <Text style={[styles.arrow, { color: nearestColor, transform: [{ rotate: `${nearest ? (nearest.bearing * 180) / Math.PI : 0}deg` }] }]}>
+            {nearest ? '↑' : '·'}
+          </Text>
+        </View>
+        <View style={styles.nearestBody}>
+          <Text style={styles.nearestLabel}>NEAREST</Text>
+          {nearest ? (
+            <Text style={styles.nearestText} numberOfLines={1}>
+              <Text style={{ color: '#F2FAF4' }}>{nearestName} </Text>
+              <Text style={{ color: nearestColor }}>{nearest.distance.toFixed(1)} m</Text>
+              <Text style={styles.nearestDirection}> {nearest.direction}</Text>
+            </Text>
+          ) : (
+            <Text style={[styles.nearestText, { color: '#B7C9BC' }]} numberOfLines={1}>Nothing measured within {OBSTACLE_RANGE_M} m</Text>
+          )}
+          {secondary ? <Text style={styles.secondary} numberOfLines={1}>{secondary}</Text> : null}
+        </View>
       </View>
 
       <View
@@ -708,23 +1092,25 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       {size !== 'mini' && (
         <>
           <View style={styles.legend}>
-            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: '#FF6B4A' }]} /><Text style={styles.legendText}>near</Text></View>
-            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: '#56C8FF' }]} /><Text style={styles.legendText}>far surface</Text></View>
-            <View style={styles.legendItem}><View style={[styles.swatch, styles.swatchDiamond, { backgroundColor: '#B7FF56' }]} /><Text style={styles.legendText}>object</Text></View>
-            <View style={styles.legendItem}><View style={[styles.swatch, styles.swatchDiamond, { backgroundColor: '#7D9686' }]} /><Text style={styles.legendText}>seen earlier</Text></View>
-            {view === 'orbit' && (
-              <Pressable onPress={() => resetViewRef.current()} accessibilityRole="button" accessibilityLabel="Reset the 3D view">
-                <Text style={styles.linkText}>reset view</Text>
-              </Pressable>
-            )}
+            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: URGENT.near }]} /><Text style={styles.legendText}>{`< ${DANGER_M} m`}</Text></View>
+            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: URGENT.mid }]} /><Text style={styles.legendText}>{`< ${CAUTION_M} m`}</Text></View>
+            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: URGENT.far }]} /><Text style={styles.legendText}>farther</Text></View>
+            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: URGENT.memory }]} /><Text style={styles.legendText}>seen earlier</Text></View>
+            <View style={styles.legendItem}><View style={styles.dash} /><Text style={styles.legendText}>direction only</Text></View>
+            <View style={styles.legendItem}><View style={[styles.swatch, styles.swatchGlow]} /><Text style={styles.legendText}>surface</Text></View>
           </View>
 
           <View style={styles.footer}>
-            <Text style={styles.counts}>
-              {stats.liveObjects} live · {stats.rememberedObjects} earlier · {stats.dots} dots
+            <Text style={styles.counts} numberOfLines={1}>
+              {stats.liveObjects} measured · {stats.directionOnly} direction · {stats.rememberedObjects} earlier · {stats.dots} dots
             </Text>
+            {view === 'orbit' || size === 'large' ? (
+              <Pressable onPress={() => resetViewRef.current()} accessibilityRole="button" accessibilityLabel="Reset the map view">
+                <Text style={styles.linkText}>reset</Text>
+              </Pressable>
+            ) : null}
             <Pressable onPress={() => setShowDetails((value) => !value)} accessibilityRole="button" accessibilityLabel="Show map details">
-              <Text style={styles.linkText}>{showDetails ? 'hide details' : 'details'}</Text>
+              <Text style={styles.linkText}>{showDetails ? 'less' : 'details'}</Text>
             </Pressable>
             <Pressable onPress={() => resetRef.current()} style={styles.clear} accessibilityRole="button" accessibilityLabel="Clear the map">
               <Text style={styles.clearText}>Clear</Text>
@@ -735,8 +1121,8 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
             <Text style={styles.note}>
               Scan {performance.capture_fps.toFixed(1)} fps · local {performance.local_detection_ms ?? '—'} ms · API {performance.tracking_latency_ms ?? '—'} ms / {performance.tracking_age_ms ?? '—'} ms ({performance.tracking_status})
               {'\n'}Map {stats.mapHz.toFixed(1)} Hz · render {stats.renderFps} fps · objects with depth {stats.depthObjects}
-              {'\n'}Objects kept {OBJECT_MEMORY_MS / 1000}s · surfaces within {OBSTACLE_RANGE_M} m kept {OBSTACLE_MEMORY_MS / 1000}s (max {MAX_OBSTACLE_DOTS}).
-              {'\n'}Moves with the camera; not a saved room map. Objects without depth are not shown.
+              {'\n'}Distances come from depth and are kept {OBJECT_MEMORY_MS / 1000}s; surfaces within {OBSTACLE_RANGE_M} m are kept {OBSTACLE_MEMORY_MS / 1000}s (max {MAX_OBSTACLE_DOTS}).
+              {'\n'}Objects with no depth show as a dashed direction, never a guessed distance. Scroll to zoom; drag to rotate in 3D.
             </Text>
           )}
         </>
@@ -747,38 +1133,46 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
 
 const styles = StyleSheet.create({
   panel: {
-    position: 'absolute', right: 0, top: 0, backgroundColor: 'rgba(5, 12, 9, 0.92)',
-    borderColor: 'rgba(183, 255, 86, 0.4)', borderWidth: 1, borderRadius: 16, padding: 10, gap: 8, zIndex: 6,
+    position: 'absolute', right: 0, top: 0, backgroundColor: 'rgba(4, 11, 8, 0.93)',
+    borderColor: 'rgba(183, 255, 86, 0.32)', borderWidth: 1, borderRadius: 18, padding: 10, gap: 8, zIndex: 6,
+    shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 18, shadowOffset: { width: 0, height: 8 },
   },
   header: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   titleBlock: { flex: 1 },
-  kicker: { color: '#B7FF56', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
-  subtle: { color: '#7D9686', fontSize: 10, fontWeight: '600' },
-  segment: { flexDirection: 'row', backgroundColor: '#0F2119', borderRadius: 9, padding: 2 },
-  segmentButton: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 7 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  liveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#B7FF56', shadowColor: '#B7FF56', shadowOpacity: 0.9, shadowRadius: 6 },
+  kicker: { color: '#B7FF56', fontSize: 12, fontWeight: '900', letterSpacing: 1.2 },
+  subtle: { color: '#6F887A', fontSize: 10, fontWeight: '600', marginTop: 1 },
+  segment: { flexDirection: 'row', backgroundColor: '#0E1F17', borderRadius: 10, padding: 2, borderWidth: 1, borderColor: '#17301F' },
+  segmentButton: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
   segmentButtonActive: { backgroundColor: '#B7FF56' },
   segmentText: { color: '#B7C9BC', fontSize: 11, fontWeight: '800' },
   segmentTextActive: { color: '#07110C' },
-  iconButton: { width: 28, height: 28, borderRadius: 8, backgroundColor: '#0F2119', alignItems: 'center', justifyContent: 'center' },
+  iconButton: { width: 28, height: 28, borderRadius: 9, backgroundColor: '#0E1F17', borderWidth: 1, borderColor: '#17301F', alignItems: 'center', justifyContent: 'center' },
   iconButtonText: { color: '#D5E6D8', fontSize: 14, fontWeight: '800' },
-  nearestRow: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0B1A13', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7 },
-  nearestDot: { width: 8, height: 8, borderRadius: 4 },
-  nearestLabel: { color: '#7D9686', fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
-  nearestText: { fontSize: 14, fontWeight: '800', flex: 1 },
-  canvas: { borderRadius: 12, overflow: 'hidden', backgroundColor: '#07110C' },
-  canvasSmall: { height: 200 },
-  canvasFill: { flex: 1, minHeight: 160 },
-  canvasHidden: { height: 0, opacity: 0 },
+  nearestCard: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#0A1812', borderRadius: 12, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8 },
+  arrowBadge: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  arrow: { fontSize: 22, fontWeight: '900', lineHeight: 26 },
+  nearestBody: { flex: 1, gap: 1 },
+  nearestLabel: { color: '#6F887A', fontSize: 9, fontWeight: '900', letterSpacing: 1.2 },
+  nearestText: { fontSize: 16, fontWeight: '900' },
+  nearestDirection: { color: '#B7C9BC', fontWeight: '700', fontSize: 13 },
+  secondary: { color: '#8DA597', fontSize: 11, fontWeight: '600' },
+  canvas: { borderRadius: 14, overflow: 'hidden', backgroundColor: '#060F0B', position: 'relative', borderWidth: 1, borderColor: '#12261B' },
+  canvasSmall: { height: 190 },
+  canvasFill: { flex: 1, minHeight: 180 },
+  canvasHidden: { height: 0, opacity: 0, borderWidth: 0 },
   panelFill: { bottom: 0 },
   legend: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: 10, rowGap: 4 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   swatch: { width: 8, height: 8, borderRadius: 4 },
-  swatchDiamond: { borderRadius: 1, transform: [{ rotate: '45deg' }] },
-  legendText: { color: '#B7C9BC', fontSize: 10, fontWeight: '600' },
+  swatchGlow: { backgroundColor: '#56C8FF', shadowColor: '#56C8FF', shadowOpacity: 0.9, shadowRadius: 4 },
+  dash: { width: 12, height: 0, borderTopWidth: 2, borderStyle: 'dashed', borderColor: '#8FD3FF' },
+  legendText: { color: '#A9BDB0', fontSize: 10, fontWeight: '600' },
   footer: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  counts: { color: '#D5E6D8', fontSize: 11, fontWeight: '700', flex: 1 },
+  counts: { color: '#C9DACE', fontSize: 10, fontWeight: '700', flex: 1 },
   linkText: { color: '#8FD3FF', fontSize: 10, fontWeight: '700' },
   clear: { backgroundColor: '#163024', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
   clearText: { color: '#E7F6EA', fontSize: 11, fontWeight: '800' },
-  note: { color: '#B7C9BC', fontSize: 10, lineHeight: 14 },
+  note: { color: '#A9BDB0', fontSize: 10, lineHeight: 14 },
 });
