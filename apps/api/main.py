@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -52,6 +53,7 @@ from schemas import (
     WhatChangedResponse,
 )
 from unisign_backend import UniSignBackend, UniSignBackendError
+from sign_english import english_text, yolo_sign_phrase
 from yolo_sign import YoloSignDetector
 from yolo_tracker import YoloTracker, resolve_device
 
@@ -88,6 +90,7 @@ MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "4"))
 MIN_REQUEST_INTERVAL = float(os.getenv("MIN_REQUEST_INTERVAL", "1.5"))
 TRACK_MIN_REQUEST_INTERVAL = float(os.getenv("TRACK_MIN_REQUEST_INTERVAL", "0.7"))
 SIGN_MIN_CONFIDENCE = float(os.getenv("SIGN_MIN_CONFIDENCE", "0.45"))
+SIGN_FRAME_WIDTH = int(os.getenv("SIGN_FRAME_WIDTH", "320"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_ENABLED = os.getenv("POINT_CLOUD_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_INTERVAL_S = float(os.getenv("POINT_CLOUD_INTERVAL_S", "0.5"))
@@ -195,6 +198,12 @@ Language (ASL) communication aid. You receive three chronological frames sampled
 overlapping video window and the transcript accepted from earlier windows. Consider both hands,
 motion between frames, body pose, facial grammar, and fingerspelling. Translate only visually
 supported ASL; do not treat arbitrary gestures as signs and never invent missing words.
+
+Write transcript and segment only in natural, grammatical written English: reorder ASL gloss into
+English word order, add the small function words English needs (is, the, a, to), use sentence case
+with ending punctuation, and turn WH-questions into English questions (BATHROOM WHERE -> "Where is
+the bathroom?"). Never output ASL gloss in capitals, another language, or a description of the
+gestures. Fingerspelled names stay as the spelled English word.
 
 Return transcript as the complete previous transcript plus only a genuinely new continuation.
 Return segment as only that new continuation, or an empty string when the window is unclear,
@@ -475,14 +484,15 @@ async def _call_groq_sign(
         from PIL import Image
 
         frames = [Image.open(BytesIO(image)).convert("RGB") for image, _ in images]
-        thumb_width = 112
+        # Handshapes are unreadable below roughly 250 px across the signer.
+        thumb_width = min(SIGN_FRAME_WIDTH, max(frame.width for frame in frames))
         thumbs = [frame.resize((thumb_width, max(32, round(frame.height * thumb_width / frame.width)))) for frame in frames]
         height = max(frame.height for frame in thumbs)
         strip = Image.new("RGB", (thumb_width * len(thumbs), height), "black")
         for index, frame in enumerate(thumbs):
             strip.paste(frame, (index * thumb_width, 0))
         buffer = BytesIO()
-        strip.save(buffer, format="JPEG", quality=55, optimize=True)
+        strip.save(buffer, format="JPEG", quality=72, optimize=True)
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
     except Exception as error:
@@ -522,6 +532,15 @@ async def _call_groq_sign(
                 response.raise_for_status()
                 raw = response.json()["choices"][0]["message"]["content"]
                 result = SignTranslation.model_validate(json.loads(raw))
+                combined = f"{result.transcript} {result.segment}".strip()
+                if combined and not english_text(combined):
+                    return SignTranslation(
+                        transcript=previous_transcript,
+                        segment="",
+                        confidence=0,
+                        is_final=False,
+                        should_speak=False,
+                    )
                 # The model may only append to an accepted transcript. Enforce that contract
                 # server-side so a noisy window cannot rewrite a user's conversation.
                 if previous_transcript and not result.transcript.startswith(previous_transcript):
@@ -537,8 +556,9 @@ async def _call_groq_sign(
                 # response instead of silently throwing it away in the UI.
                 if not result.transcript.strip() and result.segment.strip():
                     result.transcript = f"{previous_transcript} {result.segment}".strip()
-                continuation = result.transcript[len(previous_transcript):].strip()
+                continuation = english_text(result.transcript[len(previous_transcript):])
                 result.segment = continuation
+                result.transcript = f"{previous_transcript} {continuation}".strip()
                 if result.confidence < SIGN_MIN_CONFIDENCE or not result.segment.strip():
                     return SignTranslation(
                         transcript=previous_transcript,
@@ -772,9 +792,10 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         # Fallback to local YOLO11 Sign Language Detector on the last frame
         last_frame_bytes = decoded[-1][0] if decoded else b""
         detected = _yolo_sign_detector.detect(last_frame_bytes) if last_frame_bytes else []
-        if detected:
-            top = detected[0]
-            sign_word = top.label
+        words = [(sign, yolo_sign_phrase(sign.label)) for sign in detected]
+        words = [(sign, phrase) for sign, phrase in words if phrase]
+        if words:
+            top, sign_word = words[0]
             new_transcript = (sequence.previous_transcript + " " + sign_word).strip() if sequence.previous_transcript else sign_word
             result = SignTranslation(
                 transcript=new_transcript,

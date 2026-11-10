@@ -386,6 +386,35 @@ function smoothLandmarks(current: Landmark[][], previous: Landmark[][], alpha = 
   }));
 }
 
+/** Pixel rectangle around the hands, face, and upper body, padded and clamped to the video. */
+function signerCrop(
+  hands: Landmark[][],
+  face: Landmark[] | undefined,
+  pose: Landmark[] | undefined,
+  videoWidth: number,
+  videoHeight: number,
+) {
+  const points = [...hands.flat(), ...(face ?? []), ...(pose ?? []).slice(0, 17)];
+  if (points.length === 0) return { x: 0, y: 0, w: videoWidth, h: videoHeight };
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (const point of points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+  // Generous padding keeps a hand that moves between samples inside every crop.
+  const size = Math.max(maxX - minX, (maxY - minY) * videoHeight / videoWidth, 0.45) * 1.35;
+  const w = Math.min(1, size);
+  const h = Math.min(1, size * videoWidth / videoHeight);
+  const x = Math.min(Math.max((minX + maxX) / 2 - w / 2, 0), 1 - w);
+  const y = Math.min(Math.max((minY + maxY) / 2 - h / 2, 0), 1 - h);
+  return { x: x * videoWidth, y: y * videoHeight, w: w * videoWidth, h: h * videoHeight };
+}
+
 export default function HandTracker({
   onContextChange,
   onContextCaptured,
@@ -478,7 +507,7 @@ export default function HandTracker({
         wordState: latestWordStateRef.current,
       };
       const wordState = latestWordStateRef.current;
-      const key = `${frameCount}:${handCount}:${error ?? ''}:${faceTracked}:${poseTracked}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}:${wordState?.currentWord ?? ''}:${wordState?.phrase ?? ''}:${Math.round((wordState?.currentConfidence ?? 0) * 20)}`;
+      const key = `${frameCount}:${handCount}:${error ?? ''}:${faceTracked}:${poseTracked}:${aslState?.currentLetter ?? ''}:${aslState?.spelledText ?? ''}:${Math.round((aslState?.holdProgress ?? 0) * 10)}:${wordState?.currentWord ?? ''}:${wordState?.phrase ?? ''}:${wordState?.commitCount ?? 0}:${wordState?.phraseComplete ?? false}:${Math.round((wordState?.currentConfidence ?? 0) * 20)}`;
       if (key !== lastContextState) {
         lastContextState = key;
         onContextChangeRef.current?.(next);
@@ -663,14 +692,14 @@ export default function HandTracker({
                 totalTrackedFramesRef.current += 1;
                 if (totalTrackedFramesRef.current % snapshotIntervalFrames === 0) {
                   const snapshot = document.createElement('canvas');
-                  // Three low-resolution temporal samples are enough for the
-                  // cloud decoder to compare movement, and keep each live
-                  // request small enough to complete during a conversation.
-                  const width = 256;
+                  // Crop to the signer so the small frames the cloud decoder
+                  // receives spend their pixels on hands and face, not the room.
+                  const crop = signerCrop(smoothed, face?.faceLandmarks?.[0], pose?.landmarks?.[0], video.videoWidth, video.videoHeight);
+                  const width = 320;
                   snapshot.width = width;
-                  snapshot.height = Math.round(width * video.videoHeight / video.videoWidth);
-                  snapshot.getContext('2d')?.drawImage(video, 0, 0, snapshot.width, snapshot.height);
-                  frameImagesRef.current.push(snapshot.toDataURL('image/jpeg', 0.5));
+                  snapshot.height = Math.round(width * crop.h / crop.w);
+                  snapshot.getContext('2d')?.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, snapshot.width, snapshot.height);
+                  frameImagesRef.current.push(snapshot.toDataURL('image/jpeg', 0.7));
                   if (frameImagesRef.current.length > snapshotCount) frameImagesRef.current.shift();
                 }
                 const now = performance.now();

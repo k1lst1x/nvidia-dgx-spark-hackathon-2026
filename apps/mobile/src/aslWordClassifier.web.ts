@@ -16,6 +16,12 @@ export type ASLWordState = {
   currentWord: string;
   currentConfidence: number;
   phrase: string;
+  /** Confirmed signs of the current phrase, in signing order. */
+  words: string[];
+  /** Increments each time a sign is confirmed, including a deliberate repeat. */
+  commitCount: number;
+  /** True once the hands have been down long enough to end the phrase. */
+  phraseComplete: boolean;
   bufferProgress: number;
   top3: ASLWordPrediction[];
 };
@@ -471,11 +477,34 @@ export class ASLWordEngine {
   private lastCommitTime = 0;
   private handsAbsentFrames = 0;
   private phrase: string[] = [];
+  private commitCount = 0;
+  private phraseComplete = false;
   private kinematic = new KinematicGestureRecognizer();
   private readonly confidenceThreshold = 0.30;
   private readonly commitCooldownMs = 1200;
+  // A held sign keeps matching every frame; only a repeat after this long counts as signed twice.
+  private readonly repeatCooldownMs = 2500;
+  private readonly phraseEndFrames = 30;
+  private readonly maxPhraseWords = 12;
 
   constructor(private readonly onState: (state: ASLWordState) => void) {}
+
+  private commit(label: string, now: number): boolean {
+    if (label === this.lastCommitted && now - this.lastCommitTime <= this.repeatCooldownMs) {
+      this.lastCommitTime = now;
+      return false;
+    }
+    if (this.phraseComplete) {
+      this.phrase = [];
+      this.phraseComplete = false;
+    }
+    this.lastCommitted = label;
+    this.lastCommitTime = now;
+    this.phrase.push(label);
+    if (this.phrase.length > this.maxPhraseWords) this.phrase.shift();
+    this.commitCount += 1;
+    return true;
+  }
 
   private lastHandPos?: LandmarkPoint;
 
@@ -493,10 +522,16 @@ export class ASLWordEngine {
         this.stablePredictions = 0;
         this.kinematic.clear();
         this.lastHandPos = undefined;
+        this.lastCommitted = '';
+      }
+      if (this.handsAbsentFrames >= this.phraseEndFrames && this.phrase.length > 0) {
+        this.phraseComplete = true;
       }
       this.emit('', 0, []);
       return;
     }
+
+    this.handsAbsentFrames = 0;
 
     // 1. Check kinematic motion for essential conversational gestures first
     const primaryHand = rawHands?.[0];
@@ -506,14 +541,7 @@ export class ASLWordEngine {
 
     if (kinematicMatch && kinematicMatch.confidence >= 0.80) {
       this.candidate = kinematicMatch.label;
-      if (
-        kinematicMatch.label !== this.lastCommitted ||
-        now - this.lastCommitTime > this.commitCooldownMs
-      ) {
-        this.lastCommitted = kinematicMatch.label;
-        this.lastCommitTime = now;
-        this.frames = [];
-      }
+      if (this.commit(kinematicMatch.label, now)) this.frames = [];
       this.emit(kinematicMatch.label, kinematicMatch.confidence, [kinematicMatch]);
       return;
     }
@@ -578,9 +606,8 @@ export class ASLWordEngine {
           this.stablePredictions >= requiredStable &&
           (best.label !== this.lastCommitted || now - this.lastCommitTime > this.commitCooldownMs)
         ) {
-          // Do not compose a transcript from isolated classifier guesses.
-          this.lastCommitted = best.label;
-          this.lastCommitTime = now;
+          // Only signs that stayed the top guess across consecutive windows join the phrase.
+          this.commit(best.label, now);
           this.stablePredictions = 0;
         }
       } else {
@@ -588,7 +615,7 @@ export class ASLWordEngine {
         if (this.stablePredictions > 0) this.stablePredictions--;
         if (this.stablePredictions === 0) this.candidate = '';
       }
-      this.emit(this.candidate || best.label, best.confidence, top3);
+      this.emit(this.candidate, best.confidence, top3);
     } catch (error) {
       console.warn('Offline ASL word model inference warning', error);
     } finally {
@@ -599,6 +626,7 @@ export class ASLWordEngine {
   clear() {
     this.frames = [];
     this.phrase = [];
+    this.phraseComplete = false;
     this.candidate = '';
     this.lastCommitted = '';
     this.stablePredictions = 0;
@@ -611,6 +639,9 @@ export class ASLWordEngine {
       currentWord: word,
       currentConfidence: confidence,
       phrase: this.phrase.join(' '),
+      words: [...this.phrase],
+      commitCount: this.commitCount,
+      phraseComplete: this.phraseComplete,
       bufferProgress: Math.min(1, this.frames.length / config.seq_len),
       top3,
     });

@@ -14,7 +14,7 @@ import {
   type CampusAlert,
   type WhatChangedResult,
 } from '../src/campusMemory';
-import { resolveOfflinePhrase } from '../src/offlinePhrasebook';
+import { glossToEnglish, signWordToEnglish } from '../src/signEnglish';
 import { AssistMode, getApiUrl, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 import type { VisionObject } from '../src/vision';
 
@@ -58,9 +58,8 @@ export default function CameraScreen() {
   const lastTranslation = useRef('');
   const lastApproachWarning = useRef('');
   const lastObstacleWarning = useRef('');
-  const lastRecognizedWord = useRef('');
-  const lastSpokenWordTimestamp = useRef(0);
-  const wordAbsenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSpokenCommit = useRef(0);
+  const lastSpokenPhrase = useRef('');
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -158,6 +157,9 @@ export default function CameraScreen() {
               : 'Frame your hands, face, and upper body to sign';
 
   const offlineWord = signContext.wordState?.currentWord;
+  const onDeviceWords = signContext.wordState?.words ?? [];
+  const phraseComplete = signContext.wordState?.phraseComplete ?? false;
+  const onDeviceSentence = onDeviceWords.length ? glossToEnglish(onDeviceWords) : '';
   const currentLetter = signContext.aslState?.currentLetter;
   const spelledText = signContext.aslState?.spelledText;
   const isHoldingLetter = signContext.aslState?.isHolding;
@@ -165,7 +167,8 @@ export default function CameraScreen() {
   const contextBoardText = displayedTranscript
     || (spelledText ? `Spelled: "${spelledText}"` : '')
     || (isHoldingLetter && currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
-    || (offlineWord ? `Sign: "${offlineWord.toUpperCase()}" (On-device)` : '')
+    || (onDeviceSentence ? `${onDeviceSentence} (On-device, word by word)` : '')
+    || (offlineWord ? `Reading: "${signWordToEnglish(offlineWord)}"…` : '')
     || (currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
     || (isAnalysingContext
       ? 'Analyzing signed gesture…'
@@ -215,6 +218,7 @@ export default function CameraScreen() {
     setIsAnalysingContext(false);
     translationInFlight.current = false;
     lastTranslation.current = '';
+    lastSpokenPhrase.current = '';
     setCaptureVersion((value) => value + 1);
   };
 
@@ -250,7 +254,6 @@ export default function CameraScreen() {
 
   useEffect(() => () => {
     void Speech.stop();
-    if (wordAbsenceTimer.current) clearTimeout(wordAbsenceTimer.current);
   }, []);
 
   useEffect(() => {
@@ -279,32 +282,27 @@ export default function CameraScreen() {
     }
   }, [isSignMode, vision?.should_speak, vision?.speech, vision?.urgency, vision?.scene_key]);
 
+  // Speak each confirmed on-device sign as it lands, then the whole phrase as
+  // one English sentence once the signer lowers their hands.
   useEffect(() => {
-    if (!offlineWord || translation) {
-      if (!wordAbsenceTimer.current && lastRecognizedWord.current) {
-        wordAbsenceTimer.current = setTimeout(() => {
-          lastRecognizedWord.current = '';
-          wordAbsenceTimer.current = null;
-        }, 1500);
-      }
+    const commitCount = signContext.wordState?.commitCount ?? 0;
+    if (commitCount <= lastSpokenCommit.current) {
+      lastSpokenCommit.current = Math.min(lastSpokenCommit.current, commitCount);
       return;
     }
+    lastSpokenCommit.current = commitCount;
+    if (translation || onDeviceWords.length === 0) return;
+    const word = onDeviceWords[onDeviceWords.length - 1];
+    speak(onDeviceWords.length === 1 ? glossToEnglish([word]) : signWordToEnglish(word));
+  }, [signContext.wordState?.commitCount]);
 
-    if (wordAbsenceTimer.current) {
-      clearTimeout(wordAbsenceTimer.current);
-      wordAbsenceTimer.current = null;
-    }
-
-    const now = Date.now();
-    const isDifferentWord = offlineWord !== lastRecognizedWord.current;
-
-    if (isDifferentWord) {
-      lastRecognizedWord.current = offlineWord;
-      lastSpokenWordTimestamp.current = now;
-      const phrase = resolveOfflinePhrase(offlineWord);
-      speak(phrase ? phrase.speech : offlineWord);
-    }
-  }, [offlineWord, translation]);
+  useEffect(() => {
+    if (!phraseComplete || translation || onDeviceWords.length < 2) return;
+    const key = onDeviceWords.join(' ');
+    if (key === lastSpokenPhrase.current) return;
+    lastSpokenPhrase.current = key;
+    speak(onDeviceSentence);
+  }, [phraseComplete, onDeviceSentence]);
 
   useEffect(() => {
     if (mode !== 'scene') return;
@@ -542,7 +540,7 @@ export default function CameraScreen() {
                   </View>
                   <View style={c.aslMeta}>
                     <View style={c.aslMetaRow}>
-                      <Text style={c.aslConfidenceText}>{offlineWord.toUpperCase()}</Text>
+                      <Text style={c.aslConfidenceText}>{signWordToEnglish(offlineWord).toUpperCase()}</Text>
                       <Text style={c.aslChipText}>GESTURE</Text>
                     </View>
                     <View style={c.aslProgressTrack}>
@@ -581,9 +579,9 @@ export default function CameraScreen() {
                     <Text style={c.aslOverlayToggleText}>{showLandmarks ? 'Hide lines' : 'Show lines'}</Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => speak(displayedTranscript || spelledText || offlineWord)}
-                    disabled={!displayedTranscript && !spelledText && !offlineWord}
-                    style={[c.aslSpeakMiniBtn, !displayedTranscript && !spelledText && !offlineWord && c.aslSpeakMiniBtnDisabled]}
+                    onPress={() => speak(displayedTranscript || spelledText || onDeviceSentence)}
+                    disabled={!displayedTranscript && !spelledText && !onDeviceSentence}
+                    style={[c.aslSpeakMiniBtn, !displayedTranscript && !spelledText && !onDeviceSentence && c.aslSpeakMiniBtnDisabled]}
                     accessibilityLabel="Speak contextual translation"
                   >
                     <Ionicons name="volume-high" size={15} color="#07110F" />
@@ -591,7 +589,7 @@ export default function CameraScreen() {
                   </Pressable>
                 </View>
               </View>
-              <Text style={[c.aslWordText, !displayedTranscript && !spelledText && !offlineWord && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
+              <Text style={[c.aslWordText, !displayedTranscript && !spelledText && !onDeviceSentence && !offlineWord && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
                 {contextBoardText}
                 <Text style={c.aslCursor}>_</Text>
               </Text>
