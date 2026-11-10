@@ -72,6 +72,17 @@ type TrackingResult = {
   camera_coach: CameraCoachResult | null;
   experimental: true;
   collision_warnings_enabled: false;
+  obstacle_points?: number[][];
+  obstacle_range_m?: number | null;
+};
+
+/** Camera-frame [x right, y down, z forward] meter dots for unlabeled surfaces. */
+export type ObstacleFrame = {
+  /** Increments once per tracking response so the map ingests each frame once. */
+  sequence: number;
+  capturedAt: number;
+  points: Array<[number, number, number]>;
+  rangeM: number | null;
 };
 
 export type SignTranslation = {
@@ -332,6 +343,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [detections, setDetections] = useState<LocalDetection[]>([]);
   const [cameraCoach, setCameraCoach] = useState<CameraCoachResult | null>(null);
+  const [obstacles, setObstacles] = useState<ObstacleFrame | null>(null);
+  const obstacleSequence = useRef(0);
   const [performance, setPerformance] = useState<VisionPerformance>({
     capture_fps: 0,
     capture_ms: null,
@@ -468,6 +481,16 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
             // Do not let a delayed response overwrite newer camera detections.
             if (trackingAgeMs > 3000 || Date.now() - capturedAt > 3000) return;
             setCameraCoach(tracking.camera_coach || null);
+            const obstaclePoints = (tracking.obstacle_points || []).filter(
+              (point): point is [number, number, number] => Array.isArray(point) && point.length >= 3 && point.slice(0, 3).every(Number.isFinite),
+            );
+            obstacleSequence.current += 1;
+            setObstacles({
+              sequence: obstacleSequence.current,
+              capturedAt,
+              points: obstaclePoints,
+              rangeM: typeof tracking.obstacle_range_m === 'number' ? tracking.obstacle_range_m : null,
+            });
             setResult((previous) => {
               const base = previous || synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
               return { ...base, objects: tracking.objects };
@@ -557,6 +580,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     failures.current = 0;
     setResult(null);
     setCameraCoach(null);
+    setObstacles(null);
     setPerformance({ capture_fps: 0, capture_ms: null, local_detection_ms: null, tracking_latency_ms: null, tracking_age_ms: null, tracking_status: 'waiting' });
     if (!enabled) {
       setState('paused');
@@ -567,7 +591,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     return stop;
   }, [enabled, mode, run, stop]);
 
-  return { result, state, lastUpdated, detections, cameraCoach, performance, scanNow };
+  return { result, state, lastUpdated, detections, cameraCoach, obstacles, performance, scanNow };
 }
 
 function performanceNow() {

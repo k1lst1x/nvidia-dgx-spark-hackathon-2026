@@ -25,6 +25,7 @@ from depth import (
     surface_readings_for_boxes,
 )
 from motion import MotionHistory
+from obstacle_points import OBSTACLE_MAX_RANGE_M, OBSTACLE_POINTS_ENABLED, obstacle_points
 from point_cloud import cloud_for_surface, open3d_status
 from segmentation import YoloSegmenter
 from slam import OrbSlamClient
@@ -301,8 +302,11 @@ def _with_point_clouds(objects: list[DetectedObject], depth_map, masks: list) ->
     return updated
 
 
+_INFER_DEPTH = object()
+
+
 def _add_depth_and_motion(
-    objects: list[DetectedObject], image_bytes: bytes, session_id: str
+    objects: list[DetectedObject], image_bytes: bytes, session_id: str, depth_map=_INFER_DEPTH,
 ) -> list[DetectedObject]:
     """Attach conservative depth/motion debug data without calling Groq.
 
@@ -322,7 +326,8 @@ def _add_depth_and_motion(
     if not _depth_model.ready:
         _rerun.log(objects)
         return objects
-    depth_map = _depth_model.infer(image_bytes)
+    if depth_map is _INFER_DEPTH:
+        depth_map = _depth_model.infer(image_bytes)
     if depth_map is None:
         _rerun.log(objects)
         return objects
@@ -569,6 +574,8 @@ def health():
         "depth": {
             **_depth_model.status(),
             "point_cloud_enabled": POINT_CLOUD_ENABLED,
+            "obstacle_points_enabled": OBSTACLE_POINTS_ENABLED,
+            "obstacle_range_m": OBSTACLE_MAX_RANGE_M,
             "open3d": open3d_status()["installed"],
         },
         "slam": _slam.status(),
@@ -601,6 +608,31 @@ async def _read_tracking_image(image: UploadFile) -> bytes:
     return body
 
 
+def _obstacle_points_active() -> bool:
+    return OBSTACLE_POINTS_ENABLED and _depth_model.ready and _depth_model.is_metric
+
+
+def _track_geometry(
+    objects: list[DetectedObject], image_bytes: bytes, session_id: str
+) -> tuple[list[DetectedObject], list[list[float]]]:
+    """Run depth once per tracking frame for both object distances and obstacle dots.
+
+    Obstacle dots cover surfaces the detector cannot name (walls, trees, poles),
+    so they are produced even when no object was detected.
+    """
+    if not _obstacle_points_active():
+        return _add_depth_and_motion(objects, image_bytes, session_id), []
+    depth_map = _depth_model.infer(image_bytes)
+    objects = _add_depth_and_motion(objects, image_bytes, session_id, depth_map=depth_map)
+    try:
+        # The response schema allows at most 512, whatever OBSTACLE_MAX_POINTS says.
+        obstacles = obstacle_points(depth_map, objects)[:512]
+    except Exception:
+        logger.exception("obstacle_points_skipped")
+        obstacles = []
+    return objects, obstacles
+
+
 @app.post("/v1/track", response_model=TrackingResult)
 async def track_scene(request: Request, image: UploadFile = File(...)):
     """Fast detector/depth/motion path, intentionally separate from Groq."""
@@ -610,13 +642,14 @@ async def track_scene(request: Request, image: UploadFile = File(...)):
     started = time.monotonic()
     async with _slots:
         objects = await asyncio.to_thread(_yolo_tracker.detect, body, client_id)
-        objects = await asyncio.to_thread(_add_depth_and_motion, objects, body, client_id)
+        objects, obstacles = await asyncio.to_thread(_track_geometry, objects, body, client_id)
         try:
             camera_coach = await asyncio.to_thread(assess_frame, body, objects)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
     latency_ms = int((time.monotonic() - started) * 1000)
     observation_store.record_tracking_latency(latency_ms)
+    obstacles_enabled = _obstacle_points_active()
     return TrackingResult(
         objects=objects,
         tracking_latency_ms=latency_ms,
@@ -627,6 +660,8 @@ async def track_scene(request: Request, image: UploadFile = File(...)):
         segmentation=_segmenter.enabled,
         point_cloud=POINT_CLOUD_ENABLED and _depth_model.ready and _depth_model.is_metric,
         camera_pose=_slam.snapshot_for(client_id),
+        obstacle_points=obstacles,
+        obstacle_range_m=OBSTACLE_MAX_RANGE_M if obstacles_enabled else None,
     )
 
 

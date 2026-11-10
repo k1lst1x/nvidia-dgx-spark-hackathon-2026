@@ -74,7 +74,7 @@ export default function CameraScreen() {
   const isSignMode = mode === 'sign';
   const showVisionDebug = process.env.EXPO_PUBLIC_VISION_DEBUG === 'true';
   const usesBrowserHandTracking = isSignMode && Platform.OS === 'web';
-  const { result: vision, state: visionState, detections, cameraCoach, performance, scanNow } = useVisionLoop(
+  const { result: vision, state: visionState, detections, cameraCoach, obstacles, performance, scanNow } = useVisionLoop(
     cameraRef,
     mode,
     Boolean(permission?.granted) && !usesBrowserHandTracking,
@@ -508,7 +508,7 @@ export default function CameraScreen() {
         )}
 
         <View style={c.reticle}>
-          {!isSignMode && <LiveSceneMap detections={mapDetections} performance={performance} />}
+          {!isSignMode && <LiveSceneMap detections={mapDetections} obstacles={obstacles} performance={performance} />}
           {usesBrowserHandTracking && isSignMode && (
             <View style={c.aslHudContainer}>
               {currentLetter ? (

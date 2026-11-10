@@ -147,3 +147,67 @@ def test_open3d_records_the_cloud_when_installed(monkeypatch):
     summary = cloud_for_surface(depth, mask, 40, 40)
     assert summary is not None
     assert summary["open3d"] is True
+
+
+def test_obstacle_points_keep_only_surfaces_within_range():
+    from obstacle_points import obstacle_points
+
+    depth = np.full((64, 96), 8.0, dtype=np.float32)
+    depth[:, :32] = 2.0  # a wall on the left, 2 m away
+    points = obstacle_points(depth, [], max_range_m=4.5, cols=12, rows=8, max_points=500)
+    assert points, "the near wall should produce dots"
+    for x, y, z in points:
+        assert abs(z - 2.0) < 0.05
+        assert x < 0  # left of the optical center
+        assert (x * x + y * y + z * z) ** 0.5 <= 4.5
+
+
+def test_obstacle_points_skip_detected_objects_and_respect_the_cap():
+    from obstacle_points import obstacle_points
+
+    depth = np.full((64, 96), 3.0, dtype=np.float32)
+    everything = obstacle_points(depth, [], max_range_m=4.5, cols=12, rows=8, max_points=500)
+    with_box = obstacle_points(depth, [Box()], max_range_m=4.5, cols=12, rows=8, max_points=500)
+    assert len(with_box) < len(everything)
+    capped = obstacle_points(depth, [], max_range_m=4.5, cols=12, rows=8, max_points=10)
+    assert len(capped) == 10
+
+
+def test_obstacle_points_ignore_the_floor_but_keep_a_wall():
+    from obstacle_points import obstacle_points
+    from point_cloud import camera_intrinsics
+
+    height, width = 96, 128
+    _fx, fy, _cx, cy, _ = camera_intrinsics(width, height)
+    rows = np.arange(height, dtype=np.float32)[:, None]
+    # A level camera 1.45 m above a flat floor: depth = h * fy / (v - cy).
+    floor = np.where(rows > cy + 1, 1.45 * fy / np.maximum(rows - cy, 1e-3), 30.0)
+    depth = np.broadcast_to(floor, (height, width)).astype(np.float32).copy()
+    assert obstacle_points(depth, [], max_range_m=4.5, cols=16, rows=12, max_points=500) == []
+    depth[:, 96:] = 1.8  # a pole/wall on the right, 1.8 m away
+    points = obstacle_points(depth, [], max_range_m=4.5, cols=16, rows=12, max_points=500)
+    assert points
+    assert all(x > 0 and abs(z - 1.8) < 0.05 for x, _y, z in points)
+
+
+def test_obstacle_points_need_a_depth_map():
+    from obstacle_points import obstacle_points
+
+    assert obstacle_points(None, []) == []
+    nan_map = np.full((64, 96), np.nan, dtype=np.float32)
+    assert obstacle_points(nan_map, [], cols=12, rows=8) == []
+
+
+def test_track_geometry_returns_obstacles_without_any_detection(monkeypatch):
+    import main
+
+    depth = np.full((64, 96), 2.5, dtype=np.float32)
+    monkeypatch.setattr(main, "OBSTACLE_POINTS_ENABLED", True)
+    monkeypatch.setattr(type(main._depth_model), "ready", property(lambda self: True))
+    monkeypatch.setattr(main._depth_model, "mode", "metric")
+    calls = []
+    monkeypatch.setattr(main._depth_model, "infer", lambda body: calls.append(body) or depth)
+    objects, obstacles = main._track_geometry([], b"frame", "session")
+    assert objects == []
+    assert obstacles
+    assert len(calls) == 1  # depth runs once per frame

@@ -56,6 +56,10 @@ class TrackingResult(BaseModel):
     segmentation: bool = False
     point_cloud: bool = False
     camera_pose: dict[str, object] | None = None
+    # Camera-frame [x right, y down, z forward] meters for unlabeled surfaces
+    # (walls, trees, poles) within obstacle_range_m. Estimates from metric depth.
+    obstacle_points: list[list[float]] = Field(default_factory=list, max_length=512)
+    obstacle_range_m: float | None = None
 
 
 class SignSequenceRequest(BaseModel):
