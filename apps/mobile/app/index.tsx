@@ -1,7 +1,9 @@
 import AssistantHub from '../components/AssistantHub';
+import RoomSketchMap from '../components/RoomSketchMap';
+import type { SightObservation } from '../src/campusMemory';
 import { Ionicons } from '@expo/vector-icons';
 import { Link } from 'expo-router';
-import { ReactNode, useEffect, useRef, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   Animated,
@@ -78,6 +80,42 @@ const pipeline = [
     text: 'The result is available as readable text and a concise voice response in the mobile app.',
     meta: 'Text + speech',
   },
+];
+
+// Sample pins for the landing-page map. They are labelled EXAMPLE on the page;
+// in the app every pin is a report a person confirmed (see observation_store).
+const EXAMPLE_ZONE = 'Library Corridor';
+const EXAMPLE_PINS: Array<{ label: string; category: string; x: number; y: number; minutesAgo: number; confidence: number }> = [
+  { label: 'wet floor sign', category: 'hazard', x: 0.3, y: 0.66, minutesAgo: 42, confidence: 0.91 },
+  { label: 'backpack', category: 'obstacle', x: 0.52, y: 0.46, minutesAgo: 25, confidence: 0.86 },
+  { label: 'chair', category: 'obstacle', x: 0.7, y: 0.3, minutesAgo: 12, confidence: 0.93 },
+  { label: 'closed door', category: 'room_status', x: 0.84, y: 0.16, minutesAgo: 4, confidence: 0.88 },
+];
+
+function exampleObservations(now: number): SightObservation[] {
+  return EXAMPLE_PINS.map((pin, index) => ({
+    id: -(index + 1),
+    category: pin.category,
+    label: pin.label,
+    description: `Example report: ${pin.label}`,
+    zone_id: EXAMPLE_ZONE,
+    timestamp: new Date(now - pin.minutesAgo * 60_000).toISOString(),
+    source_device: 'example',
+    source_session: 'example',
+    confidence: pin.confidence,
+    verification_status: 'verified',
+    privacy_scope: 'shared',
+    room_x: pin.x,
+    room_y: pin.y,
+    expires_at: new Date(now + 6 * 3_600_000).toISOString(),
+    origin: 'manual',
+  }));
+}
+
+const mapPoints = [
+  { icon: 'checkmark-done-outline' as const, title: 'Confirmed before it is shared', text: 'The camera suggests; a person confirms. Unconfirmed guesses never reach other phones.' },
+  { icon: 'time-outline' as const, title: 'Recent, then gone', text: 'Pins expire on their own, so the map shows what is true now, not last week.' },
+  { icon: 'lock-closed-outline' as const, title: 'Personal stays personal', text: 'Private reminders, like where you left your keys, are never placed on the shared map.' },
 ];
 
 const releaseDownloads = [
@@ -186,6 +224,7 @@ function Reveal({
 function LandingPage() {
   const scrollY = useRef(new Animated.Value(0)).current;
   const reducedMotion = useReducedMotion();
+  const examplePins = useMemo(() => exampleObservations(Date.now()), []);
 
   return (
     <SafeAreaView style={s.safe}>
@@ -358,6 +397,48 @@ function LandingPage() {
           ))}
         </View>
 
+        <Reveal scrollY={scrollY} reducedMotion={reducedMotion} style={s.mapSection}>
+          <View style={s.mapCopy}>
+            <Text style={s.sectionOverline}>SHARED SIGHT · 3D SPATIAL MAP</Text>
+            <Text style={s.mapTitle}>Reports stay where they were found.</Text>
+            <Text style={s.mapLead}>
+              When a student confirms something the camera saw, such as a wet floor, a closed door, or a moved chair, it is pinned to a shared sketch of that room for the next person who walks in.
+            </Text>
+            <View style={s.mapPoints}>
+              {mapPoints.map((point) => (
+                <View key={point.title} style={s.mapPoint}>
+                  <View style={s.mapPointIcon}><Ionicons name={point.icon} size={17} color="#7EC8FF" /></View>
+                  <View style={s.mapPointCopy}>
+                    <Text style={s.mapPointTitle}>{point.title}</Text>
+                    <Text style={s.mapPointText}>{point.text}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+            <Link href="/hub" asChild>
+              <Pressable accessibilityRole="button" accessibilityLabel="Open Shared Sight in the app" style={s.mapCta}>
+                <Ionicons name="git-network-outline" size={17} color="#07110F" />
+                <Text style={s.mapCtaText}>Open Shared Sight</Text>
+              </Pressable>
+            </Link>
+          </View>
+          <View
+            style={s.mapFrame}
+            accessibilityLabel={`Example 3D map of the ${EXAMPLE_ZONE} with ${EXAMPLE_PINS.length} pinned reports: ${EXAMPLE_PINS.map((pin) => pin.label).join(', ')}.`}
+          >
+            <RoomSketchMap
+              zoneId={EXAMPLE_ZONE}
+              observations={examplePins}
+              selectedPoint={null}
+              onSelectPoint={() => {}}
+              interactive={false}
+              badge="EXAMPLE"
+              autoRotate={!reducedMotion}
+              description="Example pins in a sample room. In the app, each pin is a report a student confirmed, joined by the path they walked."
+            />
+          </View>
+        </Reveal>
+
         <Reveal scrollY={scrollY} reducedMotion={reducedMotion} style={s.architecture}>
           <View style={s.architectureHeading}>
             <View>
@@ -500,6 +581,21 @@ const s = StyleSheet.create({
   cardEyebrow: { color: '#7F988C', fontSize: 10, fontWeight: '800', letterSpacing: 1.45 },
   cardTitle: { color: '#EAF3EC', fontSize: 21, lineHeight: 26, fontWeight: '800', letterSpacing: -0.45, marginTop: 30 },
   cardText: { color: '#91A89E', fontSize: 14, lineHeight: 21, marginTop: 11 },
+  mapSection: {
+    marginTop: 110, flexDirection: Platform.OS === 'web' ? 'row' : 'column', flexWrap: 'wrap', gap: 32, alignItems: 'center',
+  },
+  mapCopy: { flex: 1, minWidth: 280, maxWidth: 460 },
+  mapTitle: { color: '#F0F6F1', fontSize: Platform.OS === 'web' ? 40 : 32, lineHeight: Platform.OS === 'web' ? 44 : 36, fontWeight: '800', letterSpacing: -1.4, marginTop: 15 },
+  mapLead: { color: '#91A99E', fontSize: 16, lineHeight: 25, marginTop: 15 },
+  mapPoints: { marginTop: 24, gap: 16 },
+  mapPoint: { flexDirection: 'row', gap: 12, alignItems: 'flex-start' },
+  mapPointIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: '#0F2230', borderWidth: 1, borderColor: '#24485C', alignItems: 'center', justifyContent: 'center' },
+  mapPointCopy: { flex: 1, gap: 3 },
+  mapPointTitle: { color: '#EAF3EE', fontSize: 14, fontWeight: '800' },
+  mapPointText: { color: '#8EA59A', fontSize: 13, lineHeight: 19 },
+  mapCta: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-start', backgroundColor: '#7EC8FF', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 11, marginTop: 26 },
+  mapCtaText: { color: '#07110F', fontSize: 14, fontWeight: '800' },
+  mapFrame: { flex: 1.35, minWidth: 300 },
   architecture: { marginTop: 110, padding: Platform.OS === 'web' ? 38 : 24, borderWidth: 1, borderColor: '#315043', borderRadius: 28, backgroundColor: '#0B1914' },
   architectureHeading: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', justifyContent: 'space-between', gap: 24 },
   architectureTitle: { color: '#F0F7F1', fontSize: Platform.OS === 'web' ? 41 : 33, lineHeight: Platform.OS === 'web' ? 45 : 38, fontWeight: '800', letterSpacing: -1.5, marginTop: 14, maxWidth: 570 },

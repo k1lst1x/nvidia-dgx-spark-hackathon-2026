@@ -9,6 +9,12 @@ type Props = {
   selectedPoint: { x: number; y: number } | null;
   onSelectPoint: (point: { x: number; y: number }) => void;
   interactive?: boolean;
+  /** Replaces the default instruction line (the landing page explains it differently). */
+  description?: string;
+  /** Extra pill beside the count, e.g. "EXAMPLE" when the pins are sample data. */
+  badge?: string;
+  /** Slow camera orbit; pass false when the viewer prefers reduced motion. */
+  autoRotate?: boolean;
 };
 
 type Point = { x: number; y: number; color: string; size: number };
@@ -86,7 +92,7 @@ function pathDots(stops: { x: number; y: number }[]) {
   return dots;
 }
 
-export default function RoomSketchMap({ zoneId, observations, selectedPoint, onSelectPoint, interactive = true }: Props) {
+export default function RoomSketchMap({ zoneId, observations, selectedPoint, onSelectPoint, interactive = true, description }: Props) {
   const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
   const cloud = useMemo(() => roomCloud(zoneId), [zoneId]);
   const placed = observations
@@ -115,7 +121,7 @@ export default function RoomSketchMap({ zoneId, observations, selectedPoint, onS
       </View>
 
       <Text style={styles.instruction}>
-        A reconstructed room view: blue points are the space, the green line is the path, and the marker is the camera. Tap to drop the next object.
+        {description ?? 'A reconstructed room view: blue points are the space, the green line is the path, and the marker is the camera. Tap to drop the next object.'}
       </Text>
 
       <Pressable

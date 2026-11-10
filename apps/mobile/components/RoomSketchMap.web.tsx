@@ -10,6 +10,12 @@ type Props = {
   selectedPoint: { x: number; y: number } | null;
   onSelectPoint: (point: { x: number; y: number }) => void;
   interactive?: boolean;
+  /** Replaces the default instruction line (the landing page explains it differently). */
+  description?: string;
+  /** Extra pill beside the count, e.g. "EXAMPLE" when the pins are sample data. */
+  badge?: string;
+  /** Slow camera orbit; pass false when the viewer prefers reduced motion. */
+  autoRotate?: boolean;
 };
 
 type Point2 = { x: number; y: number };
@@ -101,11 +107,13 @@ function labelSprite(text: string) {
   return sprite;
 }
 
-export default function RoomSketchMap({ zoneId, observations, selectedPoint, onSelectPoint, interactive = true }: Props) {
+export default function RoomSketchMap({
+  zoneId, observations, selectedPoint, onSelectPoint, interactive = true, description, badge, autoRotate = true,
+}: Props) {
   const host = useRef<HTMLElement | null>(null);
   const rebuildRef = useRef<() => void>(() => {});
-  const data = useRef({ observations, selectedPoint, onSelectPoint, interactive });
-  data.current = { observations, selectedPoint, onSelectPoint, interactive };
+  const data = useRef({ observations, selectedPoint, onSelectPoint, interactive, autoRotate });
+  data.current = { observations, selectedPoint, onSelectPoint, interactive, autoRotate };
 
   const placed = observations
     .filter((item) => item.room_x != null && item.room_y != null && item.verification_status === 'verified')
@@ -198,11 +206,19 @@ export default function RoomSketchMap({ zoneId, observations, selectedPoint, onS
     const observer = new ResizeObserver(resize);
     observer.observe(container);
 
+    // Skip drawing while the map is scrolled off-screen.
+    let onScreen = true;
+    const visibility = typeof IntersectionObserver !== 'undefined'
+      ? new IntersectionObserver(([entry]) => { onScreen = entry.isIntersecting; })
+      : null;
+    visibility?.observe(container);
+
     let frame = 0;
     const started = performance.now();
     const tick = () => {
       frame = requestAnimationFrame(tick);
-      const turn = (performance.now() - started) * 0.00012;
+      if (!onScreen) return;
+      const turn = data.current.autoRotate ? (performance.now() - started) * 0.00012 : 0.55;
       camera.position.set(Math.sin(turn) * 6.4, 3.15, Math.cos(turn) * 6.4);
       camera.lookAt(0, 0.35, 0);
       renderer.render(scene, camera);
@@ -223,6 +239,7 @@ export default function RoomSketchMap({ zoneId, observations, selectedPoint, onS
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      visibility?.disconnect();
       renderer.domElement.removeEventListener('pointerdown', place);
       renderer.dispose();
       container.replaceChildren();
@@ -243,12 +260,17 @@ export default function RoomSketchMap({ zoneId, observations, selectedPoint, onS
           <Text style={styles.kicker}>3D SPATIAL MAP</Text>
           <Text style={styles.title}>{zoneId}</Text>
         </View>
+        {badge ? (
+          <View style={styles.badgePill}>
+            <Text style={styles.badgeText}>{badge}</Text>
+          </View>
+        ) : null}
         <View style={styles.countPill}>
           <Text style={styles.countText}>{placed.length} objects</Text>
         </View>
       </View>
       <Text style={styles.instruction}>
-        Shared pins stay on this sketch. The live room map is on the camera screen and fills in as the camera moves.
+        {description ?? 'Shared pins stay on this sketch. The live room map is on the camera screen and fills in as the camera moves.'}
       </Text>
       <View style={styles.viewport}>
         <View
@@ -276,7 +298,7 @@ export default function RoomSketchMap({ zoneId, observations, selectedPoint, onS
               <View style={styles.listNumber}><Text style={styles.listNumberText}>{index + 1}</Text></View>
               <View style={styles.listCopy}>
                 <Text numberOfLines={1} style={styles.itemName}>{item.label}</Text>
-                <Text style={styles.itemMeta}>{item.category} · {Math.round(item.confidence * 100)}% confidence</Text>
+                <Text style={styles.itemMeta}>{item.category.replace(/_/g, ' ')} · {Math.round(item.confidence * 100)}% confidence</Text>
               </View>
               <Text style={styles.itemTime}>{new Date(item.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>
             </View>
@@ -300,6 +322,8 @@ const styles = StyleSheet.create({
   title: { color: '#F4F8FB', fontSize: 15, fontWeight: '800' },
   countPill: { backgroundColor: '#10202A', borderRadius: 20, paddingHorizontal: 9, paddingVertical: 6 },
   countText: { color: '#D5E6F0', fontSize: 10, fontWeight: '800' },
+  badgePill: { borderWidth: 1, borderColor: '#3A5A6A', borderRadius: 20, paddingHorizontal: 8, paddingVertical: 5 },
+  badgeText: { color: '#9BB0BE', fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
   instruction: { color: '#9BB0BE', fontSize: 11, lineHeight: 15 },
   viewport: { height: 320, borderRadius: 14, overflow: 'hidden', borderWidth: 1, borderColor: '#234556', backgroundColor: '#070B10' },
   canvasHost: { flex: 1 },
