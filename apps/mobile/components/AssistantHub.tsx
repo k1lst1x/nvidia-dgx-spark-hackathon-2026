@@ -38,7 +38,7 @@ export default function AssistantHub() {
   const [speechEnabled, setSpeechEnabled] = useState(true);
   const [speechRate, setSpeechRate] = useState<'0.9' | '1.0' | '1.2'>('1.0');
   const [sensitivity, setSensitivity] = useState<'high' | 'balanced' | 'strict'>('balanced');
-  const [apiUrl, setApiUrl] = useState('http://localhost:8082');
+  const [apiUrl, setApiUrl] = useState('http://localhost:8000');
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'online' | 'offline'>('idle');
   const [pingLatency, setPingLatency] = useState<number | null>(null);
 
@@ -111,7 +111,11 @@ export default function AssistantHub() {
       }
 
       const storedUrl = window.localStorage.getItem('guidelens_api_url');
-      if (storedUrl) setApiUrl(storedUrl);
+      if (storedUrl) {
+        const migratedUrl = storedUrl.replace(/^http:\/\/(localhost|127\.0\.0\.1):8082$/, 'http://$1:8000');
+        setApiUrl(migratedUrl);
+        if (migratedUrl !== storedUrl) window.localStorage.setItem('guidelens_api_url', migratedUrl);
+      }
     }
   }, []);
 
@@ -763,7 +767,7 @@ export default function AssistantHub() {
                       saveSetting('api_url', val);
                       setPingStatus('idle');
                     }}
-                    placeholder="http://localhost:8082"
+                    placeholder="http://localhost:8000"
                     placeholderTextColor="#5C7A6E"
                     style={s.apiInput}
                     autoCapitalize="none"

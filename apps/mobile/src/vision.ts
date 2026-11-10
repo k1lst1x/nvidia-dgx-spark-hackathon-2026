@@ -84,26 +84,55 @@ export type SignTranslation = {
 
 type VisionState = 'starting' | 'analyzing' | 'live' | 'offline' | 'paused';
 
+export type VisionPerformance = {
+  capture_fps: number;
+  capture_ms: number | null;
+  local_detection_ms: number | null;
+  tracking_latency_ms: number | null;
+  tracking_age_ms: number | null;
+  tracking_status: 'waiting' | 'live' | 'slow' | 'offline';
+};
+
 // Local object frames should follow camera movement; cloud narration can update less often.
 const LOCAL_SCAN_INTERVAL_MS = 200;
+const LOCAL_API_PORT = '8000';
+
+function normalizeApiUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/$/, '');
+  try {
+    const parsed = new URL(trimmed);
+    // 8082 is Expo Web in this project; FastAPI listens on 8000.
+    if (['localhost', '127.0.0.1'].includes(parsed.hostname) && parsed.port === '8082') {
+      parsed.port = LOCAL_API_PORT;
+      return parsed.toString().replace(/\/$/, '');
+    }
+  } catch {
+    // Preserve validation behavior for malformed custom values.
+  }
+  return trimmed;
+}
 
 export function getApiUrl(): string {
   if (typeof window !== 'undefined' && window.localStorage) {
     const custom = window.localStorage.getItem('guidelens_api_url');
-    if (custom && custom.trim()) return custom.trim().replace(/\/$/, '');
+    if (custom && custom.trim()) {
+      const normalized = normalizeApiUrl(custom);
+      if (normalized !== custom.trim().replace(/\/$/, '')) window.localStorage.setItem('guidelens_api_url', normalized);
+      return normalized;
+    }
   }
-  const configured = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+  const configured = process.env.EXPO_PUBLIC_API_URL ? normalizeApiUrl(process.env.EXPO_PUBLIC_API_URL) : '';
   if (configured) return configured;
   if (typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)) {
-    return 'http://localhost:8082';
+    return 'http://localhost:8000';
   }
   return '';
 }
 
-const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL ? normalizeApiUrl(process.env.EXPO_PUBLIC_API_URL) : '';
 const API_URL = configuredApiUrl || (
   typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
-    ? 'http://localhost:8082'
+    ? 'http://localhost:8000'
     : ''
 );
 export const hasVisionBackend = Boolean(API_URL);
@@ -303,6 +332,14 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [detections, setDetections] = useState<LocalDetection[]>([]);
   const [cameraCoach, setCameraCoach] = useState<CameraCoachResult | null>(null);
+  const [performance, setPerformance] = useState<VisionPerformance>({
+    capture_fps: 0,
+    capture_ms: null,
+    local_detection_ms: null,
+    tracking_latency_ms: null,
+    tracking_age_ms: null,
+    tracking_status: 'waiting',
+  });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controller = useRef<AbortController | null>(null);
   const cloudInFlight = useRef(false);
@@ -313,6 +350,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const lastCloudAnalysis = useRef(0);
   const lastTrackingAnalysis = useRef(0);
   const trackingInFlight = useRef(false);
+  const trackingFailures = useRef(0);
+  const captureTimes = useRef<number[]>([]);
   const signFrames = useRef<string[]>([]);
   const signTranscript = useRef('');
 
@@ -322,6 +361,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     timer.current = null;
     controller.current = null;
     cloudInFlight.current = false;
+    trackingInFlight.current = false;
   }, []);
 
   const run = useCallback(async (runGeneration: number) => {
@@ -330,8 +370,21 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     let nextDelay = mode === 'sign' ? 700 : LOCAL_SCAN_INTERVAL_MS;
     const activeApiUrl = getApiUrl();
     try {
+      const captureStartedAt = performanceNow();
       const picture = await camera.current.takePictureAsync({ quality: 0.7, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
+      const capturedAt = Date.now();
+      const captureEndedAt = performanceNow();
+      captureTimes.current.push(captureEndedAt);
+      captureTimes.current = captureTimes.current.filter((stamp) => captureEndedAt - stamp <= 5000);
+      const captureFps = captureTimes.current.length > 1
+        ? (captureTimes.current.length - 1) * 1000 / (captureTimes.current[captureTimes.current.length - 1] - captureTimes.current[0])
+        : 0;
+      setPerformance((previous) => ({
+        ...previous,
+        capture_fps: Math.round(captureFps * 10) / 10,
+        capture_ms: Math.round(captureEndedAt - captureStartedAt),
+      }));
       if (mode === 'sign') {
         if (!activeApiUrl) {
           setState('offline');
@@ -376,9 +429,12 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         }
         return;
       }
+      const localDetectionStartedAt = performanceNow();
       const local = await detectObjects(picture.uri);
+      const localDetectionMs = Math.round(performanceNow() - localDetectionStartedAt);
       if (runGeneration !== generation.current) return;
       setDetections(local.detections);
+      setPerformance((previous) => ({ ...previous, local_detection_ms: localDetectionMs }));
       const signature = local.detections
         .filter((item) => item.confidence >= 0.5)
         .map((item) => item.label)
@@ -396,10 +452,21 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       if (activeApiUrl && now - lastTrackingAnalysis.current >= 900 && !trackingInFlight.current) {
         trackingInFlight.current = true;
         const trackingController = new AbortController();
+        const trackingFrameStartedAt = performanceNow();
         void trackFrame(picture.uri, trackingController.signal)
           .then((tracking) => {
             if (runGeneration !== generation.current) return;
+            const trackingAgeMs = Math.round(performanceNow() - trackingFrameStartedAt);
             lastTrackingAnalysis.current = Date.now();
+            trackingFailures.current = 0;
+            setPerformance((previous) => ({
+              ...previous,
+              tracking_latency_ms: tracking.tracking_latency_ms,
+              tracking_age_ms: trackingAgeMs,
+              tracking_status: trackingAgeMs > 3000 ? 'slow' : 'live',
+            }));
+            // Do not let a delayed response overwrite newer camera detections.
+            if (trackingAgeMs > 3000 || Date.now() - capturedAt > 3000) return;
             setCameraCoach(tracking.camera_coach || null);
             setResult((previous) => {
               const base = previous || synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
@@ -407,8 +474,11 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
             });
           })
           .catch((error) => {
-            lastTrackingAnalysis.current = Date.now() + 10_000;
-            console.warn('Experimental server tracking unavailable (backing off 10s)', error);
+            trackingFailures.current += 1;
+            const backoffMs = Math.min(10_000, 1000 * (2 ** trackingFailures.current));
+            lastTrackingAnalysis.current = Date.now() + backoffMs - 900;
+            setPerformance((previous) => ({ ...previous, tracking_status: 'offline' }));
+            console.warn(`Experimental server tracking unavailable (retrying in ${Math.round(backoffMs / 1000)}s)`, error);
           })
           .finally(() => { trackingInFlight.current = false; });
       }
@@ -480,11 +550,14 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     lastCloudAnalysis.current = 0;
     lastTrackingAnalysis.current = 0;
     trackingInFlight.current = false;
+    trackingFailures.current = 0;
+    captureTimes.current = [];
     signFrames.current = [];
     signTranscript.current = '';
     failures.current = 0;
     setResult(null);
     setCameraCoach(null);
+    setPerformance({ capture_fps: 0, capture_ms: null, local_detection_ms: null, tracking_latency_ms: null, tracking_age_ms: null, tracking_status: 'waiting' });
     if (!enabled) {
       setState('paused');
       return stop;
@@ -494,5 +567,9 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     return stop;
   }, [enabled, mode, run, stop]);
 
-  return { result, state, lastUpdated, detections, cameraCoach, scanNow };
+  return { result, state, lastUpdated, detections, cameraCoach, performance, scanNow };
+}
+
+function performanceNow() {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }

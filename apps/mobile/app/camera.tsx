@@ -16,6 +16,7 @@ import {
 } from '../src/campusMemory';
 import { resolveOfflinePhrase } from '../src/offlinePhrasebook';
 import { AssistMode, getApiUrl, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
+import type { VisionObject } from '../src/vision';
 
 const emptySignContext: SignContextState = { frameCount: 0, maxFrames: 180, handCount: 0, ready: false };
 
@@ -73,7 +74,7 @@ export default function CameraScreen() {
   const isSignMode = mode === 'sign';
   const showVisionDebug = process.env.EXPO_PUBLIC_VISION_DEBUG === 'true';
   const usesBrowserHandTracking = isSignMode && Platform.OS === 'web';
-  const { result: vision, state: visionState, detections, cameraCoach, scanNow } = useVisionLoop(
+  const { result: vision, state: visionState, detections, cameraCoach, performance, scanNow } = useVisionLoop(
     cameraRef,
     mode,
     Boolean(permission?.granted) && !usesBrowserHandTracking,
@@ -100,6 +101,19 @@ export default function CameraScreen() {
       w: `${Math.round((item.width || 0) * 100)}%` as `${number}%`,
       h: `${Math.round((item.height || 0) * 100)}%` as `${number}%`,
       label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : item.relative_proximity != null ? ` · ${item.relative_proximity >= 0.67 ? 'nearer' : item.relative_proximity <= 0.33 ? 'farther' : 'mid-depth'}` : ` · ${Math.round(item.confidence * 100)}%`}${item.spatial?.extent_m ? ` · extent ${item.spatial.extent_m.map((value) => value.toFixed(2)).join('×')}m` : ''}${showVisionDebug ? ` · id ${item.track_id ?? '—'} · ${item.motion?.direction || item.position} · ${item.motion?.trend || 'unknown'} · ${Math.round((item.motion?.confidence ?? item.confidence) * 100)}%` : ''}`,
+    }));
+  const mapDetections: VisionObject[] = vision?.objects.length
+    ? vision.objects
+    : detections.map((item) => ({
+      label: item.label,
+      confidence: item.confidence,
+      position: item.direction || 'ahead',
+      x: item.x,
+      y: item.y,
+      width: item.width,
+      height: item.height,
+      distance_m: item.distance_m ?? null,
+      track_id: item.id ?? null,
     }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
@@ -494,7 +508,7 @@ export default function CameraScreen() {
         )}
 
         <View style={c.reticle}>
-          {!isSignMode && <LiveSceneMap detections={detections} />}
+          {!isSignMode && <LiveSceneMap detections={mapDetections} performance={performance} />}
           {usesBrowserHandTracking && isSignMode && (
             <View style={c.aslHudContainer}>
               {currentLetter ? (
