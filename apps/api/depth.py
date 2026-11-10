@@ -7,6 +7,7 @@ mounted/provisioned separately and is never downloaded by the application.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -14,6 +15,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+logger = logging.getLogger("guidelens.depth")
 
 
 class Box(Protocol):
@@ -42,6 +45,7 @@ class SurfaceDepthReading(DepthReading):
     track_id: int | None
     confidence: float
     spread_m: float
+    source: str = "box"
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,19 @@ class DepthAnythingMetric:
         self.max_depth = float(os.getenv("DEPTH_ANYTHING_MAX_DEPTH_M", "20"))
         self.input_size = int(os.getenv("DEPTH_ANYTHING_INPUT_SIZE", "518"))
         self._model = None
+        self._load_error: str | None = None
+
+    def status(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "ready": self.ready and self._load_error is None,
+            "mode": self.mode,
+            "metric": self.is_metric,
+            "weights_present": self.checkpoint.is_file(),
+            "code_present": self.repo_path.is_dir(),
+            "load_failed": self._load_error is not None,
+            "fallback": "box-interior",
+        }
 
     @property
     def is_metric(self) -> bool:
@@ -138,27 +155,43 @@ class DepthAnythingMetric:
     def _load(self):
         if self._model is not None:
             return self._model
-        if not self.ready:
+        if not self.ready or self._load_error:
             return None
-        import torch
+        try:
+            import torch
 
-        if str(self.repo_path) not in sys.path:
-            sys.path.insert(0, str(self.repo_path))
-        from depth_anything_v2.dpt import DepthAnythingV2
+            if str(self.repo_path) not in sys.path:
+                sys.path.insert(0, str(self.repo_path))
+            from depth_anything_v2.dpt import DepthAnythingV2
 
-        config = (
-            {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384], "max_depth": self.max_depth}
-            if self.is_metric
-            else {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]}
-        )
-        device = self.device if self.device != "cuda" or torch.cuda.is_available() else "cpu"
-        model = DepthAnythingV2(**config)
-        model.load_state_dict(torch.load(self.checkpoint, map_location="cpu", weights_only=True))
-        self._model = model.to(device).eval()
-        return self._model
+            config = (
+                {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384], "max_depth": self.max_depth}
+                if self.is_metric
+                else {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]}
+            )
+            device = self.device if self.device != "cuda" or torch.cuda.is_available() else "cpu"
+            model = DepthAnythingV2(**config)
+            try:
+                state = torch.load(self.checkpoint, map_location="cpu", weights_only=True)
+            except Exception:
+                state = torch.load(self.checkpoint, map_location="cpu", weights_only=False)
+            model.load_state_dict(state)
+            self._model = model.to(device).eval()
+            return self._model
+        except Exception as exc:
+            self._load_error = type(exc).__name__
+            logger.exception("depth_model_unavailable")
+            return None
 
     def infer(self, image_bytes: bytes):
         """Return an HxW metric-meter or unitless relative-depth map."""
+        try:
+            return self._infer_map(image_bytes)
+        except Exception:
+            logger.exception("depth_inference_failed")
+            return None
+
+    def _infer_map(self, image_bytes: bytes):
         model = self._load()
         if model is None:
             return None
@@ -210,7 +243,62 @@ def readings_for_boxes(depth_map, objects: list[Box]) -> list[DepthReading]:
     return readings
 
 
-def surface_readings_for_boxes(depth_map, objects: list[Box]) -> list[SurfaceDepthReading]:
+def reject_depth_outliers(values):
+    """Drop distant spikes without letting a few bad pixels set the distance."""
+    import numpy as np
+
+    finite = values[np.isfinite(values) & (values > 0)]
+    if finite.size < 12:
+        return finite
+    center = float(np.median(finite))
+    mad = float(np.median(np.abs(finite - center)))
+    limit = max(3 * 1.4826 * mad, center * 0.35, 0.2)
+    kept = finite[np.abs(finite - center) <= limit]
+    return kept if kept.size >= 9 else finite
+
+
+def _box_bounds(depth_map, item: Box, margin: float):
+    height, width = depth_map.shape[:2]
+    if None in (item.x, item.y, item.width, item.height):
+        return None
+    x, y, box_width, box_height = item.x, item.y, item.width, item.height
+    left = max(0, min(width - 1, int((x + box_width * margin) * width)))
+    right = max(left + 1, min(width, int((x + box_width * (1 - margin)) * width)))
+    top = max(0, min(height - 1, int((y + box_height * margin) * height)))
+    bottom = max(top + 1, min(height, int((y + box_height * (1 - margin)) * height)))
+    return top, bottom, left, right
+
+
+def _finite_values(depth_map, item: Box, mask):
+    """Sample the visible surface, then the box interior when the mask is unusable."""
+    import numpy as np
+
+    height, width = depth_map.shape[:2]
+    if mask is not None:
+        region = np.asarray(mask)
+        if region.shape[:2] != (height, width):
+            import cv2
+
+            region = cv2.resize(region.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST) > 0
+        else:
+            region = region.astype(bool)
+        bounds = _box_bounds(depth_map, item, 0.0)
+        if bounds is not None:
+            top, bottom, left, right = bounds
+            window = np.zeros(region.shape, dtype=bool)
+            window[top:bottom, left:right] = True
+            overlap = region & window
+            box_pixels = max(1, int(window.sum()))
+            if int(overlap.sum()) >= 9 and int(overlap.sum()) / box_pixels <= 0.92:
+                return reject_depth_outliers(depth_map[overlap]), "mask"
+    bounds = _box_bounds(depth_map, item, 0.25)
+    if bounds is None:
+        return np.empty(0, dtype=np.float32), "box"
+    top, bottom, left, right = bounds
+    return reject_depth_outliers(depth_map[top:bottom, left:right]), "box"
+
+
+def surface_readings_for_boxes(depth_map, objects: list[Box], masks: list | None = None) -> list[SurfaceDepthReading]:
     """Measure the object interior rather than a broad box/background mixture.
 
     The central 50% is deliberately conservative around detector boundaries.
@@ -221,19 +309,14 @@ def surface_readings_for_boxes(depth_map, objects: list[Box]) -> list[SurfaceDep
         return []
     import numpy as np
 
-    height, width = depth_map.shape[:2]
     readings: list[SurfaceDepthReading] = []
     now = time.monotonic()
-    for item in objects:
+    for index, item in enumerate(objects):
         if None in (item.x, item.y, item.width, item.height):
             continue
         x, y, box_width, box_height = item.x, item.y, item.width, item.height
-        left = max(0, min(width - 1, int((x + box_width * 0.25) * width)))
-        right = max(left + 1, min(width, int((x + box_width * 0.75) * width)))
-        top = max(0, min(height - 1, int((y + box_height * 0.25) * height)))
-        bottom = max(top + 1, min(height, int((y + box_height * 0.75) * height)))
-        values = depth_map[top:bottom, left:right]
-        values = values[np.isfinite(values)]
+        mask = masks[index] if masks and index < len(masks) else None
+        values, source = _finite_values(depth_map, item, mask)
         if values.size < 9:
             continue
         distance_m = float(np.median(values))
@@ -243,16 +326,17 @@ def surface_readings_for_boxes(depth_map, objects: list[Box]) -> list[SurfaceDep
         # The scale is intentionally strict: a depth discontinuity inside the
         # box reduces confidence instead of becoming an apparently precise range.
         spread = 1.4826 * mad
-        valid_fraction = min(1.0, values.size / max(9, (bottom - top) * (right - left)))
+        expected = int(np.asarray(mask).astype(bool).sum()) if mask is not None and source == "mask" else max(9, values.size)
+        valid_fraction = min(1.0, values.size / max(9, expected))
         confidence = float(np.clip(valid_fraction * (1.0 - spread / max(distance_m * 0.35, 0.25)), 0, 1))
         readings.append(SurfaceDepthReading(
             item.label, x, y, box_width, box_height, distance_m, now,
-            getattr(item, "track_id", None), confidence, spread,
+            getattr(item, "track_id", None), confidence, spread, source,
         ))
     return readings
 
 
-def relative_proximity_for_boxes(depth_map, objects: list[Box]) -> dict[tuple[str, float, float], float]:
+def relative_proximity_for_boxes(depth_map, objects: list[Box], masks: list | None = None) -> dict[tuple[str, float, float], float]:
     """Map each detected box to a normalized *within-frame* near-depth score.
 
     The output is in [0, 1] and is intentionally not converted to meters. It
@@ -268,18 +352,13 @@ def relative_proximity_for_boxes(depth_map, objects: list[Box]) -> dict[tuple[st
         return {}
     low, high = np.percentile(finite, [5, 95])
     scale = max(float(high - low), 1e-6)
-    height, width = depth_map.shape[:2]
     scores: dict[tuple[str, float, float], float] = {}
-    for item in objects:
+    for index, item in enumerate(objects):
         if None in (item.x, item.y, item.width, item.height):
             continue
         x, y, box_width, box_height = item.x, item.y, item.width, item.height
-        left = max(0, min(width - 1, int((x + box_width * 0.18) * width)))
-        right = max(left + 1, min(width, int((x + box_width * 0.82) * width)))
-        top = max(0, min(height - 1, int((y + box_height * 0.18) * height)))
-        bottom = max(top + 1, min(height, int((y + box_height * 0.82) * height)))
-        values = depth_map[top:bottom, left:right]
-        values = values[np.isfinite(values)]
+        mask = masks[index] if masks and index < len(masks) else None
+        values, _source = _finite_values(depth_map, item, mask)
         if values.size == 0:
             continue
         score = float(np.clip((float(np.median(values)) - low) / scale, 0, 1))

@@ -11,3 +11,6 @@ ultralytics>=8.3.0,<9
 lap>=0.5.12
 numpy>=1.26
 opencv-python-headless>=4.10
+# Optional. Point clouds use NumPy when Open3D is absent. Rerun is a viewer only.
+# open3d>=0.18
+# rerun-sdk>=0.20

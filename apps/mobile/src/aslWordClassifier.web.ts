@@ -59,7 +59,9 @@ function getSession() {
   if (!sessionPromise) {
     sessionPromise = getRuntime().then((ort) => {
       ort.env.wasm.wasmPaths = assetUrl('ort/');
-      ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+      ort.env.wasm.numThreads = globalThis.crossOriginIsolated
+        ? Math.min(4, navigator.hardwareConcurrency || 1)
+        : 1;
       return ort.InferenceSession.create(assetUrl('models/asl_word_transformer.onnx'), {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'all',

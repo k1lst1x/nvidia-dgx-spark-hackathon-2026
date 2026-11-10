@@ -38,7 +38,7 @@ export default function AssistantHub() {
   const [speechEnabled, setSpeechEnabled] = useState(true);
   const [speechRate, setSpeechRate] = useState<'0.9' | '1.0' | '1.2'>('1.0');
   const [sensitivity, setSensitivity] = useState<'high' | 'balanced' | 'strict'>('balanced');
-  const [apiUrl, setApiUrl] = useState('http://localhost:8000');
+  const [apiUrl, setApiUrl] = useState('http://localhost:8082');
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'online' | 'offline'>('idle');
   const [pingLatency, setPingLatency] = useState<number | null>(null);
 
@@ -763,7 +763,7 @@ export default function AssistantHub() {
                       saveSetting('api_url', val);
                       setPingStatus('idle');
                     }}
-                    placeholder="http://localhost:8000"
+                    placeholder="http://localhost:8082"
                     placeholderTextColor="#5C7A6E"
                     style={s.apiInput}
                     autoCapitalize="none"

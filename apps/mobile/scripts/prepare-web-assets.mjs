@@ -12,6 +12,7 @@ const ortDist = dirname(require.resolve('onnxruntime-web'));
 await mkdir(join(publicDir, 'models'), { recursive: true });
 await mkdir(join(publicDir, 'ort'), { recursive: true });
 await cp(join(mobile, 'assets', 'models', 'yolox_nano.onnx'), join(publicDir, 'models', 'yolox_nano.onnx'));
+await cp(join(mobile, 'assets', 'models', 'yolo11n.onnx'), join(publicDir, 'models', 'yolo11n.onnx'));
 await cp(join(mobile, 'assets', 'models', 'asl_fingerspelling_landmarks.json'), join(publicDir, 'models', 'asl_fingerspelling_landmarks.json'));
 await cp(join(mobile, 'assets', 'models', 'asl_word_transformer.onnx'), join(publicDir, 'models', 'asl_word_transformer.onnx'));
 await cp(join(mobile, 'assets', 'models', 'asl_word_labels.json'), join(publicDir, 'models', 'asl_word_labels.json'));

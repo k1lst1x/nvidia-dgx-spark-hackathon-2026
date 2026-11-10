@@ -30,6 +30,15 @@ export type VisionObject = {
     world_speed_mps?: number | null;
     experimental: true;
   } | null;
+  spatial?: {
+    estimate?: boolean;
+    depth_source?: string;
+    mask_coverage?: number;
+    center_m?: number[];
+    extent_m?: number[];
+    point_count?: number;
+    calibrated_camera?: boolean;
+  } | null;
 };
 
 export type ApproachingWarning = { label: string; distance_m: number };
@@ -86,7 +95,7 @@ export function getApiUrl(): string {
   const configured = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
   if (configured) return configured;
   if (typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)) {
-    return 'http://localhost:8000';
+    return 'http://localhost:8082';
   }
   return '';
 }
@@ -94,7 +103,7 @@ export function getApiUrl(): string {
 const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 const API_URL = configuredApiUrl || (
   typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname)
-    ? 'http://localhost:8000'
+    ? 'http://localhost:8082'
     : ''
 );
 export const hasVisionBackend = Boolean(API_URL);
@@ -321,7 +330,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     let nextDelay = mode === 'sign' ? 700 : LOCAL_SCAN_INTERVAL_MS;
     const activeApiUrl = getApiUrl();
     try {
-      const picture = await camera.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
+      const picture = await camera.current.takePictureAsync({ quality: 0.7, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
       if (mode === 'sign') {
         if (!activeApiUrl) {

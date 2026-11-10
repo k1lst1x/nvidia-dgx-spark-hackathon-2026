@@ -36,3 +36,5 @@ ios/
 
 # Model weights are downloaded at runtime, never committed
 *.pt
+*.pth
+apps/api/third_party/

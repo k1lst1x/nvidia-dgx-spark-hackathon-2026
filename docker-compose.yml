@@ -1,7 +1,7 @@
 services:
   api:
     build: ./apps/api
-    ports: ["8000:8000"]
+    ports: ["8082:8000"]
     environment:
       VISION_API_URL: "${VISION_API_URL:-https://api.groq.com/openai/v1/chat/completions}"
       VISION_MODEL: "${VISION_MODEL:-}"
@@ -22,6 +22,15 @@ services:
       ULTRALYTICS_YOLO_ENABLED: "${ULTRALYTICS_YOLO_ENABLED:-false}"
       ULTRALYTICS_YOLO_MODEL: "${ULTRALYTICS_YOLO_MODEL:-yolo11n.pt}"
       ULTRALYTICS_YOLO_DEVICE: "${ULTRALYTICS_YOLO_DEVICE:-cpu}"
+      # Optional masks beside BoT-SORT. Off by default; a failure returns boxes only.
+      ULTRALYTICS_YOLO_SEG_ENABLED: "${ULTRALYTICS_YOLO_SEG_ENABLED:-false}"
+      ULTRALYTICS_YOLO_SEG_MODEL: "${ULTRALYTICS_YOLO_SEG_MODEL:-yolo11n-seg.pt}"
+      POINT_CLOUD_ENABLED: "${POINT_CLOUD_ENABLED:-false}"
+      POINT_CLOUD_INTERVAL_S: "${POINT_CLOUD_INTERVAL_S:-0.5}"
+      ORB_SLAM3_ENABLED: "${ORB_SLAM3_ENABLED:-false}"
+      ORB_SLAM3_ENDPOINT: "${ORB_SLAM3_ENDPOINT:-http://127.0.0.1:8099/pose}"
+      RERUN_ENABLED: "${RERUN_ENABLED:-false}"
+      RERUN_SPAWN: "${RERUN_SPAWN:-false}"
       # BoT-SORT with sparse optical-flow CMC keeps IDs more stable when the
       # glasses camera moves. This is not metric camera-pose estimation.
       YOLO_TRACKER_CONFIG: "${YOLO_TRACKER_CONFIG:-/app/botsort.yaml}"

@@ -287,9 +287,9 @@ function letterbox(image: ReturnType<typeof decode>) {
         continue;
       }
       const rgba = (sourceY * image.width + sourceX) * 4;
-      input[pixel] = image.data[rgba + 2];
+      input[pixel] = image.data[rgba];
       input[plane + pixel] = image.data[rgba + 1];
-      input[plane * 2 + pixel] = image.data[rgba];
+      input[plane * 2 + pixel] = image.data[rgba + 2];
     }
   }
   return { input, scale, padX, padY };

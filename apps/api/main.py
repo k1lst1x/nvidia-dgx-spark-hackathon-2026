@@ -25,6 +25,10 @@ from depth import (
     surface_readings_for_boxes,
 )
 from motion import MotionHistory
+from point_cloud import cloud_for_surface, open3d_status
+from segmentation import YoloSegmenter
+from slam import OrbSlamClient
+from visualization import RerunView
 from schemas import (
     BridgeMessage,
     BridgeMessageRequest,
@@ -82,6 +86,8 @@ MIN_REQUEST_INTERVAL = float(os.getenv("MIN_REQUEST_INTERVAL", "1.5"))
 TRACK_MIN_REQUEST_INTERVAL = float(os.getenv("TRACK_MIN_REQUEST_INTERVAL", "0.7"))
 SIGN_MIN_CONFIDENCE = float(os.getenv("SIGN_MIN_CONFIDENCE", "0.45"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
+POINT_CLOUD_ENABLED = os.getenv("POINT_CLOUD_ENABLED", "false").lower() in {"1", "true", "yes"}
+POINT_CLOUD_INTERVAL_S = float(os.getenv("POINT_CLOUD_INTERVAL_S", "0.5"))
 YOLO_MODEL = os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
 YOLO_DEVICE = os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu")
 YOLO_CONFIDENCE = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
@@ -111,6 +117,11 @@ _slots = asyncio.Semaphore(MAX_CONCURRENCY)
 _requests: dict[str, deque[float]] = defaultdict(deque)
 _track_requests: dict[str, deque[float]] = defaultdict(deque)
 _depth_model = DepthAnythingMetric()
+_segmenter = YoloSegmenter()
+_slam = OrbSlamClient()
+_rerun = RerunView()
+_cloud_at = 0.0
+_cloud_cache: dict[tuple, dict[str, object]] = {}
 _unisign_backend = UniSignBackend()
 _yolo_sign_detector = YoloSignDetector()
 _motion_history = MotionHistory()
@@ -227,6 +238,69 @@ def _local_scene_result(objects: list[DetectedObject]) -> VisionResult:
     )
 
 
+def _with_mask_stats(objects: list[DetectedObject], masks: list) -> list[DetectedObject]:
+    updated = []
+    for item, mask in zip(objects, masks):
+        if mask is None:
+            updated.append(item)
+            continue
+        coverage = float(mask.mean()) if getattr(mask, "size", 0) else 0.0
+        spatial = dict(item.spatial or {})
+        spatial.update({"mask_coverage": round(coverage, 4), "estimate": True})
+        updated.append(item.model_copy(update={"spatial": spatial}))
+    return updated
+
+
+def _object_key(item: DetectedObject) -> tuple:
+    return (item.track_id, item.label, round(item.x or 0, 3), round(item.y or 0, 3))
+
+
+def _with_point_clouds(objects: list[DetectedObject], depth_map, masks: list) -> list[DetectedObject]:
+    global _cloud_at
+    if depth_map is None:
+        return objects
+    now = time.monotonic()
+    if now - _cloud_at < POINT_CLOUD_INTERVAL_S and _cloud_cache:
+        updated = []
+        for item in objects:
+            cached = _cloud_cache.get(_object_key(item))
+            if cached is None:
+                updated.append(item)
+                continue
+            spatial = dict(item.spatial or {})
+            spatial.update(cached)
+            updated.append(item.model_copy(update={"spatial": spatial}))
+        return updated
+    height, width = depth_map.shape[:2]
+    updated = []
+    fresh: dict[tuple, dict[str, object]] = {}
+    for index, item in enumerate(objects):
+        segmented = bool(masks and index < len(masks) and masks[index] is not None)
+        mask = masks[index] if segmented else None
+        if mask is None and None not in (item.x, item.y, item.width, item.height):
+            import numpy as np
+
+            mask = np.zeros(depth_map.shape[:2], dtype=bool)
+            left = max(0, int((item.x or 0) * width))
+            right = min(width, int(((item.x or 0) + (item.width or 0)) * width))
+            top = max(0, int((item.y or 0) * height))
+            bottom = min(height, int(((item.y or 0) + (item.height or 0)) * height))
+            mask[top:bottom, left:right] = True
+        summary = cloud_for_surface(depth_map, mask, width, height)
+        if summary is None:
+            updated.append(item)
+            continue
+        summary["depth_source"] = "mask" if segmented else "box"
+        fresh[_object_key(item)] = summary
+        spatial = dict(item.spatial or {})
+        spatial.update(summary)
+        updated.append(item.model_copy(update={"spatial": spatial}))
+    _cloud_cache.clear()
+    _cloud_cache.update(fresh)
+    _cloud_at = now
+    return updated
+
+
 def _add_depth_and_motion(
     objects: list[DetectedObject], image_bytes: bytes, session_id: str
 ) -> list[DetectedObject]:
@@ -234,25 +308,68 @@ def _add_depth_and_motion(
 
     Relative-depth checkpoints can only expose within-frame ordering, so they
     intentionally never produce distance, velocity, TTC, or warnings.
+    Segmentation and point clouds are optional and never replace the tracker.
     """
-    if not objects or not _depth_model.ready:
+    if not objects:
+        return objects
+    try:
+        masks = _segmenter.masks_for(image_bytes, objects)
+    except Exception:
+        logger.exception("segmentation_skipped")
+        masks = [None] * len(objects)
+    objects = _with_mask_stats(objects, masks)
+    pose_snapshot = _slam.latest(session_id, image_bytes)
+    if not _depth_model.ready:
+        _rerun.log(objects)
         return objects
     depth_map = _depth_model.infer(image_bytes)
+    if depth_map is None:
+        _rerun.log(objects)
+        return objects
     if _depth_model.is_metric:
-        surface_readings = surface_readings_for_boxes(depth_map, objects)
-        by_track = {
-            reading.track_id: (reading.depth_m, reading.confidence, reading.spread_m)
-            for reading in surface_readings if reading.track_id is not None
+        surface_readings = surface_readings_for_boxes(depth_map, objects, masks)
+        by_track_reading = {
+            reading.track_id: reading for reading in surface_readings if reading.track_id is not None
         }
-        estimates = _motion_history.update(session_id, objects, by_track)
-        return [
-            item.model_copy(update={
-                "distance_m": by_track.get(item.track_id, (None, 0, 0))[0],
+        by_track = {
+            track_id: (reading.depth_m, reading.confidence, reading.spread_m)
+            for track_id, reading in by_track_reading.items()
+        }
+        by_box = {
+            (reading.label, round(reading.x, 3), round(reading.y, 3)): reading
+            for reading in surface_readings
+        }
+        pose = None
+        if pose_snapshot and pose_snapshot.get("metric_scale"):
+            pose = _slam.pose_for_motion(depth_map.shape[1], depth_map.shape[0], pose_snapshot)
+        estimates = _motion_history.update(session_id, objects, by_track, pose=pose)
+        updated = []
+        for item in objects:
+            reading = by_track_reading.get(item.track_id) if item.track_id is not None else None
+            if reading is None:
+                reading = by_box.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3)))
+            spatial = dict(item.spatial or {})
+            if reading is not None:
+                spatial.update({
+                    "depth_source": reading.source,
+                    "depth_confidence": round(reading.confidence, 3),
+                    "estimate": True,
+                })
+            updated.append(item.model_copy(update={
+                "distance_m": reading.depth_m if reading else None,
                 "motion": estimates[item.track_id].as_dict() if item.track_id in estimates else None,
-            })
-            for item in objects
-        ]
-    proximity = relative_proximity_for_boxes(depth_map, objects)
+                "spatial": spatial or None,
+            }))
+        objects = updated
+        if POINT_CLOUD_ENABLED:
+            try:
+                objects = _with_point_clouds(objects, depth_map, masks)
+            except Exception:
+                logger.exception("point_cloud_skipped")
+        _rerun.log(objects)
+        return objects
+    proximity = relative_proximity_for_boxes(depth_map, objects, masks)
+    _rerun.log(objects)
     return [
         item.model_copy(update={
             "relative_proximity": proximity.get((item.label, round(item.x or 0, 3), round(item.y or 0, 3))),
@@ -445,13 +562,17 @@ def health():
             "model": YOLO_MODEL if YOLO_ENABLED else None,
             "tracker": "botsort",
             "camera_motion_compensation": "sparseOptFlow",
+            "segmentation_enabled": _segmenter.enabled,
+            "segmentation_model": _segmenter.model_path if _segmenter.enabled else None,
+            "segmentation_last_ms": _segmenter.last_ms,
         },
         "depth": {
-            "enabled": _depth_model.enabled,
-            "ready": _depth_model.ready,
-            "mode": _depth_model.mode,
-            "metric": _depth_model.is_metric,
+            **_depth_model.status(),
+            "point_cloud_enabled": POINT_CLOUD_ENABLED,
+            "open3d": open3d_status()["installed"],
         },
+        "slam": _slam.status(),
+        "rerun": _rerun.status(),
         # Asset readiness only; this endpoint must not allocate the 1.19 GB
         # Uni-Sign checkpoint or mT5 decoder just to answer a health probe.
         "unisign": _unisign_backend.status(),
@@ -503,6 +624,9 @@ async def track_scene(request: Request, image: UploadFile = File(...)):
         metric_depth=_depth_model.ready and _depth_model.is_metric,
         camera_coach=camera_coach,
         collision_warnings_enabled=False,
+        segmentation=_segmenter.enabled,
+        point_cloud=POINT_CLOUD_ENABLED and _depth_model.ready and _depth_model.is_metric,
+        camera_pose=_slam.snapshot_for(client_id),
     )
 
 

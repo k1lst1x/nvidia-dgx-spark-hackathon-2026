@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
+import LiveSceneMap from '../components/LiveSceneMap';
 import {
   checkWhatChanged,
   getCampusAlerts,
@@ -98,7 +99,7 @@ export default function CameraScreen() {
       t: `${Math.round((item.y || 0) * 100)}%` as `${number}%`,
       w: `${Math.round((item.width || 0) * 100)}%` as `${number}%`,
       h: `${Math.round((item.height || 0) * 100)}%` as `${number}%`,
-      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : item.relative_proximity != null ? ` · ${item.relative_proximity >= 0.67 ? 'nearer' : item.relative_proximity <= 0.33 ? 'farther' : 'mid-depth'}` : ` · ${Math.round(item.confidence * 100)}%`}${showVisionDebug ? ` · id ${item.track_id ?? '—'} · ${item.motion?.direction || item.position} · ${item.motion?.trend || 'unknown'} · ${Math.round((item.motion?.confidence ?? item.confidence) * 100)}%` : ''}`,
+      label: `${item.label}${item.distance_m ? ` · ~${item.distance_m.toFixed(1)}m` : item.relative_proximity != null ? ` · ${item.relative_proximity >= 0.67 ? 'nearer' : item.relative_proximity <= 0.33 ? 'farther' : 'mid-depth'}` : ` · ${Math.round(item.confidence * 100)}%`}${item.spatial?.extent_m ? ` · extent ${item.spatial.extent_m.map((value) => value.toFixed(2)).join('×')}m` : ''}${showVisionDebug ? ` · id ${item.track_id ?? '—'} · ${item.motion?.direction || item.position} · ${item.motion?.trend || 'unknown'} · ${Math.round((item.motion?.confidence ?? item.confidence) * 100)}%` : ''}`,
     }));
   const current: AssistFrame = vision || detections.length ? {
     title: vision?.summary || localSummary,
@@ -493,6 +494,7 @@ export default function CameraScreen() {
         )}
 
         <View style={c.reticle}>
+          {!isSignMode && <LiveSceneMap detections={detections} />}
           {usesBrowserHandTracking && isSignMode && (
             <View style={c.aslHudContainer}>
               {currentLetter ? (

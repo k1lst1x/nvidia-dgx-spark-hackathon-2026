@@ -17,6 +17,7 @@ class DetectedObject(BaseModel):
     relative_proximity: float | None = Field(default=None, ge=0, le=1)
     track_id: int | None = Field(default=None, ge=1)
     motion: dict[str, object] | None = None
+    spatial: dict[str, object] | None = None
 
 
 class ApproachingWarning(BaseModel):
@@ -52,6 +53,9 @@ class TrackingResult(BaseModel):
     camera_coach: CameraCoach | None = None
     experimental: bool = True
     collision_warnings_enabled: bool = False
+    segmentation: bool = False
+    point_cloud: bool = False
+    camera_pose: dict[str, object] | None = None
 
 
 class SignSequenceRequest(BaseModel):
