@@ -690,7 +690,8 @@ const c = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#07110F' },
   fallback: { flex: 1, backgroundColor: '#07110F' },
   shade: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(2,10,8,.18)' },
-  overlay: { flex: 1, paddingHorizontal: 18 },
+  // Above boxesLayer (zIndex 1) so detection boxes never cover the map or buttons.
+  overlay: { flex: 1, paddingHorizontal: 18, zIndex: 2 },
   top: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   round: { width: 46, height: 46, borderRadius: 23, backgroundColor: 'rgba(4,13,10,.62)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,.16)' },
   modeIndicator: { backgroundColor: 'rgba(4,13,10,.76)', borderRadius: 99, paddingHorizontal: 13, paddingVertical: 9, flexDirection: 'row', alignItems: 'center', gap: 7 },
