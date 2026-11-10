@@ -128,7 +128,13 @@ class DepthAnythingMetric:
         self.checkpoint = Path(os.getenv("DEPTH_ANYTHING_CHECKPOINT", default_checkpoint))
         self.device = os.getenv("DEPTH_ANYTHING_DEVICE", "cuda")
         self.max_depth = float(os.getenv("DEPTH_ANYTHING_MAX_DEPTH_M", "20"))
-        self.input_size = int(os.getenv("DEPTH_ANYTHING_INPUT_SIZE", "518"))
+        # "auto": the model's native 518 on a GPU; 364 on CPU, where 518 takes
+        # seconds per frame and the app drops replies older than 3 s.
+        # ViT patches are 14 px, so sizes should be multiples of 14.
+        self._input_size_setting = os.getenv("DEPTH_ANYTHING_INPUT_SIZE", "auto")
+        self.input_size = 518
+        self.last_ms: int | None = None
+        self._device_used: str | None = None
         self._model = None
         self._load_error: str | None = None
 
@@ -142,6 +148,9 @@ class DepthAnythingMetric:
             "code_present": self.repo_path.is_dir(),
             "load_failed": self._load_error is not None,
             "fallback": "box-interior",
+            "device": self._device_used,
+            "input_size": self.input_size if self._device_used else None,
+            "last_ms": self.last_ms,
         }
 
     @property
@@ -169,7 +178,15 @@ class DepthAnythingMetric:
                 if self.is_metric
                 else {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]}
             )
-            device = self.device if self.device != "cuda" or torch.cuda.is_available() else "cpu"
+            wants_gpu = self.device in {"auto", "cuda"} or self.device.startswith("cuda:")
+            device = ("cuda" if self.device == "auto" else self.device) if wants_gpu and torch.cuda.is_available() else (
+                "cpu" if wants_gpu else self.device
+            )
+            self._device_used = device
+            if self._input_size_setting == "auto":
+                self.input_size = 518 if device.startswith("cuda") else 364
+            else:
+                self.input_size = int(self._input_size_setting)
             model = DepthAnythingV2(**config)
             try:
                 state = torch.load(self.checkpoint, map_location="cpu", weights_only=True)
@@ -208,14 +225,17 @@ class DepthAnythingMetric:
         import torch
         import torch.nn.functional as functional
 
+        started = time.perf_counter()
         tensor, (height, width) = model.image2tensor(image, self.input_size)
         device = next(model.parameters()).device
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device.type == "cuda"):
             prediction = model(tensor.to(device))
         prediction = functional.interpolate(
-            prediction[:, None], (height, width), mode="bilinear", align_corners=True
+            prediction.float()[:, None], (height, width), mode="bilinear", align_corners=True
         )[0, 0]
-        return prediction.detach().cpu().numpy()
+        result = prediction.detach().cpu().numpy()
+        self.last_ms = int((time.perf_counter() - started) * 1000)
+        return result
 
 
 def readings_for_boxes(depth_map, objects: list[Box]) -> list[DepthReading]:

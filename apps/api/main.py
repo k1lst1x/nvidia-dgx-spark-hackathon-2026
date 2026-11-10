@@ -4,6 +4,7 @@ import binascii
 import json
 import logging
 import os
+import threading
 import random
 import time
 import uuid
@@ -52,7 +53,7 @@ from schemas import (
 )
 from unisign_backend import UniSignBackend, UniSignBackendError
 from yolo_sign import YoloSignDetector
-from yolo_tracker import YoloTracker
+from yolo_tracker import YoloTracker, resolve_device
 
 VISION_API_URL = os.getenv("VISION_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 MODEL = os.getenv("VISION_MODEL") or os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
@@ -90,8 +91,11 @@ SIGN_MIN_CONFIDENCE = float(os.getenv("SIGN_MIN_CONFIDENCE", "0.45"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_ENABLED = os.getenv("POINT_CLOUD_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_INTERVAL_S = float(os.getenv("POINT_CLOUD_INTERVAL_S", "0.5"))
-YOLO_MODEL = os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
-YOLO_DEVICE = os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu")
+YOLO_DEVICE = resolve_device(os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu"))
+# A larger model is cheap on a GPU and much slower on CPU, so CPU can use its own.
+YOLO_MODEL = (
+    os.getenv("ULTRALYTICS_YOLO_CPU_MODEL") if YOLO_DEVICE == "cpu" and os.getenv("ULTRALYTICS_YOLO_CPU_MODEL") else None
+) or os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
 YOLO_CONFIDENCE = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
 # One Ultralytics model instance is shared by the API process. Keep the BoT-SORT
 # state scoped to one active camera feed so object IDs never bleed between users.
@@ -307,7 +311,7 @@ _INFER_DEPTH = object()
 
 
 def _add_depth_and_motion(
-    objects: list[DetectedObject], image_bytes: bytes, session_id: str, depth_map=_INFER_DEPTH,
+    objects: list[DetectedObject], image_bytes: bytes, session_id: str, depth_map=_INFER_DEPTH, masks: list | None = None,
 ) -> list[DetectedObject]:
     """Attach conservative depth/motion debug data without calling Groq.
 
@@ -317,11 +321,12 @@ def _add_depth_and_motion(
     """
     if not objects:
         return objects
-    try:
-        masks = _segmenter.masks_for(image_bytes, objects)
-    except Exception:
-        logger.exception("segmentation_skipped")
-        masks = [None] * len(objects)
+    if masks is None or len(masks) != len(objects):
+        try:
+            masks = _segmenter.masks_for(image_bytes, objects)
+        except Exception:
+            logger.exception("segmentation_skipped")
+            masks = [None] * len(objects)
     objects = _with_mask_stats(objects, masks)
     pose_snapshot = _slam.latest(session_id, image_bytes)
     if not _depth_model.ready:
@@ -555,6 +560,34 @@ async def _call_groq_sign(
     raise HTTPException(502, "Vision provider request failed")
 
 
+def _warm_up_models() -> None:
+    """Load detector and depth weights before the first camera frame arrives.
+
+    A cold first frame takes over ten seconds on a GPU, and the app discards
+    tracking replies older than three seconds.
+    """
+    try:
+        import cv2
+        import numpy as np
+
+        ok, encoded = cv2.imencode(".jpg", np.full((480, 640, 3), 127, dtype=np.uint8))
+        if not ok:
+            return
+        frame = encoded.tobytes()
+        if YOLO_ENABLED:
+            _yolo_tracker.detect_with_masks(frame, "__warmup__")
+        if _depth_model.ready:
+            _depth_model.infer(frame)
+    except Exception:
+        logger.exception("model_warmup_failed")
+
+
+@app.on_event("startup")
+async def _start_warm_up() -> None:
+    if os.getenv("MODEL_WARMUP", "true").lower() in {"1", "true", "yes"}:
+        threading.Thread(target=_warm_up_models, name="model-warmup", daemon=True).start()
+
+
 @app.get("/health")
 @app.get("/healthz")
 def health():
@@ -571,6 +604,7 @@ def health():
             "segmentation_enabled": _segmenter.enabled,
             "segmentation_model": _segmenter.model_path if _segmenter.enabled else None,
             "segmentation_last_ms": _segmenter.last_ms,
+            **_yolo_tracker.status(),
         },
         "depth": {
             **_depth_model.status(),
@@ -614,7 +648,7 @@ def _obstacle_points_active() -> bool:
 
 
 def _track_geometry(
-    objects: list[DetectedObject], image_bytes: bytes, session_id: str
+    objects: list[DetectedObject], image_bytes: bytes, session_id: str, masks: list | None = None,
 ) -> tuple[list[DetectedObject], list[list[float]]]:
     """Run depth once per tracking frame for both object distances and obstacle dots.
 
@@ -622,9 +656,9 @@ def _track_geometry(
     so they are produced even when no object was detected.
     """
     if not _obstacle_points_active():
-        return _add_depth_and_motion(objects, image_bytes, session_id), []
+        return _add_depth_and_motion(objects, image_bytes, session_id, masks=masks), []
     depth_map = _depth_model.infer(image_bytes)
-    objects = _add_depth_and_motion(objects, image_bytes, session_id, depth_map=depth_map)
+    objects = _add_depth_and_motion(objects, image_bytes, session_id, depth_map=depth_map, masks=masks)
     try:
         # The response schema allows at most 512, whatever OBSTACLE_MAX_POINTS says.
         obstacles = obstacle_points(depth_map, objects)[:512]
@@ -642,8 +676,8 @@ async def track_scene(request: Request, image: UploadFile = File(...)):
     body = await _read_tracking_image(image)
     started = time.monotonic()
     async with _slots:
-        objects = await asyncio.to_thread(_yolo_tracker.detect, body, client_id)
-        objects, obstacles = await asyncio.to_thread(_track_geometry, objects, body, client_id)
+        objects, masks = await asyncio.to_thread(_yolo_tracker.detect_with_masks, body, client_id)
+        objects, obstacles = await asyncio.to_thread(_track_geometry, objects, body, client_id, masks)
         try:
             camera_coach = await asyncio.to_thread(assess_frame, body, objects)
         except ValueError as error:
@@ -683,12 +717,14 @@ async def describe(
         raise HTTPException(503, "Vision service is not configured")
     started = time.monotonic()
     async with _slots:
-        verified_objects = (
-            await asyncio.to_thread(_yolo_tracker.detect, body, client_id)
-            if task == "scene" else []
+        verified_objects, verified_masks = (
+            await asyncio.to_thread(_yolo_tracker.detect_with_masks, body, client_id)
+            if task == "scene" else ([], None)
         )
         if verified_objects and _depth_model.ready:
-            verified_objects = await asyncio.to_thread(_add_depth_and_motion, verified_objects, body, client_id)
+            verified_objects = await asyncio.to_thread(
+                _add_depth_and_motion, verified_objects, body, client_id, _INFER_DEPTH, verified_masks,
+            )
         try:
             result = await _call_groq(
                 [(body, image.content_type)], previous_scene_key[:80], task, verified_objects,

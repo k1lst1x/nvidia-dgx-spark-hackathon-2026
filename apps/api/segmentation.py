@@ -33,7 +33,9 @@ class YoloSegmenter:
     def __init__(self) -> None:
         self.enabled = os.getenv("ULTRALYTICS_YOLO_SEG_ENABLED", "false").lower() in {"1", "true", "yes"}
         self.model_path = os.getenv("ULTRALYTICS_YOLO_SEG_MODEL", "yolo11n-seg.pt")
-        self.device = os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu")
+        from yolo_tracker import resolve_device
+
+        self.device = resolve_device(os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu"))
         self.confidence = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
         self.last_ms: int | None = None
         self._lock = threading.Lock()
@@ -66,6 +68,10 @@ class YoloSegmenter:
             with self._lock:
                 result = self._model().predict(
                     source=image, conf=self.confidence, imgsz=640, device=self.device, verbose=False, max_det=12,
+                    half=self.device.startswith("cuda"),
+                    # Masks at the original frame size. Resizing the letterboxed
+                    # inference mask would include the padding and shift it.
+                    retina_masks=True,
                 )[0]
             if result.masks is None or result.boxes is None:
                 return empty

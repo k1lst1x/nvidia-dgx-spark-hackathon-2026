@@ -28,6 +28,11 @@ class OrbSlamClient:
         self._lock = threading.Lock()
         self._snapshots: dict[str, dict[str, object]] = {}
         self._warned = False
+        # The pose process is slower than detection. Frames go to it from one
+        # background worker, newest first; a request never waits for a pose.
+        self._pending: tuple[str, bytes] | None = None
+        self._wake = threading.Event()
+        self._worker: threading.Thread | None = None
 
     def status(self) -> dict[str, object]:
         return {
@@ -38,14 +43,37 @@ class OrbSlamClient:
         }
 
     def latest(self, session_id: str, image_bytes: bytes | None = None) -> dict[str, object] | None:
+        """The newest pose for this session (from an earlier frame); queues this frame."""
         if not self.enabled:
             return None
         if image_bytes:
-            self._push_frame(image_bytes)
-        snapshot = self._fetch()
+            with self._lock:
+                # Only the newest frame matters; an unsent older one is dropped.
+                self._pending = (session_id, image_bytes)
+                if self._worker is None or not self._worker.is_alive():
+                    self._worker = threading.Thread(target=self._run, name="orb-pose", daemon=True)
+                    self._worker.start()
+            self._wake.set()
         with self._lock:
-            self._snapshots[session_id] = snapshot
-        return snapshot
+            return self._snapshots.get(session_id) or self._unavailable()
+
+    def _run(self) -> None:
+        while True:
+            if not self._wake.wait(timeout=30):
+                with self._lock:
+                    if self._pending is None:
+                        self._worker = None
+                        return
+            self._wake.clear()
+            with self._lock:
+                pending, self._pending = self._pending, None
+            if pending is None:
+                continue
+            session_id, image_bytes = pending
+            self._push_frame(image_bytes)
+            snapshot = self._fetch()
+            with self._lock:
+                self._snapshots[session_id] = snapshot
 
     def snapshot_for(self, session_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -76,14 +104,18 @@ class OrbSlamClient:
             confidence=float(snapshot.get("confidence") or 0),
         )
 
-    def _fetch(self) -> dict[str, object]:
-        unavailable = {
+    @staticmethod
+    def _unavailable() -> dict[str, object]:
+        return {
             "available": False,
             "tracking": "unavailable",
             "metric_scale": False,
             "source": "orb-slam3",
             "estimate": True,
         }
+
+    def _fetch(self) -> dict[str, object]:
+        unavailable = self._unavailable()
         try:
             import httpx
 
