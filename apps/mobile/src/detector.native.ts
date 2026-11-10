@@ -1,5 +1,6 @@
 import { Asset } from 'expo-asset';
 import { decode } from 'jpeg-js';
+import { analyzeBlockedView } from './blockedView';
 import { InferenceSession, Tensor } from 'onnxruntime-react-native';
 import type { DetectionResult, LocalDetection } from './detector.types';
 
@@ -333,7 +334,8 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
     }
     const focused = focusOnObjects(detections);
     const tracked = tracker.update(focused);
-    return { available: true, detections: tracked };
+    const blocked = analyzeBlockedView(image.data, image.width, { x: 0, y: 0, width: image.width, height: image.height }, tracked);
+    return { available: true, detections: tracked, blocked };
   } catch {
     return { available: false, detections: [] };
   }

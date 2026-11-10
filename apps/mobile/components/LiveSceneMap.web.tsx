@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import * as THREE from 'three';
-import type { ObstacleFrame, VisionObject, VisionPerformance } from '../src/vision';
+import type { BlockedFrame, ObstacleFrame, VisionObject, VisionPerformance } from '../src/vision';
 
 type MapDetection = Pick<VisionObject, 'label' | 'confidence' | 'x' | 'y' | 'width' | 'height' | 'distance_m' | 'track_id' | 'spatial'>;
-type Props = { detections: MapDetection[]; obstacles?: ObstacleFrame | null; performance: VisionPerformance };
+type Props = { detections: MapDetection[]; obstacles?: ObstacleFrame | null; blocked?: BlockedFrame | null; performance: VisionPerformance };
 type Anchor = {
   label: string;
   x: number; y: number; z: number;
@@ -32,6 +32,7 @@ type MapStats = {
   nearest: Sighting | null;
   others: Sighting[];
   inView: string[];
+  blockedView: { direction: string; bearing: number; covered: boolean; dark: boolean } | null;
 };
 type ViewMode = 'top' | 'orbit';
 type PanelSize = 'mini' | 'small' | 'large';
@@ -59,6 +60,16 @@ const OBSTACLE_RANGE_M = 4.5;
 const OBSTACLE_MEMORY_MS = 8000;
 const OBSTACLE_VOXEL_M = 0.15;
 const MAX_OBSTACLE_DOTS = 1200;
+// Blocked view: directions where the camera frame is featureless or dark and
+// no object was named (src/blockedView.ts), such as a plain wall, a trunk or a
+// covered lens. The distance is unknown, so these dots line the direction
+// instead of sitting at a measured spot, and a measured surface replaces them.
+const BLOCKED_MEMORY_MS = 4000;
+const BLOCKED_FRESH_MS = 1500;
+const BLOCKED_RADII_M = [0.6, 0.9, 1.2, 1.5, 1.8];
+const BLOCKED_HEIGHTS_M = [0.45, 0.95, 1.45];
+const MAX_BLOCKED_COLUMNS = 16;
+const BLOCKED_COLOR = new THREE.Color(0xe0b45c);
 // Only what was measured this recently counts for the "Nearest" readout.
 const NEAREST_WINDOW_MS = 2500;
 const DANGER_M = 1.5;
@@ -212,11 +223,12 @@ const LABEL_BASE_STYLE = [
   'font-family:system-ui,-apple-system,Segoe UI,sans-serif', 'transition:opacity 120ms linear',
 ].join(';');
 
-export default function LiveSceneMap({ detections, obstacles = null, performance }: Props) {
+export default function LiveSceneMap({ detections, obstacles = null, blocked = null, performance }: Props) {
   const window_ = useWindowDimensions();
   const host = useRef<HTMLElement | null>(null);
   const detectionsRef = useRef(detections);
   const obstaclesRef = useRef(obstacles);
+  const blockedRef = useRef(blocked);
   const resetRef = useRef<() => void>(() => {});
   const resetViewRef = useRef<() => void>(() => {});
   const [view, setView] = useState<ViewMode>(() => readPreference(VIEW_STORAGE_KEY, ['top', 'orbit'] as const, 'top'));
@@ -225,10 +237,11 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
   const viewRef = useRef(view);
   const [stats, setStats] = useState<MapStats>({
     liveObjects: 0, rememberedObjects: 0, directionOnly: 0, depthObjects: 0, dots: 0, mapHz: 0, renderFps: 0,
-    nearest: null, others: [], inView: [],
+    nearest: null, others: [], inView: [], blockedView: null,
   });
   detectionsRef.current = detections;
   obstaclesRef.current = obstacles;
+  blockedRef.current = blocked;
   viewRef.current = view;
 
   useEffect(() => writePreference(VIEW_STORAGE_KEY, view), [view]);
@@ -352,6 +365,28 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
     const dotCloud = new THREE.Points(dotGeometry, dotMaterial);
     dotCloud.frustumCulled = false;
     scene.add(dotCloud);
+
+    // Blocked-view dots: a fixed, small buffer (columns x radii x heights).
+    const blockedCapacity = MAX_BLOCKED_COLUMNS * BLOCKED_RADII_M.length * BLOCKED_HEIGHTS_M.length;
+    const blockedPositions = new Float32Array(blockedCapacity * 3);
+    const blockedColors = new Float32Array(blockedCapacity * 3);
+    const blockedGeometry = new THREE.BufferGeometry();
+    const blockedPositionAttribute = new THREE.BufferAttribute(blockedPositions, 3).setUsage(THREE.DynamicDrawUsage);
+    const blockedColorAttribute = new THREE.BufferAttribute(blockedColors, 3).setUsage(THREE.DynamicDrawUsage);
+    blockedGeometry.setAttribute('position', blockedPositionAttribute);
+    blockedGeometry.setAttribute('color', blockedColorAttribute);
+    blockedGeometry.setDrawRange(0, 0);
+    const blockedMaterial = new THREE.PointsMaterial({
+      size: 0.085, map: dotTexture(), vertexColors: true, transparent: true, depthWrite: false,
+    });
+    const blockedCloud = new THREE.Points(blockedGeometry, blockedMaterial);
+    blockedCloud.frustumCulled = false;
+    scene.add(blockedCloud);
+    const blockedDirs = new Map<number, { bearing: number; seenAt: number }>();
+    let blockedState = { covered: false, dark: false };
+    let lastBlockedAt = -1;
+    const blockedLabelPoint = new THREE.Vector3();
+    const blockedColor = new THREE.Color();
 
     type ObjectVisual = { group: THREE.Group; pin: THREE.Mesh; halo: THREE.Mesh; stem: THREE.Line; marker: THREE.Mesh; color: THREE.Color };
     type RayVisual = { line: THREE.Line; tip: THREE.Mesh };
@@ -768,11 +803,78 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       return found;
     };
 
+    /** Directions the camera frame looks blocked in, with no distance. */
+    const integrateBlocked = (now: number) => {
+      const frame = blockedRef.current;
+      if (frame && frame.at !== lastBlockedAt && now - frame.at <= BLOCKED_FRESH_MS) {
+        lastBlockedAt = frame.at;
+        blockedState = { covered: frame.covered, dark: frame.dark };
+        const halfColumn = FOV_RAD / Math.max(1, frame.columns.length) / 2;
+        frame.columns.slice(0, MAX_BLOCKED_COLUMNS).forEach((isBlocked, column) => {
+          const bearing = Math.atan((frame.centers[column] - 0.5) * 2 * Math.tan(FOV_RAD / 2));
+          // A measured surface in this direction already shows where it is.
+          let measured = false;
+          for (const dot of dots.values()) {
+            if (now - dot.seenAt <= NEAREST_WINDOW_MS && Math.abs(bearingOf(dot) - bearing) <= halfColumn + 0.03) {
+              measured = true;
+              break;
+            }
+          }
+          if (isBlocked && !measured) blockedDirs.set(column, { bearing, seenAt: now });
+          else blockedDirs.delete(column);
+        });
+      }
+      blockedDirs.forEach((entry, column) => { if (now - entry.seenAt > BLOCKED_MEMORY_MS) blockedDirs.delete(column); });
+
+      let index = 0;
+      let bearingSum = 0;
+      blockedDirs.forEach((entry) => {
+        bearingSum += entry.bearing;
+        const freshness = 1 - Math.min(1, (now - entry.seenAt) / BLOCKED_MEMORY_MS);
+        BLOCKED_RADII_M.forEach((radius, ring) => {
+          BLOCKED_HEIGHTS_M.forEach((height) => {
+            if (index >= blockedCapacity) return;
+            const offset = index * 3;
+            blockedPositions[offset] = Math.sin(entry.bearing) * radius;
+            blockedPositions[offset + 1] = height;
+            blockedPositions[offset + 2] = -Math.cos(entry.bearing) * radius;
+            // Strongest near the user, fading outward: the distance is unknown.
+            blockedColor.copy(BLOCKED_COLOR).lerp(BLACK, Math.min(0.9, (ring / BLOCKED_RADII_M.length) * 0.6 + (1 - freshness) * 0.7));
+            blockedColors[offset] = blockedColor.r;
+            blockedColors[offset + 1] = blockedColor.g;
+            blockedColors[offset + 2] = blockedColor.b;
+            index += 1;
+          });
+        });
+      });
+      blockedGeometry.setDrawRange(0, index);
+      blockedPositionAttribute.needsUpdate = true;
+      blockedColorAttribute.needsUpdate = true;
+
+      if (!blockedDirs.size) {
+        removeLabel('blocked');
+        return null;
+      }
+      const bearing = bearingSum / blockedDirs.size;
+      const cannotSee = blockedState.covered || blockedState.dark;
+      const label = ensureLabel('blocked', 'ray', () => blockedLabelPoint.set(Math.sin(bearing) * 2.2, 0.02, -Math.cos(bearing) * 2.2));
+      label.priority = 60;
+      setLabel(
+        label,
+        cannotSee
+          ? [{ text: blockedState.dark ? 'Camera can\'t see' : 'View covered', color: '#F6E3B8' }, { text: '· too dark or covered', color: '#E0B45C' }]
+          : [{ text: 'View blocked', color: '#F6E3B8' }, { text: '· distance unknown', color: '#E0B45C' }],
+        'font-size:10px;padding:2px 6px;border-radius:7px;background:rgba(18,14,6,.88);border:1px dashed rgba(224,180,92,.55)',
+      );
+      return { direction: directionWords(bearing), bearing, covered: blockedState.covered, dark: blockedState.dark };
+    };
+
     const integrate = () => {
       const now = Date.now();
       tickCounter += 1;
       const depthObjects = integrateObjects(now);
       const dotCount = integrateObstacles(now);
+      const blockedView = integrateBlocked(now);
       const sightings = findSightings(now);
       nearestKey = sightings[0]?.key ?? null;
       dangerLevel = sightings[0] && sightings[0].distance < DANGER_M ? 1 : 0;
@@ -804,6 +906,7 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
         nearest: sightings[0] ?? null,
         others: sightings.slice(1, 3),
         inView: inView.slice(0, 3),
+        blockedView,
       }));
     };
 
@@ -848,6 +951,9 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       dotMaterial.sizeAttenuation = !top;
       dotMaterial.size = top ? 9 * pixelRatio : 0.13;
       dotMaterial.needsUpdate = true;
+      blockedMaterial.sizeAttenuation = !top;
+      blockedMaterial.size = top ? 4.5 * pixelRatio : 0.08;
+      blockedMaterial.needsUpdate = true;
       eye.visible = !top;
       anchorVisuals.forEach(({ stem, marker }) => { stem.visible = !top; marker.visible = !top; });
     };
@@ -972,8 +1078,12 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       // Do not re-ingest the frame that was on screen when Clear was pressed.
       lastObstacleSequence = obstaclesRef.current?.sequence ?? lastObstacleSequence;
       dotGeometry.setDrawRange(0, 0);
+      blockedDirs.clear();
+      lastBlockedAt = blockedRef.current?.at ?? lastBlockedAt;
+      blockedGeometry.setDrawRange(0, 0);
+      removeLabel('blocked');
       setStats((previous) => ({
-        ...previous, liveObjects: 0, rememberedObjects: 0, directionOnly: 0, depthObjects: 0, dots: 0, nearest: null, others: [], inView: [],
+        ...previous, liveObjects: 0, rememberedObjects: 0, directionOnly: 0, depthObjects: 0, dots: 0, nearest: null, others: [], inView: [], blockedView: null,
       }));
     };
 
@@ -990,6 +1100,9 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
       disposeObject(rayGroup);
       disposeObject(floor);
       dotGeometry.dispose();
+      blockedGeometry.dispose();
+      blockedMaterial.map?.dispose();
+      blockedMaterial.dispose();
       dotMaterial.map?.dispose();
       dotMaterial.dispose();
       renderer.dispose();
@@ -1002,17 +1115,26 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
   // Large fills the space between the top bar and the bottom card instead of
   // a fixed height, so it never slides under the camera screen's controls.
   const canvasStyle = size === 'mini' ? styles.canvasHidden : size === 'large' ? styles.canvasFill : styles.canvasSmall;
-  const { nearest, others, inView } = stats;
+  const { nearest, others, inView, blockedView } = stats;
+  const blockedText = blockedView
+    ? blockedView.covered || blockedView.dark
+      ? `Camera can't see · ${blockedView.dark ? 'too dark' : 'view covered'}`
+      : `View blocked ${blockedView.direction} · distance unknown`
+    : '';
   const nearestColor = nearest ? urgencyColor(nearest.distance) : '#7D9686';
   const nearestName = nearest ? (nearest.label === 'obstacle' ? 'Obstacle' : nearest.label.charAt(0).toUpperCase() + nearest.label.slice(1)) : '';
   const secondary = others.length
     ? `then ${others.map((item) => `${item.label} ${item.distance.toFixed(1)} m ${item.direction}`).join(' · ')}`
     : inView.length
       ? `in view, no distance: ${inView.join(' · ')}`
-      : '';
+      : nearest && blockedText
+        ? blockedText
+        : '';
   const spoken = nearest
     ? `Nearest: ${nearestName}, ${nearest.distance.toFixed(1)} meters, ${nearest.direction}. ${secondary}`
-    : `Nothing measured within ${OBSTACLE_RANGE_M} meters. ${secondary}`;
+    : blockedText
+      ? `${blockedText}. ${secondary}`
+      : `Nothing measured within ${OBSTACLE_RANGE_M} meters. ${secondary}`;
 
   return (
     <View style={[styles.panel, { width: panelWidth }, size === 'large' && styles.panelFill]}>
@@ -1061,9 +1183,13 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
         accessibilityLiveRegion="polite"
         accessibilityLabel={spoken}
       >
-        <View style={[styles.arrowBadge, { backgroundColor: nearest ? `${nearestColor}22` : '#0F2119' }]}>
-          <Text style={[styles.arrow, { color: nearestColor, transform: [{ rotate: `${nearest ? (nearest.bearing * 180) / Math.PI : 0}deg` }] }]}>
-            {nearest ? '↑' : '·'}
+        <View style={[styles.arrowBadge, { backgroundColor: nearest ? `${nearestColor}22` : blockedView ? '#E0B45C22' : '#0F2119' }]}>
+          <Text style={[styles.arrow, {
+            color: nearest ? nearestColor : blockedView ? '#E0B45C' : nearestColor,
+            transform: [{ rotate: `${nearest ? (nearest.bearing * 180) / Math.PI : blockedView ? (blockedView.bearing * 180) / Math.PI : 0}deg` }],
+          }]}
+          >
+            {nearest || blockedView ? '↑' : '·'}
           </Text>
         </View>
         <View style={styles.nearestBody}>
@@ -1074,6 +1200,8 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
               <Text style={{ color: nearestColor }}>{nearest.distance.toFixed(1)} m</Text>
               <Text style={styles.nearestDirection}> {nearest.direction}</Text>
             </Text>
+          ) : blockedView ? (
+            <Text style={[styles.nearestText, { color: '#E0B45C' }]} numberOfLines={1}>{blockedText}</Text>
           ) : (
             <Text style={[styles.nearestText, { color: '#B7C9BC' }]} numberOfLines={1}>Nothing measured within {OBSTACLE_RANGE_M} m</Text>
           )}
@@ -1098,6 +1226,7 @@ export default function LiveSceneMap({ detections, obstacles = null, performance
             <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: URGENT.memory }]} /><Text style={styles.legendText}>seen earlier</Text></View>
             <View style={styles.legendItem}><View style={styles.dash} /><Text style={styles.legendText}>direction only</Text></View>
             <View style={styles.legendItem}><View style={[styles.swatch, styles.swatchGlow]} /><Text style={styles.legendText}>surface</Text></View>
+            <View style={styles.legendItem}><View style={[styles.swatch, { backgroundColor: '#E0B45C' }]} /><Text style={styles.legendText}>blocked, no distance</Text></View>
           </View>
 
           <View style={styles.footer}>

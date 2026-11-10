@@ -1,8 +1,9 @@
-import type { ObstacleFrame, VisionObject, VisionPerformance } from '../src/vision';
+import type { BlockedFrame, ObstacleFrame, VisionObject, VisionPerformance } from '../src/vision';
 
 type Props = {
   detections: Array<Pick<VisionObject, 'label' | 'confidence' | 'x' | 'y' | 'width' | 'height' | 'distance_m' | 'track_id' | 'spatial'>>;
   obstacles?: ObstacleFrame | null;
+  blocked?: BlockedFrame | null;
   performance: VisionPerformance;
 };
 

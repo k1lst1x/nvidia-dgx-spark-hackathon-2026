@@ -2,6 +2,10 @@ import type { CameraView } from 'expo-camera';
 import { RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { detectObjects } from './detector';
 import type { LocalDetection } from './detector.types';
+import type { BlockedView } from './blockedView';
+
+/** Directions the local camera frame looks blocked in, and when it was seen. */
+export type BlockedFrame = BlockedView & { at: number };
 
 export type AssistMode = 'scene' | 'sign';
 
@@ -322,10 +326,20 @@ export function withTrackedDepth(objects: VisionObject[], tracked: TrackedSnapsh
   });
 }
 
+/** Where a blocked view sits, in words, or null when too little is blocked to say. */
+function blockedDirection(blocked: BlockedView | null | undefined): 'ahead' | 'on the left' | 'on the right' | null {
+  if (!blocked) return null;
+  const centers = blocked.columns.map((value, index) => (value ? blocked.centers[index] : null)).filter((value): value is number => value != null);
+  if (centers.length < 3) return null;
+  const middle = centers.reduce((sum, value) => sum + value, 0) / centers.length;
+  return middle < 0.38 ? 'on the left' : middle > 0.62 ? 'on the right' : 'ahead';
+}
+
 export function synthesizeLocalSceneResult(
   detections: LocalDetection[],
   previousSceneKey: string,
   mode: AssistMode,
+  blocked?: BlockedView | null,
 ): VisionResult {
   const visionObjects: VisionObject[] = detections.map((d) => ({
     label: d.label,
@@ -347,10 +361,40 @@ export function synthesizeLocalSceneResult(
   // measurements. Mobility warnings stay disabled until validated separately.
   // 1. No recognized detections
   if (detections.length === 0) {
+    // Nothing named is not the same as nothing there: a plain wall, a trunk or
+    // a covered lens has no label. Say what the camera can tell, and never
+    // call the path clear (it cannot see stairs, curbs or glass either).
+    if (blocked && (blocked.covered || blocked.dark)) {
+      const scene_key = blocked.dark ? 'view_dark' : 'view_covered';
+      return {
+        summary: "Camera can't see",
+        speech: "The camera can't see. It may be covered or too dark.",
+        scene_key,
+        urgency: 'medium',
+        changed: scene_key !== previousSceneKey,
+        objects: [],
+        task: mode,
+        should_speak: scene_key !== previousSceneKey,
+      };
+    }
+    const direction = blockedDirection(blocked);
+    if (direction) {
+      const scene_key = `view_blocked_${direction.replace(/ /g, '_')}`;
+      return {
+        summary: `View blocked ${direction}`,
+        speech: `Something is blocking the view ${direction}. I can't tell how far.`,
+        scene_key,
+        urgency: 'medium',
+        changed: scene_key !== previousSceneKey,
+        objects: [],
+        task: mode,
+        should_speak: scene_key !== previousSceneKey,
+      };
+    }
     const scene_key = 'empty_path';
     return {
-      summary: 'Path clear ahead',
-      speech: 'The path is clear. No obstacles detected nearby.',
+      summary: 'No objects recognized',
+      speech: 'No objects recognized ahead.',
       scene_key,
       urgency: 'low',
       changed: scene_key !== previousSceneKey,
@@ -402,6 +446,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const [detections, setDetections] = useState<LocalDetection[]>([]);
   const [cameraCoach, setCameraCoach] = useState<CameraCoachResult | null>(null);
   const [obstacles, setObstacles] = useState<ObstacleFrame | null>(null);
+  const [blocked, setBlocked] = useState<BlockedFrame | null>(null);
   const obstacleSequence = useRef(0);
   const [performance, setPerformance] = useState<VisionPerformance>({
     capture_fps: 0,
@@ -510,6 +555,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       const localDetectionMs = Math.round(performanceNow() - localDetectionStartedAt);
       if (runGeneration !== generation.current) return;
       setDetections(local.detections);
+      setBlocked(local.blocked ? { ...local.blocked, at: Date.now() } : null);
       setPerformance((previous) => ({ ...previous, local_detection_ms: localDetectionMs }));
       const signature = local.detections
         .filter((item) => item.confidence >= 0.5)
@@ -556,7 +602,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
               rangeM: typeof tracking.obstacle_range_m === 'number' ? tracking.obstacle_range_m : null,
             });
             setResult((previous) => {
-              const base = previous || synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
+              const base = previous || synthesizeLocalSceneResult(local.detections, sceneKey.current, mode, local.blocked);
               return { ...base, objects: tracking.objects };
             });
           })
@@ -572,7 +618,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
 
       // In purely offline mode (or while waiting for cloud), synthesize local spatial speech
       if (!activeApiUrl || !shouldUseCloud) {
-        const localResult = withDepth(synthesizeLocalSceneResult(local.detections, sceneKey.current, mode));
+        const localResult = withDepth(synthesizeLocalSceneResult(local.detections, sceneKey.current, mode, local.blocked));
         sceneKey.current = localResult.scene_key;
         setResult(localResult);
         setLastUpdated(Date.now());
@@ -599,7 +645,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
             lastCloudAnalysis.current = Date.now() + 10_000;
             console.warn('Cloud scene description unavailable (backing off 10s)', error);
             // Fall back to local synthesis on cloud failure
-            const localFallback = withDepth(synthesizeLocalSceneResult(local.detections, sceneKey.current, mode));
+            const localFallback = withDepth(synthesizeLocalSceneResult(local.detections, sceneKey.current, mode, local.blocked));
             sceneKey.current = localFallback.scene_key;
             setResult(localFallback);
             setLastUpdated(Date.now());
@@ -646,6 +692,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     setCameraCoach(null);
     trackedSnapshot.current = null;
     setObstacles(null);
+    setBlocked(null);
     setPerformance({ capture_fps: 0, capture_ms: null, local_detection_ms: null, tracking_latency_ms: null, tracking_age_ms: null, tracking_status: 'waiting' });
     if (!enabled) {
       setState('paused');
@@ -656,7 +703,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     return stop;
   }, [enabled, mode, run, stop]);
 
-  return { result, state, lastUpdated, detections, cameraCoach, obstacles, performance, scanNow };
+  return { result, state, lastUpdated, detections, cameraCoach, obstacles, blocked, performance, scanNow };
 }
 
 function performanceNow() {

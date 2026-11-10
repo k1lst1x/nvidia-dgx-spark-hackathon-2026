@@ -1,4 +1,5 @@
 import type { DetectionResult, LocalDetection } from './detector.types';
+import { analyzeBlockedView } from './blockedView';
 
 type OrtTensor = { data: Float32Array };
 type OrtSession = { run: (feeds: Record<string, unknown>) => Promise<Record<string, OrtTensor>> };
@@ -372,7 +373,8 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
     }
     const filtered = focusOnObjects(detections);
     const tracked = tracker.update(filtered);
-    return { available: true, detections: tracked };
+    const blocked = analyzeBlockedView(rgba, INPUT_SIZE, { x: padX, y: padY, width: renderedWidth, height: renderedHeight }, tracked);
+    return { available: true, detections: tracked, blocked };
   } catch (error) {
     console.warn('Local YOLO11 inference unavailable', error);
     return { available: false, detections: [] };

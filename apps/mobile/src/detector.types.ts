@@ -15,4 +15,6 @@ export type LocalDetection = {
 export type DetectionResult = {
   available: boolean;
   detections: LocalDetection[];
+  /** Directions where the frame is featureless or dark (see blockedView.ts). */
+  blocked?: import('./blockedView').BlockedView | null;
 };
