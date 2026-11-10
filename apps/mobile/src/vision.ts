@@ -264,6 +264,64 @@ async function imageUriToDataUrl(uri: string) {
   });
 }
 
+// Server tracking (metric depth) answers about once a second; the local
+// detector runs about five times a second. Keep the last server answer this
+// long and lend its measurements to the matching local boxes in between.
+const TRACKED_DEPTH_TTL_MS = 2500;
+
+export type TrackedSnapshot = { objects: VisionObject[]; at: number };
+
+function boxMatchScore(left: VisionObject, right: VisionObject) {
+  const values = [left.x, left.y, left.width, left.height, right.x, right.y, right.width, right.height];
+  if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) return 0;
+  const [lx, ly, lw, lh, rx, ry, rw, rh] = values as number[];
+  const overlapX = Math.max(0, Math.min(lx + lw, rx + rw) - Math.max(lx, rx));
+  const overlapY = Math.max(0, Math.min(ly + lh, ry + rh) - Math.max(ly, ry));
+  const intersection = overlapX * overlapY;
+  const union = lw * lh + rw * rh - intersection;
+  const iou = union > 0 ? intersection / union : 0;
+  // The camera may have moved a little since the server's frame.
+  const centerGap = Math.hypot(lx + lw / 2 - (rx + rw / 2), ly + lh / 2 - (ry + rh / 2));
+  return Math.max(iou, 1 - centerGap / 0.15);
+}
+
+/**
+ * Give local detections the server's measurements (distance, 3D center,
+ * motion, track id) when a fresh server object with the same label overlaps.
+ *
+ * Without this, every local scan replaced the server's objects with copies
+ * that had no distance, so the map showed "no distance" for everything. Local
+ * tracker ids are dropped because they share a number space with the server's
+ * BoT-SORT ids and would merge two different objects on the map.
+ */
+export function withTrackedDepth(objects: VisionObject[], tracked: TrackedSnapshot | null, now = Date.now()): VisionObject[] {
+  const fresh = tracked && now - tracked.at <= TRACKED_DEPTH_TTL_MS ? tracked.objects : [];
+  const used = new Set<number>();
+  return objects.map((item) => {
+    let best = -1;
+    let bestScore = 0.2;
+    fresh.forEach((candidate, index) => {
+      if (used.has(index) || candidate.label.toLowerCase() !== item.label.toLowerCase()) return;
+      const score = boxMatchScore(item, candidate);
+      if (score > bestScore) {
+        bestScore = score;
+        best = index;
+      }
+    });
+    if (best < 0) return { ...item, track_id: null };
+    used.add(best);
+    const match = fresh[best];
+    return {
+      ...item,
+      distance_m: match.distance_m ?? null,
+      relative_proximity: match.relative_proximity ?? item.relative_proximity ?? null,
+      spatial: match.spatial ?? item.spatial,
+      motion: match.motion ?? item.motion,
+      track_id: match.track_id ?? null,
+    };
+  });
+}
+
 export function synthesizeLocalSceneResult(
   detections: LocalDetection[],
   previousSceneKey: string,
@@ -364,6 +422,11 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
   const lastTrackingAnalysis = useRef(0);
   const trackingInFlight = useRef(false);
   const trackingFailures = useRef(0);
+  // Last fresh server tracking answer, lent to local scans until it expires.
+  const trackedSnapshot = useRef<TrackedSnapshot | null>(null);
+  const withDepth = useCallback((local: VisionResult): VisionResult => (
+    { ...local, objects: withTrackedDepth(local.objects, trackedSnapshot.current) }
+  ), []);
   const captureTimes = useRef<number[]>([]);
   const signFrames = useRef<string[]>([]);
   const signTranscript = useRef('');
@@ -481,6 +544,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
             // Do not let a delayed response overwrite newer camera detections.
             if (trackingAgeMs > 3000 || Date.now() - capturedAt > 3000) return;
             setCameraCoach(tracking.camera_coach || null);
+            trackedSnapshot.current = { objects: tracking.objects, at: Date.now() };
             const obstaclePoints = (tracking.obstacle_points || []).filter(
               (point): point is [number, number, number] => Array.isArray(point) && point.length >= 3 && point.slice(0, 3).every(Number.isFinite),
             );
@@ -508,7 +572,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
 
       // In purely offline mode (or while waiting for cloud), synthesize local spatial speech
       if (!activeApiUrl || !shouldUseCloud) {
-        const localResult = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
+        const localResult = withDepth(synthesizeLocalSceneResult(local.detections, sceneKey.current, mode));
         sceneKey.current = localResult.scene_key;
         setResult(localResult);
         setLastUpdated(Date.now());
@@ -535,7 +599,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
             lastCloudAnalysis.current = Date.now() + 10_000;
             console.warn('Cloud scene description unavailable (backing off 10s)', error);
             // Fall back to local synthesis on cloud failure
-            const localFallback = synthesizeLocalSceneResult(local.detections, sceneKey.current, mode);
+            const localFallback = withDepth(synthesizeLocalSceneResult(local.detections, sceneKey.current, mode));
             sceneKey.current = localFallback.scene_key;
             setResult(localFallback);
             setLastUpdated(Date.now());
@@ -557,7 +621,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         timer.current = setTimeout(() => void run(runGeneration), nextDelay);
       }
     }
-  }, [camera, enabled, mode]);
+  }, [camera, enabled, mode, withDepth]);
 
   const scanNow = useCallback(() => {
     stop();
@@ -580,6 +644,7 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     failures.current = 0;
     setResult(null);
     setCameraCoach(null);
+    trackedSnapshot.current = null;
     setObstacles(null);
     setPerformance({ capture_fps: 0, capture_ms: null, local_detection_ms: null, tracking_latency_ms: null, tracking_age_ms: null, tracking_status: 'waiting' });
     if (!enabled) {
