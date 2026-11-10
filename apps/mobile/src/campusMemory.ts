@@ -31,6 +31,7 @@ export type BridgeMessage = {
   text: string;
   created_at: string;
   relative_time: string;
+  delivery_status?: 'sent' | 'local';
 };
 
 export type SightObservation = {
@@ -414,7 +415,6 @@ export async function sendBridgeMessage(
   };
 
   const stored = getStoredJson<BridgeMessage[]>(LOCAL_STORAGE_KEY_BRIDGE, []);
-  setStoredJson(LOCAL_STORAGE_KEY_BRIDGE, [...stored, newMsg].slice(-50));
 
   const apiUrl = getApiUrl();
   if (apiUrl) {
@@ -433,12 +433,16 @@ export async function sendBridgeMessage(
       });
       clearTimeout(timeout);
       if (res.ok) {
-        return (await res.json()) as BridgeMessage;
+        const saved = { ...(await res.json() as BridgeMessage), delivery_status: 'sent' as const };
+        setStoredJson(LOCAL_STORAGE_KEY_BRIDGE, [...stored, saved].slice(-50));
+        return saved;
       }
     } catch {}
   }
 
-  return newMsg;
+  const localMessage = { ...newMsg, delivery_status: 'local' as const };
+  setStoredJson(LOCAL_STORAGE_KEY_BRIDGE, [...stored, localMessage].slice(-50));
+  return localMessage;
 }
 
 export async function getBridgeMessages(sessionId: string): Promise<BridgeMessage[]> {
@@ -463,4 +467,19 @@ export async function getBridgeMessages(sessionId: string): Promise<BridgeMessag
     } catch {}
   }
   return local.filter((m) => m.session_id === sessionId);
+}
+
+export async function checkBridgeApiConnection(): Promise<boolean> {
+  const apiUrl = getApiUrl();
+  if (!apiUrl) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch(`${apiUrl}/health`, { signal: controller.signal });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }

@@ -41,7 +41,6 @@ export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<AssistMode>(initialMode === 'sign' ? 'sign' : 'scene');
   const [speaking, setSpeaking] = useState(true);
-  const [torchEnabled, setTorchEnabled] = useState(false);
   const [showLandmarks, setShowLandmarks] = useState(true);
   const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
   const [isAnalysingContext, setIsAnalysingContext] = useState(false);
@@ -427,7 +426,7 @@ export default function CameraScreen() {
         />
       ) : (
         <>
-          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" zoom={0} enableTorch={torchEnabled} />
+          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" zoom={0} />
           <View style={c.boxesLayer} pointerEvents="none">
             {current.boxes.map((box, index) => (
               <View key={`${mode}-${index}`} style={[c.box, { left: box.l, top: box.t, width: box.w, height: box.h }, isSignMode && c.signBox]}>
@@ -658,6 +657,9 @@ export default function CameraScreen() {
                   <Ionicons name="refresh" size={22} color="#EAF6F0" />
                   <Text style={c.controlText}>{isSignMode ? 'Read again' : 'Scan again'}</Text>
                 </Pressable>
+                <Pressable accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'} onPress={() => speak(translation || current.speech)} style={c.speak}>
+                  <Ionicons name="volume-high" size={24} color="#07110F" />
+                </Pressable>
                 {!isSignMode && (
                   <Pressable
                     onPress={handleWhatChanged}
@@ -674,13 +676,6 @@ export default function CameraScreen() {
                     </Text>
                   </Pressable>
                 )}
-                <Pressable accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'} onPress={() => speak(translation || current.speech)} style={c.speak}>
-                  <Ionicons name="volume-high" size={24} color="#07110F" />
-                </Pressable>
-                <Pressable accessibilityLabel={torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on'} onPress={() => setTorchEnabled((value) => !value)} style={c.control}>
-                  <Ionicons name={torchEnabled ? 'flash' : 'flash-off'} size={22} color={torchEnabled ? '#C8FF72' : '#EAF6F0'} />
-                  <Text style={[c.controlText, torchEnabled && c.controlTextActive]}>{torchEnabled ? 'Flash on' : 'Flashlight'}</Text>
-                </Pressable>
               </View>
               <Text style={c.hint}>{isSignMode ? 'Tap the megaphone to speak the interpreted text aloud' : 'Tap Changed? to hear only what is new, or the speaker to repeat'}</Text>
             </>
@@ -756,7 +751,6 @@ const c = StyleSheet.create({
   controls: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginTop: 17 },
   control: { alignItems: 'center', width: 90, gap: 5 },
   controlText: { color: '#DDE9E4', fontSize: 10, fontWeight: '700' },
-  controlTextActive: { color: '#C8FF72' },
   speak: { width: 66, height: 66, borderRadius: 33, backgroundColor: '#B7FF56', alignItems: 'center', justifyContent: 'center', borderWidth: 5, borderColor: 'rgba(183,255,86,.25)' },
   speakDisabled: { opacity: 0.42 },
   hint: { color: 'rgba(255,255,255,.62)', textAlign: 'center', fontSize: 10, marginTop: 12 },
