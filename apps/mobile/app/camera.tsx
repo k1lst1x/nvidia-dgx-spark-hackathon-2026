@@ -695,7 +695,7 @@ export default function CameraScreen() {
                 </Pressable>
               </View>
             </View>
-          ) : !usesBrowserHandTracking ? (
+          ) : !usesBrowserHandTracking && isSignMode ? (
             <View style={[c.answer, isSignMode && c.signAnswer]}>
               <View style={[c.answerIcon, isSignMode && c.signAnswerIcon]}><Ionicons name={isSignMode ? 'hand-left' : current.icon} size={25} color="#07110F" /></View>
               <View style={c.answerCopy}>
