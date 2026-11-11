@@ -35,6 +35,9 @@ build/
 android/
 ios/
 
+# How2Sign (CC BY-NC 4.0) clips, keypoints and model outputs stay local
+datasets/
+
 # Model weights are downloaded at runtime, never committed
 *.pt
 *.pth
