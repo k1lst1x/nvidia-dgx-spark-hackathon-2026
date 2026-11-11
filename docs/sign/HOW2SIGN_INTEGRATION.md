@@ -16,9 +16,11 @@ translates How2Sign sentences usefully:
 
 - **Uni-Sign** (pose only, How2Sign checkpoint): BLEU-4 2.0, chrF 21.4 on 8
   clips. Fluent English that usually gets the topic, not the sentence.
-- **Sign Language Bridge** (Qwen3-VL-2B + LoRA): its authors report BLEU-4
-  1.6, chrF 17.4 on their 944-clip How2Sign test set. It was not run here
-  (see Limitations).
+- **Sign Language Bridge** (Qwen3-VL-2B + LoRA): BLEU-4 0.95, chrF 17.0 on
+  the same 8 clips, in line with its authors' 1.6 / 17.4 on 944 test clips.
+  Half its outputs are one template ("So, you want to make sure that…"),
+  and on this laptop it needs about 15 s per clip and nearly all 6 GB of GPU
+  memory.
 
 Keep the current word-level pipeline. Open-vocabulary ASL-to-English is not
 reliable enough to speak to a user. The practical path is a fixed vocabulary
@@ -40,6 +42,8 @@ gap between them and a usable system is not.
 | Uni-Sign, lightweight pose, repeat guard | 8 | 2.01 | 21.41 | 0.72 s | (reused) |
 | Uni-Sign, lightweight pose, repeat guard (same 3 clips) | 3 | 3.60 | 23.20 | | |
 | Uni-Sign, performance pose, repeat guard | 3 | 3.44 | 23.57 | 1.57 s | ≈ 390 ms |
+| Sign Language Bridge, crop + CLAHE + landmarks (as trained) | 8 | 0.95 | 17.02 | 15.1 s | ≈ 80 ms |
+| Sign Language Bridge, crop only (as in the authors' test) | 8 | 0.94 | 16.79 | 14.9 s | ≈ 80 ms |
 | Sign Language Bridge (authors' report) | 944 | 1.64 | 17.42 | | |
 
 Uni-Sign: model load 12–15 s, peak GPU memory 2.6 GB (RTX 4050 Laptop, bf16),
@@ -52,8 +56,31 @@ keypoints.
 Example (sample_001): reference "Avoid wearing height on top or volume on
 the sides."; Uni-Sign "It's going to have a smaller amount of hair."
 
-Per-sample predictions: `datasets/how2sign/evaluation/predictions_unisign_*.json`;
-summary: `datasets/how2sign/evaluation/results.csv`.
+Sign Language Bridge:
+
+- **Preprocessing makes no difference.** The authors' test script
+  (`validate()` in `qwen3vl_training.py`) applies only the signer crop, not
+  the CLAHE and landmark overlay used in training, so their published score
+  has a train/test mismatch. Running it both ways gives the same quality
+  (0.95 vs 0.94 BLEU-4).
+- **Generic output.** 8 of 16 outputs start "So, you want to make sure
+  that…" and none matches its reference. sample_007 ("Is it 2008?") gave
+  "This is a 720 turn.", "I'm going to show you how to do that." and "It's
+  going to look like this." under three setups that differ only in float
+  rounding (see below): the answer depends on noise, not on the signing.
+- **Cost.** Model load 12 s, peak GPU memory 5.35 GB. Per clip: about 1.6 s
+  signer box, 5 s landmarks (CPU), 1–7 s video preparation, 6–19 s
+  generation. It cannot run next to other GPU work on a 6 GB card.
+- **Beams.** The authors decode with 5 beams. On 6 GB that fits only the two
+  shortest clips; 3 clips used 3 beams and 3 used 1 (recorded per sample as
+  `beams_used`). The short clips were no better than the long ones.
+
+Example (sample_001): Bridge "The first thing that you want to do is make
+sure that your hair is completely dry."
+
+Per-sample predictions: `datasets/how2sign/evaluation/predictions_*.json`;
+model-input frames: `datasets/how2sign/evaluation/previews/`; summary:
+`datasets/how2sign/evaluation/results.csv`.
 
 ## Samples
 
@@ -102,6 +129,39 @@ DeepSpeed and decord are imported by Uni-Sign's training utilities but unused
 for inference; the script inserts small stand-ins after importing
 transformers.
 
+**Sign Language Bridge** (`apps/api/sign_language/inference/bridge_how2sign.py`),
+in its own Python 3.12 environment with the authors' versions (torch 2.10
+CUDA 12.8, transformers 4.57.3, peft 0.18.1, qwen-vl-utils 0.0.14; PyAV
+below 14 for torchvision's video reader). Preprocessing is the authors' own
+code, imported from their repository rather than rewritten:
+
+1. Signer box: `data_code/signer_cropper.py` with the settings of
+   `11_extract_signer_bboxes.py` (MediaPipe pose "full", every 4th frame,
+   25 % padding).
+2. Landmarks: the functions of `21_extract_landmarks.py` (RTMPose
+   "performance" on the crop, at most 20 fps, their thresholds, spike
+   rejection, gap filling and smoothing). OpenCV replaces decord.
+3. Frames, prompts, crop, CLAHE, overlay: their `Qwen3VLCollator` (20 fps,
+   their pixel limits, system prompt "You are a sign language translator.").
+4. Their test decoding: 5 beams, length penalty 0.6, no repeated 4-grams,
+   repetition penalty 1.1, 32 new tokens.
+
+Changes needed to fit 6 GB, all recorded in the prediction files:
+
+- The adapter is not merged. Qwen3-VL-2B ties the output head to the input
+  embeddings, so merging the head's LoRA would also change the embeddings
+  (PEFT warns about exactly this).
+- The tied embedding / output-head weight (593 MB) is kept in CPU memory.
+  This reproduced the unmodified run's output exactly.
+- The video is encoded once and its features repeated for each beam, instead
+  of once per beam. Same computation, but different GPU kernels, so float
+  rounding differs and beam search can pick another sentence.
+- A GPU memory cap (90 %) so Windows does not silently spill into system RAM
+  (that made one clip take about 20 minutes). A clip that does not fit with
+  5 beams is retried with 3, then 1.
+- Casting the float32 adapter to bfloat16 would save more memory but changed
+  outputs, so it was not used.
+
 **MediaPipe 281 features** (`apps/api/sign_language/adapters/mediapipe_281.py`),
 in its own Python 3.12 environment with mediapipe:
 
@@ -125,10 +185,10 @@ gloss targets for the CTC model.
 
 - 8 clips (3 for the pose comparison). Enough to rule the models out for
   VisionMate, not to rank them precisely.
-- Bridge was not run locally. It needs a newer transformers in another
-  environment, about 5 GB of weights, and most of the 6 GB GPU (the API would
-  have to stop), with 1.5 GB of system RAM free. Given its published scores
-  it was not worth it.
+- Bridge ran with 5 beams on only 2 of 8 clips (see Results), on an RTX 4050
+  instead of the authors' A100, without FlashAttention or Liger kernels.
+  Float differences change individual outputs, but every setup tried gave
+  the same kind of generic sentence.
 - The performance-pose run stalled on sample_004 (the 60 fps clip) for over an
   hour with low free memory and was stopped. The cause was not found.
 - RTMPose ran on CPU onnxruntime. GPU onnxruntime would be needed for
@@ -151,6 +211,10 @@ python apps\api\sign_language\evaluation\select_how2sign_samples.py `
   --unisign-repo "$m\repos\Uni-Sign" --checkpoint "$m\weights\how2sign_pose_only_slt.pth" `
   --mt5 "$m\weights\mt5-base" --dataset-dir datasets\how2sign --pose-mode lightweight `
   --no-repeat-ngram 3 --repetition-penalty 1.2
+# Sign Language Bridge (weights: Qwen/Qwen3-VL-2B-Instruct, mamounyosef/sign-language-bridge adapter/)
+& "$m\envs\bridge\Scripts\python.exe" apps\api\sign_language\inference\bridge_how2sign.py `
+  --bridge-repo "$m\repos\sign-language-bridge" --base-model "$m\weights\Qwen3-VL-2B-Instruct" `
+  --adapter "$m\weights\sign-language-bridge\adapter" --dataset-dir datasets\how2sign --save-previews
 # MediaPipe 281 features
 & "$m\envs\mediapipe\Scripts\python.exe" apps\api\sign_language\adapters\mediapipe_281.py `
   --dataset-dir datasets\how2sign --model apps\mobile\public\mediapipe\models\holistic_landmarker.task
