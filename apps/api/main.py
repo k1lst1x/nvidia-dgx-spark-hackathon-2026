@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import os
@@ -8,7 +9,6 @@ import threading
 import random
 import time
 import uuid
-from collections import defaultdict, deque
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +30,7 @@ from gpu_status import gpu_status
 from motion import MotionHistory
 from obstacle_points import OBSTACLE_MAX_RANGE_M, OBSTACLE_POINTS_ENABLED, obstacle_points
 from point_cloud import cloud_for_surface, open3d_status
+from rate_limit import LimitExceeded, LimitRule, TieredSlidingWindowLimiter
 from segmentation import YoloSegmenter
 from slam import OrbSlamClient
 from visualization import RerunView
@@ -200,12 +201,25 @@ app.add_middleware(
         "CORS_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082"
     ).split(","),
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "X-Session-ID", "X-Device-ID", "X-Shared-Sight-Key"],
+    allow_headers=["Content-Type", "X-Session-ID", "X-Device-ID", "X-Device-Secret", "X-Shared-Sight-Key"],
 )
 
 _slots = asyncio.Semaphore(MAX_CONCURRENCY)
-_requests: dict[str, deque[float]] = defaultdict(deque)
-_track_requests: dict[str, deque[float]] = defaultdict(deque)
+_general_limits = TieredSlidingWindowLimiter(
+    session=LimitRule(20, 60, MIN_REQUEST_INTERVAL, detail="Session rate limit exceeded"),
+    peer=LimitRule(60, 60, detail="Source rate limit exceeded"),
+    global_budget=LimitRule(240, 60, max_keys=1, detail="Inference capacity limit exceeded"),
+)
+_track_limits = TieredSlidingWindowLimiter(
+    session=LimitRule(16, 10, TRACK_MIN_REQUEST_INTERVAL, detail="Tracking session rate limit exceeded"),
+    peer=LimitRule(64, 10, detail="Tracking source rate limit exceeded"),
+    global_budget=LimitRule(256, 10, max_keys=1, detail="Tracking capacity limit exceeded"),
+)
+_bridge_limits = TieredSlidingWindowLimiter(
+    device=LimitRule(8, 300, detail="Bridge join limit exceeded"),
+    peer=LimitRule(10, 300, detail="Bridge join limit exceeded"),
+    global_budget=LimitRule(100, 60, max_keys=1, detail="Bridge join capacity exceeded"),
+)
 _depth_model = DepthAnythingMetric()
 _segmenter = YoloSegmenter()
 _slam = OrbSlamClient()
@@ -294,29 +308,65 @@ not merely that one window ended. should_speak is true only for a non-empty, con
 segment. Output only the requested JSON."""
 
 
-def _rate_limit(client_id: str) -> None:
-    now = time.monotonic()
-    bucket = _requests[client_id]
-    while bucket and now - bucket[0] > 60:
-        bucket.popleft()
-    if bucket and now - bucket[-1] < MIN_REQUEST_INTERVAL:
-        raise HTTPException(429, "Frames are arriving too quickly", headers={"Retry-After": "2"})
-    if len(bucket) >= 20:
-        raise HTTPException(429, "Session rate limit exceeded", headers={"Retry-After": "5"})
-    bucket.append(now)
+def _peer_key(request: Request) -> str:
+    # Deliberately ignore forwarding headers: they are attacker-controlled unless
+    # a deployment has an explicit trusted-proxy policy.
+    return request.client.host if request.client else "unknown"
 
 
-def _track_rate_limit(client_id: str) -> None:
-    """Allow a bounded geometry cadence independent of slow cloud narration."""
-    now = time.monotonic()
-    bucket = _track_requests[client_id]
-    while bucket and now - bucket[0] > 10:
-        bucket.popleft()
-    if bucket and now - bucket[-1] < TRACK_MIN_REQUEST_INTERVAL:
-        raise HTTPException(429, "Tracking frames are arriving too quickly", headers={"Retry-After": "1"})
-    if len(bucket) >= 16:
-        raise HTTPException(429, "Tracking session rate limit exceeded", headers={"Retry-After": "1"})
-    bucket.append(now)
+def _session_id(request: Request) -> str:
+    value = request.headers.get("X-Session-ID") or _peer_key(request)
+    if len(value) > 100:
+        raise HTTPException(422, "X-Session-ID must contain at most 100 characters")
+    return value
+
+
+def _limited_key(peer: str, session_id: str) -> str:
+    return peer + ":" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def _apply_limits(limiter: TieredSlidingWindowLimiter, *checks: tuple[str, str]) -> None:
+    try:
+        limiter.check(*checks)
+    except LimitExceeded as error:
+        raise HTTPException(
+            429, error.detail, headers={"Retry-After": str(error.retry_after)},
+        ) from error
+
+
+def _rate_limit(request: Request, session_id: str) -> None:
+    peer = _peer_key(request)
+    _apply_limits(
+        _general_limits,
+        ("session", _limited_key(peer, session_id)),
+        ("peer", peer),
+        ("global_budget", "global"),
+    )
+
+
+def _track_rate_limit(request: Request, session_id: str) -> None:
+    """Allow fast tracking while enforcing independent peer/global ceilings."""
+    peer = _peer_key(request)
+    _apply_limits(
+        _track_limits,
+        ("session", _limited_key(peer, session_id)),
+        ("peer", peer),
+        ("global_budget", "global"),
+    )
+
+
+def _bridge_join_rate_limit(request: Request, device_id: str) -> None:
+    _apply_limits(
+        _bridge_limits,
+        ("device", device_id),
+        ("peer", _peer_key(request)),
+        ("global_budget", "global"),
+    )
+
+
+def _clear_rate_limits_for_tests() -> None:
+    for limiter in (_general_limits, _track_limits, _bridge_limits):
+        limiter.clear()
 
 
 def _local_scene_result(objects: list[DetectedObject]) -> VisionResult:
@@ -727,9 +777,9 @@ def _track_geometry(
 @app.post("/v1/track", response_model=TrackingResult)
 async def track_scene(request: Request, image: UploadFile = File(...)):
     """Fast detector/depth/motion path, intentionally separate from Groq."""
-    client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
-    _track_rate_limit(client_id)
+    client_id = _session_id(request)
     body = await _read_tracking_image(image)
+    _track_rate_limit(request, client_id)
     started = time.monotonic()
     async with _slots:
         objects, masks = await asyncio.to_thread(_yolo_tracker.detect_with_masks, body, client_id)
@@ -766,11 +816,11 @@ async def describe(
     if task not in {"scene", "sign"}:
         raise HTTPException(422, "task must be 'scene' or 'sign'")
     request_id = uuid.uuid4().hex[:12]
-    client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
-    _rate_limit(client_id)
+    client_id = _session_id(request)
     body = await _read_tracking_image(image)
     if not _vision_configured():
         raise HTTPException(503, "Vision service is not configured")
+    _rate_limit(request, client_id)
     started = time.monotonic()
     async with _slots:
         verified_objects, verified_masks = (
@@ -807,8 +857,7 @@ async def describe(
 
 @app.post("/v1/interpret-sign", response_model=SignTranslation)
 async def interpret_sign(request: Request, sequence: SignSequenceRequest):
-    client_id = request.headers.get("X-Session-ID") or (request.client.host if request.client else "unknown")
-    _rate_limit(client_id)
+    client_id = _session_id(request)
     decoded: list[tuple[bytes, str]] = []
     for frame in sequence.frames:
         if not frame.startswith("data:image/jpeg;base64,"):
@@ -820,6 +869,7 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         if not body or len(body) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "A sign frame is empty or too large")
         decoded.append((body, "image/jpeg"))
+    _rate_limit(request, client_id)
     started = time.monotonic()
     try:
         async with _slots:
@@ -857,12 +907,13 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
 
 
 @app.post("/v1/detect-sign")
-async def detect_sign_yolo(file: UploadFile = File(...)):
+async def detect_sign_yolo(request: Request, file: UploadFile = File(...)):
     """Runs YOLO11 Sign Language detector on an uploaded frame."""
-    content = await file.read()
-    if len(content) == 0:
-        raise HTTPException(400, "Empty image")
-    signs = _yolo_sign_detector.detect(content)
+    session_id = _session_id(request)
+    content = await _read_tracking_image(file)
+    _rate_limit(request, session_id)
+    async with _slots:
+        signs = await asyncio.to_thread(_yolo_sign_detector.detect, content)
     primary = signs[0].label if signs else ""
     conf = signs[0].confidence if signs else 0.0
     return {
@@ -902,6 +953,7 @@ def _authorize_sight(request: Request) -> tuple[str, str]:
         return observation_store.authorize_device(
             request.headers.get("X-Device-ID"),
             request.headers.get("X-Session-ID"),
+            request.headers.get("X-Device-Secret"),
             request.headers.get("X-Shared-Sight-Key"),
         )
     except observation_store.ObservationAccessError as error:
@@ -1030,6 +1082,7 @@ async def create_bridge_conversation(request: Request):
 async def join_bridge_conversation(request: Request, code: str):
     """Join a conversation as its second device (one pair per conversation)."""
     device_id, _session_id = _authorize_sight(request)
+    _bridge_join_rate_limit(request, device_id)
     return BridgeConversation.model_validate(
         _bridge_call(observation_store.join_bridge, _bridge_code(code), device_id)
     )

@@ -1,6 +1,7 @@
 """Unit tests for Campus Memory & Shared Sight & Deaf-Blind Bridge."""
 
 import os
+import hashlib
 import uuid
 from fastapi.testclient import TestClient
 
@@ -10,7 +11,16 @@ os.environ.pop("VISION_API_URL", None)
 
 from main import app  # noqa: E402
 
-client = TestClient(app, headers={"X-Device-ID": "test-device", "X-Session-ID": "test-session"})
+def _auth_headers(device: str, session: str | None = None) -> dict[str, str]:
+    secret = hashlib.sha256(f"test-secret:{device}".encode()).hexdigest()
+    return {
+        "X-Device-ID": f"device-{secret[:32]}",
+        "X-Session-ID": session or f"session-{device}",
+        "X-Device-Secret": secret,
+    }
+
+
+client = TestClient(app, headers=_auth_headers("test-device", "test-session"))
 anonymous = TestClient(app)
 
 
@@ -68,8 +78,10 @@ def test_post_observation_and_resolve():
 
 def test_two_phones_one_memory():
     """Phone A reports a hazard; phone B, in the same room, gets it from the same store."""
-    phone_a = TestClient(app, headers={"X-Device-ID": f"phone-a-{uuid.uuid4().hex[:6]}", "X-Session-ID": "sa"})
-    phone_b = TestClient(app, headers={"X-Device-ID": f"phone-b-{uuid.uuid4().hex[:6]}", "X-Session-ID": "sb"})
+    phone_a_id = f"phone-a-{uuid.uuid4().hex[:6]}"
+    phone_b_id = f"phone-b-{uuid.uuid4().hex[:6]}"
+    phone_a = TestClient(app, headers=_auth_headers(phone_a_id, "sa"))
+    phone_b = TestClient(app, headers=_auth_headers(phone_b_id, "sb"))
     room = f"Room {uuid.uuid4().hex[:6]}"
     # Through the Hub's report form...
     reported = phone_a.post("/v1/memory/observe", json={
@@ -125,7 +137,7 @@ def test_what_changed_detects_delta():
 
 def _bridge_device(name: str) -> TestClient:
     device = f"{name}-{uuid.uuid4().hex[:8]}"
-    return TestClient(app, headers={"X-Device-ID": device, "X-Session-ID": f"session-{device}"})
+    return TestClient(app, headers=_auth_headers(device))
 
 
 def test_bridge_messages_lifecycle():
@@ -215,7 +227,8 @@ def test_bridge_conversations_expire():
 
 
 def test_personal_recall_understands_questions():
-    me = TestClient(app, headers={"X-Device-ID": f"recall-{uuid.uuid4().hex[:6]}", "X-Session-ID": "s"})
+    device = f"recall-{uuid.uuid4().hex[:6]}"
+    me = TestClient(app, headers=_auth_headers(device, "s"))
     room = f"Recall room {uuid.uuid4().hex[:6]}"
     for label, description in [("keys", "On the study table"), ("glasses", "Next to the printer"), ("water bottle", "")]:
         assert me.post("/v1/observations", json={

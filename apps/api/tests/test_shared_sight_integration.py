@@ -1,6 +1,7 @@
 """Two-device API integration coverage for Shared Sight data flow."""
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,7 +19,8 @@ def clients(tmp_path, monkeypatch):
 
 
 def headers(device: str, session: str) -> dict[str, str]:
-    return {"X-Device-ID": device, "X-Session-ID": session}
+    secret = hashlib.sha256(f"test-secret:{device}".encode()).hexdigest()
+    return {"X-Device-ID": f"device-{secret[:32]}", "X-Session-ID": session, "X-Device-Secret": secret}
 
 
 def observation(label: str, scope: str = "shared", verified: bool = True) -> dict[str, object]:
@@ -101,8 +103,9 @@ def test_concurrent_duplicate_reports_are_serialized(clients):
 
 def test_device_allowlist_and_owner_deletion(clients, monkeypatch):
     client, other = clients
-    monkeypatch.setenv("SHARED_SIGHT_DEVICE_IDS", "device-a")
-    saved = client.post("/v1/observations", headers=headers("device-a", "session-a"), json=observation("desk"))
+    device_a_headers = headers("device-a", "session-a")
+    monkeypatch.setenv("SHARED_SIGHT_DEVICE_IDS", device_a_headers["X-Device-ID"])
+    saved = client.post("/v1/observations", headers=device_a_headers, json=observation("desk"))
     assert saved.status_code == 200
     assert other.get("/v1/shared-sight/dashboard?zone_id=Room%20204", headers=headers("device-b", "session-b")).status_code == 401
     observation_id = saved.json()["id"]

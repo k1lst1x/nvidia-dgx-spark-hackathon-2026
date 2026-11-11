@@ -6,6 +6,7 @@ BoT-SORT IDs are deliberately excluded from this store.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import re
@@ -104,6 +105,11 @@ def init_db() -> None:
                 last_seen REAL NOT NULL,
                 last_session TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS device_credentials (
+                device_id TEXT PRIMARY KEY,
+                secret_hash TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS bridge_conversations (
                 code TEXT PRIMARY KEY,
                 created_at REAL NOT NULL,
@@ -136,15 +142,56 @@ def init_db() -> None:
             conn.execute("ALTER TABLE observations ADD COLUMN room_y REAL")
 
 
-def authorize_device(device_id: str | None, session_id: str | None, shared_key: str | None) -> tuple[str, str]:
+def authorize_device(
+    device_id: str | None,
+    session_id: str | None,
+    device_secret: str | None,
+    shared_key: str | None,
+) -> tuple[str, str]:
     if not device_id or not session_id or len(device_id) > 100 or len(session_id) > 100:
         raise ObservationAccessError("X-Device-ID and X-Session-ID headers are required")
+    if not device_secret or not 64 <= len(device_secret) <= 200:
+        raise ObservationAccessError("A valid X-Device-Secret header is required")
     allowed = {value.strip() for value in os.getenv("SHARED_SIGHT_DEVICE_IDS", "").split(",") if value.strip()}
     if allowed and device_id not in allowed:
         raise ObservationAccessError("This device is not authorized for Shared Sight")
     expected_key = os.getenv("SHARED_SIGHT_TOKEN", "")
     if expected_key and not hmac.compare_digest(shared_key or "", expected_key):
         raise ObservationAccessError("Shared Sight access key is invalid")
+    supplied_hash = hashlib.sha256(device_secret.encode("utf-8")).hexdigest()
+    derived_device_id = f"device-{device_secret[:32]}"
+    if hmac.compare_digest(device_id, derived_device_id):
+        return device_id, session_id
+
+    # Non-derived IDs are supported only for a one-time migration of databases
+    # created before device-bound credentials existed. Fresh identities never
+    # allocate a database row, so arbitrary enrollment cannot grow the store.
+    with db_connection() as conn:
+        credential = conn.execute(
+            "SELECT secret_hash FROM device_credentials WHERE device_id = ?", (device_id,),
+        ).fetchone()
+        if credential is None:
+            # Fresh random IDs enroll on first use. An ID that already owns data
+            # must prove the deployment's migration key before it can be bound;
+            # otherwise an upgrade would let the first caller steal old records.
+            owns_existing_state = any((
+                conn.execute("SELECT 1 FROM observations WHERE source_device = ? LIMIT 1", (device_id,)).fetchone(),
+                conn.execute("SELECT 1 FROM sight_devices WHERE device_id = ? LIMIT 1", (device_id,)).fetchone(),
+                conn.execute("SELECT 1 FROM bridge_members WHERE device_id = ? LIMIT 1", (device_id,)).fetchone(),
+            ))
+            if not owns_existing_state or not expected_key:
+                raise ObservationAccessError(
+                    "Device ID does not match its secret; legacy IDs require SHARED_SIGHT_TOKEN migration"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO device_credentials(device_id, secret_hash, created_at) VALUES(?,?,?)",
+                (device_id, supplied_hash, time.time()),
+            )
+            credential = conn.execute(
+                "SELECT secret_hash FROM device_credentials WHERE device_id = ?", (device_id,),
+            ).fetchone()
+        if not hmac.compare_digest(credential["secret_hash"], supplied_hash):
+            raise ObservationAccessError("Device credentials are invalid")
     return device_id, session_id
 
 
