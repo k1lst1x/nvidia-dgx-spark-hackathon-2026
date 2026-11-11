@@ -734,7 +734,14 @@ export default function CameraScreen() {
                   <Ionicons name="refresh" size={22} color="#EAF6F0" />
                   <Text style={c.controlText}>{isSignMode ? 'Read again' : 'Scan again'}</Text>
                 </Pressable>
-                <Pressable accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'} onPress={() => speak(translation || current.speech)} style={c.speak}>
+                <Pressable
+                  accessibilityLabel={isSignMode ? 'Speak translation' : 'Repeat description'}
+                  onPress={() => {
+                    if (isSignMode && translation) setSpokenTranslation(translation);
+                    speak(translation || current.speech);
+                  }}
+                  style={c.speak}
+                >
                   <Ionicons name="volume-high" size={24} color="#07110F" />
                 </Pressable>
                 {!isSignMode && (
