@@ -194,8 +194,8 @@ and 10 words), so it cannot recognize signs that depend on movement.
   English with fixed rules (`glossToEnglish`). No language model.
 - **Speech:** `expo-speech`. In Sign to voice, **each confirmed word is spoken
   as soon as it is confirmed**, and the whole sentence is spoken again when
-  the hands have been down for 30 frames. The cloud decoder's segment is
-  spoken when it returns one.
+  the hands have been down for 30 frames. The cloud decoder's text is
+  shown as a guess and spoken only when the signer taps Speak.
 - **Bridge:** a word is sent once per gesture at ≥ 0.70; spelled words are
   sent only when the user presses Send.
 
@@ -211,7 +211,8 @@ and 10 words), so it cannot recognize signs that depend on movement.
    matches Holistic (section 2). Only pre-mirrored camera frames would swap it.
 5. ~~Speech before the phrase is final~~ Fixed: see section 9.
 6. ~~Pause = end of sentence, no manual control~~ Fixed: see section 9.
-7. **Cloud decoder can invent text** (3.4). Its YOLO fallback has no weights;
+7. **Cloud decoder can invent text** (3.4). It is no longer spoken without
+   the signer's confirmation (section 9). Its YOLO fallback has no weights;
    without them the request fails with the provider's error. With weights, a
    fallback word must now reach `SIGN_MIN_CONFIDENCE` like any other result.
 8. **Blendshape order** in the 281 vector is alphabetical, not MediaPipe's
@@ -265,7 +266,11 @@ the only landmark model runs in the browser.
 - **Handedness checked** on How2Sign frames (section 2); no code change needed.
 - **YOLO fallback** in `/v1/interpret-sign` applies `SIGN_MIN_CONFIDENCE`
   (2 API tests); `/v1/detect-sign` reports whether weights are loaded.
-- **Not changed:** the cloud decoder still speaks its own segments; the Bridge
+- **Cloud text needs confirmation** (`apps/mobile/app/camera.tsx`): neither
+  the browser nor the native path speaks cloud-decoder text on arrival. It is
+  labelled "Cloud guess · check, then Speak" until the signer taps Speak.
+  The on-device sentence is still spoken when it is final.
+- **Not changed:** the Bridge
   still sends one sign at a time; the rules still override the model.
 - **Not tested with a real camera or signer.** The controller is tested with
   simulated timings only.

@@ -49,6 +49,7 @@ export default function CameraScreen() {
   const [signContext, setSignContext] = useState<SignContextState>(emptySignContext);
   const [isAnalysingContext, setIsAnalysingContext] = useState(false);
   const [translation, setTranslation] = useState('');
+  const [spokenTranslation, setSpokenTranslation] = useState('');
   const [translationError, setTranslationError] = useState('');
   const [captureVersion, setCaptureVersion] = useState(0);
   const [campusLocation] = useState(() => (typeof window !== 'undefined' && window.localStorage ? window.localStorage.getItem('guidelens_campus_location') || 'Library Corridor' : 'Library Corridor'));
@@ -168,9 +169,12 @@ export default function CameraScreen() {
   const onDeviceWords = utterance.words;
   const utteranceFinal = utterance.phase === 'finalized';
   const onDeviceSentence = onDeviceWords.length ? glossToEnglish(onDeviceWords) : '';
+  const cloudUnconfirmed = Boolean(translation) && translation !== spokenTranslation;
   const signStatus = signContext.error
     ? 'Tracking problem'
-    : utterance.phase === 'finalized'
+    : cloudUnconfirmed
+      ? 'Cloud guess · check, then Speak'
+      : utterance.phase === 'finalized'
       ? (utterance.outcome === 'recognized' ? 'Final' : 'Unable to recognize')
       : utterance.phase === 'possible_end'
         ? 'Sentence ending…'
@@ -202,7 +206,9 @@ export default function CameraScreen() {
     : vision?.summary || (visionState === 'offline' ? 'Sign interpretation is reconnecting…' : 'Looking for a signed message…');
   const signDetail = usesBrowserHandTracking
     ? browserSignDetail
-    : vision?.speech || 'Keep both hands clearly in the camera frame.';
+    : vision?.should_speak && vision.speech
+      ? `${vision.speech} · Not spoken yet. Tap Speak if this is what you signed.`
+      : vision?.speech || 'Keep both hands clearly in the camera frame.';
 
   const speak = (text = current.speech) => {
     if (!speaking || !text.trim()) return;
@@ -216,6 +222,7 @@ export default function CameraScreen() {
     setMode(nextMode);
     setSignContext(emptySignContext);
     setTranslation('');
+    setSpokenTranslation('');
     setTranslationError('');
     setIsAnalysingContext(false);
     translationInFlight.current = false;
@@ -232,6 +239,7 @@ export default function CameraScreen() {
     capturedSequence.current = [];
     capturedFrames.current = [];
     setTranslation('');
+    setSpokenTranslation('');
     setTranslationError('');
     setIsAnalysingContext(false);
     translationInFlight.current = false;
@@ -255,10 +263,9 @@ export default function CameraScreen() {
     try {
       const interpreted = await interpretSignSequence(frames, lastTranslation.current, requestController.signal);
       if (interpreted && interpreted.transcript) {
+        // A vision model can produce a sentence that was not signed, so it is
+        // shown for the signer to check and spoken only from the Speak button.
         setTranslation(interpreted.transcript);
-        if (interpreted.should_speak && interpreted.segment && interpreted.transcript !== lastTranslation.current) {
-          speak(interpreted.segment);
-        }
         lastTranslation.current = interpreted.transcript;
       }
     } catch {
@@ -273,15 +280,6 @@ export default function CameraScreen() {
   useEffect(() => () => {
     void Speech.stop();
   }, []);
-
-  useEffect(() => {
-    if (!usesBrowserHandTracking && isSignMode && vision?.should_speak && vision.speech) {
-      if (vision.scene_key !== lastTranslation.current) {
-        lastTranslation.current = vision.scene_key;
-        speak(vision.speech);
-      }
-    }
-  }, [isSignMode, usesBrowserHandTracking, vision]);
 
   useEffect(() => {
     if (isSignMode || !vision?.approaching?.length) return;
@@ -647,10 +645,13 @@ export default function CameraScreen() {
                     <Text style={c.aslOverlayToggleText}>{showLandmarks ? 'Hide lines' : 'Show lines'}</Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => speak(displayedTranscript || spelledText || onDeviceSentence)}
+                    onPress={() => {
+                      if (displayedTranscript) setSpokenTranslation(displayedTranscript);
+                      speak(displayedTranscript || spelledText || onDeviceSentence);
+                    }}
                     disabled={!displayedTranscript && !spelledText && !onDeviceSentence}
                     style={[c.aslSpeakMiniBtn, !displayedTranscript && !spelledText && !onDeviceSentence && c.aslSpeakMiniBtnDisabled]}
-                    accessibilityLabel="Speak contextual translation"
+                    accessibilityLabel={cloudUnconfirmed ? 'Confirm and speak the cloud translation' : 'Speak contextual translation'}
                   >
                     <Ionicons name="volume-high" size={15} color="#07110F" />
                     <Text style={c.aslSpeakMiniText}>Speak</Text>
