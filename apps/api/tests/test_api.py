@@ -94,6 +94,30 @@ def test_sign_sequence_fails_closed_without_provider_key():
     assert response.json()["detail"] == "Vision service is not configured"
 
 
+def _fallback_sign(monkeypatch, label, confidence):
+    import main
+    from schemas import DetectedObject
+
+    sign = DetectedObject(label=label, confidence=confidence, position="center", x=0, y=0, width=1, height=1)
+    monkeypatch.setattr(main._yolo_sign_detector, "detect", lambda _: [sign])
+    return client.post(
+        "/v1/interpret-sign",
+        headers={"X-Session-ID": f"fallback-{label}-{confidence}"},
+        json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 3},
+    )
+
+
+def test_sign_fallback_ignores_detections_below_the_sign_threshold(monkeypatch):
+    response = _fallback_sign(monkeypatch, "Hello", 0.41)
+    assert response.status_code == 503
+
+
+def test_sign_fallback_speaks_a_confident_whole_word(monkeypatch):
+    response = _fallback_sign(monkeypatch, "Hello", 0.9)
+    assert response.status_code == 200
+    assert response.json()["segment"] == "Hello."
+
+
 def test_unisign_is_opt_in_and_does_not_load_from_health_check():
     status = client.get("/v1/unisign/status")
     assert status.status_code == 200

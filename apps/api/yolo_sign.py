@@ -38,6 +38,10 @@ class YoloSignDetector:
             else:
                 self.model_path = ""
 
+    @property
+    def available(self) -> bool:
+        return self._model() is not None
+
     @lru_cache(maxsize=1)
     def _model(self):
         if not self.model_path or not Path(self.model_path).exists():

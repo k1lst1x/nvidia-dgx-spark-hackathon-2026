@@ -66,13 +66,13 @@ missing values as zeros, clips shorter than 64 frames zero-padded at the end,
 and the same 0.3 confidence threshold. Upstream splits train and test by
 participant.
 
-**Still open: left and right hands.** The training data came from MediaPipe
-Holistic, where "left" is the signer's own left hand. The app's Holistic path
-matches that. Its fallback path (separate hand tracker) uses the hand
-tracker's own label on an unmirrored image, which may be the opposite hand.
-One real-camera check settles it: with the fallback active, raise the right
-hand and see which slot fills. Not changed here because it cannot be verified
-without a camera.
+**Left and right hands: checked, consistent.** The training data came from
+MediaPipe Holistic, where "left" is the signer's own left hand. Both app
+paths detect on the raw `<video>` frame; the mirror is CSS on the preview
+only. On 62 frames from four How2Sign clips (unmirrored, frontal), the hand
+tracker labelled Holistic's left hand "Left" 61 times, and that hand sat at
+the pose model's left wrist. So the fallback path fills the same slot as
+Holistic. Not checked: a device whose camera delivers pre-mirrored frames.
 
 ## 3. Models that run
 
@@ -99,8 +99,10 @@ How it is driven (`ASLWordEngine`):
 1. A rolling buffer of up to 64 frames; inference every 3rd frame once 12
    frames exist. Shorter buffers are zero-padded at the end.
 2. A motion gate skips inference when the wrist moves less than 0.003 per frame.
-3. A sign is confirmed when it is the top class in 2 consecutive windows at
-   ≥ 0.45, or 3 at ≥ 0.30.
+3. A window votes only if its top class is ≥ 0.30 and at least 0.10 ahead of
+   the runner-up (`apps/mobile/src/signConfirmation.ts`). A sign is confirmed
+   after 2 consecutive votes at ≥ 0.45, or 3 below that. The 0.10 margin is a
+   guess, not tuned on data.
 4. The same sign is not confirmed again within 2.5 s.
 5. The buffer resets after 8 frames with no hands. The phrase ends after 30
    frames with no hands. A phrase holds at most 12 words.
@@ -199,16 +201,19 @@ and 10 words), so it cannot recognize signs that depend on movement.
 
 ## 6. Known failure modes
 
-1. **Left/right hand assignment** in the fallback tracking path (section 2).
-2. **No "no sign" class.** Any movement is scored against 250 words; the
-   threshold of 0.30 is low for 250 classes. False words are likely on
-   non-signing movement.
+1. ~~Left/right hand assignment in the fallback path~~ Checked: consistent
+   (section 2).
+2. **No "no sign" class.** Any movement is scored against 250 words. The
+   margin rule rejects near-ties, but a confident wrong word on non-signing
+   movement is still possible.
 3. **Rules override the model** with fixed confidence (3.2).
-4. **Handedness** comes from MediaPipe's label. With a mirrored front camera
-   it can be swapped, which moves the hand into the wrong slot of both vectors.
+4. **Handedness** comes from MediaPipe's label on the unmirrored frame, which
+   matches Holistic (section 2). Only pre-mirrored camera frames would swap it.
 5. ~~Speech before the phrase is final~~ Fixed: see section 9.
 6. ~~Pause = end of sentence, no manual control~~ Fixed: see section 9.
-7. **Cloud decoder can invent text** (3.4), and its fallback is missing.
+7. **Cloud decoder can invent text** (3.4). Its YOLO fallback has no weights;
+   without them the request fails with the provider's error. With weights, a
+   fallback word must now reach `SIGN_MIN_CONFIDENCE` like any other result.
 8. **Blendshape order** in the 281 vector is alphabetical, not MediaPipe's
    order (`FEATURE_SCHEMA_281.md`). Harmless while consistent, but nothing
    enforces it.
@@ -219,7 +224,7 @@ and 10 words), so it cannot recognize signs that depend on movement.
 | Endpoint | Purpose | State |
 |---|---|---|
 | `POST /v1/interpret-sign` | 3 frames → English (vision LLM) | works with a provider |
-| `POST /v1/detect-sign` | 1 frame → YOLO sign class | returns empty (no weights) |
+| `POST /v1/detect-sign` | 1 frame → YOLO sign class | returns empty, `available: false` (no weights) |
 | `GET /v1/unisign/status` | Uni-Sign readiness | works, reports not ready |
 | `POST /v1/unisign/interpret` | raw Holistic → English | returns 503 |
 
@@ -234,7 +239,7 @@ the only landmark model runs in the browser.
 - **Phases 3 and 5** need verified signing data, which the project does not
   have. `SignRecorder` must be wired to a screen first.
 - **Definition of Done, current status:** correct checkpoint loads (yes, for
-  the 250-word model); input mapping confirmed (**no**); runs on real camera
+  the 250-word model); input mapping confirmed (yes, on recorded video); runs on real camera
   data (yes, untested here); vocabulary respected (yes); duplicate control
   (yes); sentence finalization (pause only); no unstable speech (**no**);
   performance on target hardware (**no**); tested against verified ASL data
@@ -254,6 +259,12 @@ the only landmark model runs in the browser.
 - **Recording screen** at `/record` (linked from Hub → Telemetry): signer code,
   gloss labels, consent and label-check boxes; saves landmark JSON with
   per-frame timestamps and the schema name. No video.
+- **Word confirmation margin** (`apps/mobile/src/signConfirmation.ts`, 4 unit
+  tests): near-ties between the top two words no longer count. The ONNX model
+  is unchanged.
+- **Handedness checked** on How2Sign frames (section 2); no code change needed.
+- **YOLO fallback** in `/v1/interpret-sign` applies `SIGN_MIN_CONFIDENCE`
+  (2 API tests); `/v1/detect-sign` reports whether weights are loaded.
 - **Not changed:** the cloud decoder still speaks its own segments; the Bridge
   still sends one sign at a time; the rules still override the model.
 - **Not tested with a real camera or signer.** The controller is tested with

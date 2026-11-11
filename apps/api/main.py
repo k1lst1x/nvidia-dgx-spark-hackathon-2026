@@ -829,7 +829,11 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         last_frame_bytes = decoded[-1][0] if decoded else b""
         detected = _yolo_sign_detector.detect(last_frame_bytes) if last_frame_bytes else []
         words = [(sign, yolo_sign_phrase(sign.label)) for sign in detected]
-        words = [(sign, phrase) for sign, phrase in words if phrase]
+        words = [
+            (sign, phrase)
+            for sign, phrase in words
+            if phrase and sign.confidence >= SIGN_MIN_CONFIDENCE
+        ]
         if words:
             top, sign_word = words[0]
             new_transcript = (sequence.previous_transcript + " " + sign_word).strip() if sequence.previous_transcript else sign_word
@@ -862,6 +866,7 @@ async def detect_sign_yolo(file: UploadFile = File(...)):
     primary = signs[0].label if signs else ""
     conf = signs[0].confidence if signs else 0.0
     return {
+        "available": _yolo_sign_detector.available,
         "detected_signs": signs,
         "primary_sign": primary,
         "confidence": conf,

@@ -1,5 +1,6 @@
 import labelsJson from '../assets/models/asl_word_labels.json';
 import { getOrtRuntime } from './ortRuntime.web';
+import { requiredStableWindows, windowVote } from './signConfirmation';
 
 type OrtTensor = { data: Float32Array };
 type OrtSession = { run: (feeds: Record<string, unknown>) => Promise<Record<string, OrtTensor>> };
@@ -465,7 +466,6 @@ export class ASLWordEngine {
   private commitCount = 0;
   private phraseComplete = false;
   private kinematic = new KinematicGestureRecognizer();
-  private readonly confidenceThreshold = 0.30;
   private readonly commitCooldownMs = 1200;
   // A held sign keeps matching every frame; only a repeat after this long counts as signed twice.
   private readonly repeatCooldownMs = 2500;
@@ -578,7 +578,7 @@ export class ASLWordEngine {
       const best = top3[0];
       const now = performance.now();
 
-      if (best.confidence >= this.confidenceThreshold) {
+      if (windowVote(top3)) {
         if (best.label === this.candidate) {
           this.stablePredictions += 1;
         } else {
@@ -586,9 +586,8 @@ export class ASLWordEngine {
           this.stablePredictions = 1;
         }
 
-        const requiredStable = best.confidence >= 0.45 ? 2 : 3;
         if (
-          this.stablePredictions >= requiredStable &&
+          this.stablePredictions >= requiredStableWindows(best.confidence) &&
           (best.label !== this.lastCommitted || now - this.lastCommitTime > this.commitCooldownMs)
         ) {
           // Only signs that stayed the top guess across consecutive windows join the phrase.
