@@ -5,3 +5,14 @@ import type { DetectionResult } from './detector.types';
 export async function detectObjects(_uri: string): Promise<DetectionResult> {
   return { available: false, detections: [] };
 }
+
+/** Browser only: detect from the live camera video. Null when not supported. */
+export function detectVideoFrame(_video: unknown): Promise<DetectionResult> | null {
+  return null;
+}
+
+export async function warmUpDetector(): Promise<void> {}
+
+export function localDetectorBackend(): 'webgpu' | 'wasm' | null {
+  return null;
+}

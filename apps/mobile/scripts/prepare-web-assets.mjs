@@ -17,7 +17,12 @@ await cp(join(mobile, 'assets', 'models', 'yolo11n.onnx'), join(publicDir, 'mode
 await cp(join(mobile, 'assets', 'models', 'asl_fingerspelling_landmarks.json'), join(publicDir, 'models', 'asl_fingerspelling_landmarks.json'));
 await cp(join(mobile, 'assets', 'models', 'asl_word_transformer.onnx'), join(publicDir, 'models', 'asl_word_transformer.onnx'));
 await cp(join(mobile, 'assets', 'models', 'asl_word_labels.json'), join(publicDir, 'models', 'asl_word_labels.json'));
-for (const name of ['ort.wasm.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm']) {
+// The WebGPU bundle runs the object detector on the GPU; it loads the asyncify
+// wasm build, and falls back to it on the CPU when WebGPU is unavailable.
+for (const name of [
+  'ort.wasm.min.js', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm',
+  'ort.webgpu.min.js', 'ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.asyncify.wasm',
+]) {
   await cp(join(ortDist, name), join(publicDir, 'ort', name));
 }
 

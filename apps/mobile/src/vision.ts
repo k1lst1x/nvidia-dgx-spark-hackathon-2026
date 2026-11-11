@@ -1,7 +1,7 @@
 import type { CameraView } from 'expo-camera';
 import { RefObject, useCallback, useEffect, useRef, useState } from 'react';
-import { detectObjects } from './detector';
-import type { LocalDetection } from './detector.types';
+import { detectObjects, detectVideoFrame, localDetectorBackend, warmUpDetector } from './detector';
+import type { DetectionResult, LocalDetection } from './detector.types';
 import type { BlockedView } from './blockedView';
 
 /** Directions the local camera frame looks blocked in, and when it was seen. */
@@ -106,10 +106,38 @@ export type VisionPerformance = {
   tracking_latency_ms: number | null;
   tracking_age_ms: number | null;
   tracking_status: 'waiting' | 'live' | 'slow' | 'offline';
+  /** Where the local detector runs: the GPU (WebGPU), the CPU (wasm), or native. */
+  local_backend?: 'webgpu' | 'wasm' | null;
 };
 
 // Local object frames should follow camera movement; cloud narration can update less often.
 const LOCAL_SCAN_INTERVAL_MS = 200;
+// While the browser detects straight from the video, the scan loop only
+// decides when the server and cloud need a new photo.
+const LIVE_SCAN_INTERVAL_MS = 250;
+const LIVE_LOCAL_FRESH_MS = 1000;
+
+function detectionSignature(detections: LocalDetection[]) {
+  return detections
+    .filter((item) => item.confidence >= 0.5)
+    .map((item) => item.label)
+    .sort()
+    .join('|');
+}
+
+/** The camera preview's <video> element on web, once it is playing. */
+function findCameraVideo(): HTMLVideoElement | null {
+  if (typeof document === 'undefined') return null;
+  for (const video of Array.from(document.querySelectorAll('video'))) {
+    if (video.readyState >= 2 && video.videoWidth > 0) return video;
+  }
+  return null;
+}
+
+const nextAnimationFrame = () => new Promise<void>((resolve) => {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+  else setTimeout(resolve, 16);
+});
 const LOCAL_API_PORT = '8000';
 
 function normalizeApiUrl(value: string): string {
@@ -473,6 +501,9 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     { ...local, objects: withTrackedDepth(local.objects, trackedSnapshot.current) }
   ), []);
   const captureTimes = useRef<number[]>([]);
+  // Latest result of the browser's live-video detection loop. While it is
+  // fresh, the scan loop below uses it instead of capturing and detecting again.
+  const liveLocal = useRef<{ result: DetectionResult; at: number } | null>(null);
   const signFrames = useRef<string[]>([]);
   const signTranscript = useRef('');
 
@@ -490,7 +521,31 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
     setState((current) => current === 'offline' ? 'analyzing' : current);
     let nextDelay = mode === 'sign' ? 700 : LOCAL_SCAN_INTERVAL_MS;
     const activeApiUrl = getApiUrl();
+    const live = mode === 'scene' && liveLocal.current && Date.now() - liveLocal.current.at <= LIVE_LOCAL_FRESH_MS
+      ? liveLocal.current.result
+      : null;
     try {
+      if (live) {
+        // Boxes already update every video frame; only capture a photo when the
+        // server tracker or the cloud description is due for a new frame.
+        nextDelay = LIVE_SCAN_INTERVAL_MS;
+        const now = Date.now();
+        const signature = detectionSignature(live.detections);
+        const shouldUseCloud = Boolean(activeApiUrl) && (signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000);
+        const trackingDue = Boolean(activeApiUrl) && now - lastTrackingAnalysis.current >= 900 && !trackingInFlight.current;
+        if (!trackingDue && !(shouldUseCloud && !cloudInFlight.current)) {
+          localSignature.current = signature;
+          failures.current = 0;
+          setState('live');
+          if (!activeApiUrl || !shouldUseCloud) {
+            const localResult = withDepth(synthesizeLocalSceneResult(live.detections, sceneKey.current, mode, live.blocked));
+            sceneKey.current = localResult.scene_key;
+            setResult(localResult);
+            setLastUpdated(Date.now());
+          }
+          return;
+        }
+      }
       const captureStartedAt = performanceNow();
       const picture = await camera.current.takePictureAsync({ quality: 0.7, skipProcessing: true });
       if (!picture?.uri) throw new Error('Camera did not return an image');
@@ -503,7 +558,8 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         : 0;
       setPerformance((previous) => ({
         ...previous,
-        capture_fps: Math.round(captureFps * 10) / 10,
+        // While live-video detection runs, it reports its own frame rate.
+        capture_fps: live ? previous.capture_fps : Math.round(captureFps * 10) / 10,
         capture_ms: Math.round(captureEndedAt - captureStartedAt),
       }));
       if (mode === 'sign') {
@@ -550,18 +606,19 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         }
         return;
       }
-      const localDetectionStartedAt = performanceNow();
-      const local = await detectObjects(picture.uri);
-      const localDetectionMs = Math.round(performanceNow() - localDetectionStartedAt);
-      if (runGeneration !== generation.current) return;
-      setDetections(local.detections);
-      setBlocked(local.blocked ? { ...local.blocked, at: Date.now() } : null);
-      setPerformance((previous) => ({ ...previous, local_detection_ms: localDetectionMs }));
-      const signature = local.detections
-        .filter((item) => item.confidence >= 0.5)
-        .map((item) => item.label)
-        .sort()
-        .join('|');
+      let local: DetectionResult;
+      if (live) {
+        local = live;
+      } else {
+        const localDetectionStartedAt = performanceNow();
+        local = await detectObjects(picture.uri);
+        const localDetectionMs = Math.round(performanceNow() - localDetectionStartedAt);
+        if (runGeneration !== generation.current) return;
+        setDetections(local.detections);
+        setBlocked(local.blocked ? { ...local.blocked, at: Date.now() } : null);
+        setPerformance((previous) => ({ ...previous, local_detection_ms: localDetectionMs }));
+      }
+      const signature = detectionSignature(local.detections);
       const now = Date.now();
       const shouldUseCloud = Boolean(activeApiUrl) && (!local.available || signature !== localSignature.current || now - lastCloudAnalysis.current >= 8000);
       localSignature.current = signature;
@@ -668,6 +725,60 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
       }
     }
   }, [camera, enabled, mode, withDepth]);
+
+  // Browser: run the local detector on every displayed video frame, so the
+  // boxes follow the camera at the detector's real speed (about 30 fps or more
+  // on WebGPU) instead of the photo-capture cadence.
+  useEffect(() => {
+    if (!enabled || mode !== 'scene' || typeof document === 'undefined') return;
+    let active = true;
+    const frameTimes: number[] = [];
+    let lastReport = 0;
+    void warmUpDetector().catch(() => {});
+    const loop = async () => {
+      while (active) {
+        const video = findCameraVideo();
+        const started = performanceNow();
+        const pending = video ? detectVideoFrame(video) : null;
+        if (!pending) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          continue;
+        }
+        const local = await pending;
+        if (!active) return;
+        if (!local.available) {
+          liveLocal.current = null;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+        const finished = performanceNow();
+        liveLocal.current = { result: local, at: Date.now() };
+        setDetections(local.detections);
+        setBlocked(local.blocked ? { ...local.blocked, at: Date.now() } : null);
+        frameTimes.push(finished);
+        while (frameTimes.length && finished - frameTimes[0] > 2000) frameTimes.shift();
+        if (finished - lastReport >= 500) {
+          lastReport = finished;
+          const fps = frameTimes.length > 1 ? (frameTimes.length - 1) * 1000 / (finished - frameTimes[0]) : 0;
+          setPerformance((previous) => ({
+            ...previous,
+            capture_fps: Math.round(fps * 10) / 10,
+            local_detection_ms: Math.round(finished - started),
+            local_backend: localDetectorBackend(),
+          }));
+        }
+        // Yield to the browser so the new boxes paint before the next frame.
+        // CPU inference blocks the page while it runs, so leave it some room.
+        if (localDetectorBackend() === 'wasm') await new Promise((resolve) => setTimeout(resolve, 120));
+        await nextAnimationFrame();
+      }
+    };
+    void loop();
+    return () => {
+      active = false;
+      liveLocal.current = null;
+    };
+  }, [enabled, mode]);
 
   const scanNow = useCallback(() => {
     stop();

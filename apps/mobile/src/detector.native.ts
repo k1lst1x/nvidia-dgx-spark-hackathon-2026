@@ -340,3 +340,14 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
     return { available: false, detections: [] };
   }
 }
+
+/** Browser only: the native app has no video element to read from. */
+export function detectVideoFrame(_video: unknown): Promise<DetectionResult> | null {
+  return null;
+}
+
+export async function warmUpDetector(): Promise<void> {}
+
+export function localDetectorBackend(): 'webgpu' | 'wasm' | null {
+  return null;
+}

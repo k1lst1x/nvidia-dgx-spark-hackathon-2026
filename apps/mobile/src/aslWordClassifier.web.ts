@@ -1,4 +1,5 @@
 import labelsJson from '../assets/models/asl_word_labels.json';
+import { getOrtRuntime } from './ortRuntime.web';
 
 type OrtTensor = { data: Float32Array };
 type OrtSession = { run: (feeds: Record<string, unknown>) => Promise<Record<string, OrtTensor>> };
@@ -39,26 +40,10 @@ function assetUrl(path: string) {
   return `${base}/${path}`.replace(/([^:]\/)\/+/, '$1');
 }
 
-let runtimePromise: Promise<OrtRuntime> | null = null;
 let sessionPromise: Promise<OrtSession> | null = null;
 
 function getRuntime() {
-  if (!runtimePromise) {
-    runtimePromise = new Promise((resolve, reject) => {
-      const existing = (globalThis as typeof globalThis & { ort?: OrtRuntime }).ort;
-      if (existing) return resolve(existing);
-      const script = document.createElement('script');
-      script.src = assetUrl('ort/ort.wasm.min.js');
-      script.onload = () => {
-        const loaded = (globalThis as typeof globalThis & { ort?: OrtRuntime }).ort;
-        if (loaded) resolve(loaded);
-        else reject(new Error('ONNX Runtime did not initialise'));
-      };
-      script.onerror = () => reject(new Error('ONNX Runtime could not be loaded'));
-      document.head.appendChild(script);
-    });
-  }
-  return runtimePromise;
+  return getOrtRuntime() as unknown as Promise<OrtRuntime>;
 }
 
 function getSession() {

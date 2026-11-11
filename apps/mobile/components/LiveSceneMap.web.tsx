@@ -38,7 +38,7 @@ type ViewMode = 'top' | 'orbit';
 type PanelSize = 'mini' | 'small' | 'large';
 
 const EYE_HEIGHT_M = 1.45;
-const MAP_INTERVAL_MS = 250;
+const MAP_INTERVAL_MS = 100;
 
 // Object memory: a detected object stays on the map after it leaves view,
 // fading out, then is forgotten. The cap keeps the scene small.
@@ -1248,7 +1248,7 @@ export default function LiveSceneMap({ detections, obstacles = null, blocked = n
 
           {showDetails && (
             <Text style={styles.note}>
-              Scan {performance.capture_fps.toFixed(1)} fps · local {performance.local_detection_ms ?? '—'} ms · API {performance.tracking_latency_ms ?? '—'} ms / {performance.tracking_age_ms ?? '—'} ms ({performance.tracking_status})
+              Detect {performance.capture_fps.toFixed(1)} fps{performance.local_backend ? ` on ${performance.local_backend === 'webgpu' ? 'GPU' : 'CPU'}` : ''} · local {performance.local_detection_ms ?? '—'} ms · API {performance.tracking_latency_ms ?? '—'} ms / {performance.tracking_age_ms ?? '—'} ms ({performance.tracking_status})
               {'\n'}Map {stats.mapHz.toFixed(1)} Hz · render {stats.renderFps} fps · objects with depth {stats.depthObjects}
               {'\n'}Distances come from depth and are kept {OBJECT_MEMORY_MS / 1000}s; surfaces within {OBSTACLE_RANGE_M} m are kept {OBSTACLE_MEMORY_MS / 1000}s (max {MAX_OBSTACLE_DOTS}).
               {'\n'}Objects with no depth show as a dashed direction, never a guessed distance. Scroll to zoom; drag to rotate in 3D.

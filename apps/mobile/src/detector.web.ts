@@ -1,13 +1,6 @@
 import type { DetectionResult, LocalDetection } from './detector.types';
 import { analyzeBlockedView } from './blockedView';
-
-type OrtTensor = { data: Float32Array };
-type OrtSession = { run: (feeds: Record<string, unknown>) => Promise<Record<string, OrtTensor>> };
-type OrtRuntime = {
-  env: { wasm: { wasmPaths: string; numThreads: number } };
-  InferenceSession: { create: (url: string, options: object) => Promise<OrtSession> };
-  Tensor: new (type: string, data: Float32Array, dimensions: number[]) => unknown;
-};
+import { assetUrl, getOrtRuntime, runtimeHasWebGpu, type OrtSession } from './ortRuntime.web';
 
 const INPUT_SIZE = 640;
 const SCORE_THRESHOLD = 0.4;
@@ -85,6 +78,11 @@ function estimateSpatialInfo(item: LocalDetection): { distance_m: number; direct
   return { distance_m, direction };
 }
 
+// A box that stops matching fades over about this long per 12% of confidence,
+// and is dropped once unseen for TRACK_HOLD_MS.
+const TRACK_DECAY_MS = 200;
+const TRACK_HOLD_MS = 600;
+
 type TrackState = LocalDetection & {
   missed: number;
   id: number;
@@ -99,6 +97,7 @@ type TrackState = LocalDetection & {
 class TemporalObjectTracker {
   private tracks: TrackState[] = [];
   private nextId = 1;
+  private lastUpdate = 0;
   private readonly emaAlpha = 0.68; // Smooth, low-latency filter
   private readonly matchIouThreshold = 0.28;
 
@@ -141,7 +140,9 @@ class TemporalObjectTracker {
         const dt = Math.max(0.05, (now - track.lastSeenTime) / 1000);
         if (track.prevDistance != null && spatial.distance_m != null) {
           const dDist = track.prevDistance - spatial.distance_m;
-          const speed = dDist / dt; // positive means object is getting closer
+          // Positive means the object is getting closer. Smoothed, because at
+          // high frame rates the per-frame change is mostly box jitter.
+          const speed = 0.8 * (track.velocity_mps ?? 0) + 0.2 * (dDist / dt);
           track.velocity_mps = Math.round(speed * 10) / 10;
           track.is_approaching = speed > 0.35 && spatial.distance_m <= 2.5 && spatial.direction === 'ahead';
         } else {
@@ -176,16 +177,19 @@ class TemporalObjectTracker {
       }
     }
 
-    // 3. Age unmatched existing tracks (Hysteresis persistence to prevent flickering)
+    // 3. Age unmatched existing tracks by elapsed time, not frame count, so a
+    // box holds steady the same way at 3 fps on the CPU and 30 fps on the GPU.
+    const elapsed = this.lastUpdate ? Math.min(1000, now - this.lastUpdate) : 0;
+    this.lastUpdate = now;
+    const decay = Math.pow(0.88, elapsed / TRACK_DECAY_MS);
     for (let t = 0; t < this.tracks.length; t++) {
       if (!matchedTrackIndices.has(t)) {
         this.tracks[t].missed += 1;
-        this.tracks[t].confidence *= 0.88;
+        this.tracks[t].confidence *= decay;
       }
     }
 
-    // Keep active tracks (survive up to 2 missed frames if previously confident)
-    this.tracks = this.tracks.filter((t) => t.missed <= 2 && t.confidence >= 0.22);
+    this.tracks = this.tracks.filter((t) => now - t.lastSeenTime <= TRACK_HOLD_MS && t.confidence >= 0.22);
 
     // 4. Priority Sort: Approaching hazards first, then person, then closest obstacles (<1.5m), then highest confidence
     const sorted = [...this.tracks].sort((a, b) => {
@@ -209,46 +213,35 @@ class TemporalObjectTracker {
 
 const tracker = new TemporalObjectTracker();
 
-function assetUrl(path: string) {
-  const base = document.querySelector('script[src*="/_expo/"]')?.getAttribute('src')?.split('/_expo/')[0] || '';
-  return `${base}/${path}`.replace(/([^:]\/)\/+/, '$1');
-}
-
-let runtimePromise: Promise<OrtRuntime> | null = null;
 let sessionPromise: Promise<OrtSession> | null = null;
+let backend: 'webgpu' | 'wasm' | null = null;
 
-function getRuntime() {
-  if (!runtimePromise) {
-    runtimePromise = new Promise((resolve, reject) => {
-      const existing = (globalThis as typeof globalThis & { ort?: OrtRuntime }).ort;
-      if (existing) return resolve(existing);
-      const script = document.createElement('script');
-      script.src = assetUrl('ort/ort.wasm.min.js');
-      script.onload = () => {
-        const loaded = (globalThis as typeof globalThis & { ort?: OrtRuntime }).ort;
-        if (loaded) resolve(loaded);
-        else reject(new Error('ONNX Runtime did not initialise'));
-      };
-      script.onerror = () => reject(new Error('ONNX Runtime could not be loaded'));
-      document.head.appendChild(script);
-    });
-  }
-  return runtimePromise;
+/** Which device the local detector runs on, once loaded. */
+export function localDetectorBackend() {
+  return backend;
 }
 
 function getSession() {
   if (!sessionPromise) {
-    sessionPromise = getRuntime().then((ort) => {
-      ort.env.wasm.wasmPaths = assetUrl('ort/');
-      ort.env.wasm.numThreads = globalThis.crossOriginIsolated
-        ? Math.min(4, navigator.hardwareConcurrency || 1)
-        : 1;
+    sessionPromise = getOrtRuntime().then(async (ort) => {
       // Ultralytics YOLO11n, COCO, 640 input, output [1, 84, 8400]. AGPL-3.0.
-      return ort.InferenceSession.create(assetUrl('models/yolo11n.onnx'), {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-      });
+      const model = assetUrl('models/yolo11n.onnx');
+      // On a laptop GPU this is about 10x faster than the single-threaded CPU
+      // backend (roughly 18 ms against 210 ms per frame).
+      if (runtimeHasWebGpu()) {
+        try {
+          const session = await ort.InferenceSession.create(model, { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
+          backend = 'webgpu';
+          return session;
+        } catch (error) {
+          console.warn('WebGPU detector unavailable; using the CPU', error);
+        }
+      }
+      const session = await ort.InferenceSession.create(model, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+      backend = 'wasm';
+      return session;
     });
+    sessionPromise.catch(() => { sessionPromise = null; });
   }
   return sessionPromise;
 }
@@ -318,27 +311,45 @@ function mapBoxToSource(
   return { x, y, width, height };
 }
 
-export async function detectObjects(uri: string): Promise<DetectionResult> {
+let frameCanvas: HTMLCanvasElement | null = null;
+let frameContext: CanvasRenderingContext2D | null = null;
+const plane = INPUT_SIZE * INPUT_SIZE;
+const input = new Float32Array(plane * 3);
+const bestScores = new Float32Array(PREDICTIONS);
+const bestClasses = new Uint8Array(PREDICTIONS);
+
+// One frame at a time: the canvas, input buffer and tracker are shared.
+let queue: Promise<unknown> = Promise.resolve();
+
+function detectSource(source: CanvasImageSource, sourceWidth: number, sourceHeight: number): Promise<DetectionResult> {
+  const next = queue.then(() => runDetection(source, sourceWidth, sourceHeight));
+  queue = next.catch(() => undefined);
+  return next;
+}
+
+/** Run YOLO11n on any drawable frame (an image or the live camera video). */
+async function runDetection(source: CanvasImageSource, sourceWidth: number, sourceHeight: number): Promise<DetectionResult> {
   try {
-    const [ort, session, image] = await Promise.all([getRuntime(), getSession(), loadImage(uri)]);
-    const canvas = document.createElement('canvas');
-    canvas.width = INPUT_SIZE;
-    canvas.height = INPUT_SIZE;
-    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const [ort, session] = await Promise.all([getOrtRuntime(), getSession()]);
+    if (!frameContext) {
+      frameCanvas = document.createElement('canvas');
+      frameCanvas.width = INPUT_SIZE;
+      frameCanvas.height = INPUT_SIZE;
+      frameContext = frameCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    const context = frameContext;
     if (!context) throw new Error('Image preprocessing is unavailable');
     // Preserve the camera's aspect ratio. Stretching a portrait/landscape frame
     // into a square makes YOLOX predict broad, inaccurate boxes.
-    const scale = Math.min(INPUT_SIZE / image.naturalWidth, INPUT_SIZE / image.naturalHeight);
-    const renderedWidth = image.naturalWidth * scale;
-    const renderedHeight = image.naturalHeight * scale;
+    const scale = Math.min(INPUT_SIZE / sourceWidth, INPUT_SIZE / sourceHeight);
+    const renderedWidth = sourceWidth * scale;
+    const renderedHeight = sourceHeight * scale;
     const padX = (INPUT_SIZE - renderedWidth) / 2;
     const padY = (INPUT_SIZE - renderedHeight) / 2;
     context.fillStyle = 'rgb(114, 114, 114)';
     context.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-    context.drawImage(image, padX, padY, renderedWidth, renderedHeight);
+    context.drawImage(source, padX, padY, renderedWidth, renderedHeight);
     const rgba = context.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
-    const plane = INPUT_SIZE * INPUT_SIZE;
-    const input = new Float32Array(plane * 3);
     for (let pixel = 0; pixel < plane; pixel += 1) {
       const offset = pixel * 4;
       input[pixel] = rgba[offset] / 255;
@@ -348,23 +359,29 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
     const output = await session.run({ images: new ort.Tensor('float32', input, [1, 3, INPUT_SIZE, INPUT_SIZE]) });
     const values = output.output0.data as Float32Array;
     const detections: LocalDetection[] = [];
-    for (let index = 0; index < PREDICTIONS; index += 1) {
-      let classIndex = 0;
-      let confidence = 0;
-      for (let label = 0; label < COCO.length; label += 1) {
-        const score = values[(4 + label) * PREDICTIONS + index];
-        if (score > confidence) {
-          confidence = score;
-          classIndex = label;
+    // Scan one class row at a time: the output is class-major, so this reads
+    // memory in order instead of striding 8400 floats per step.
+    bestScores.fill(0);
+    for (let label = 0; label < COCO.length; label += 1) {
+      const row = (4 + label) * PREDICTIONS;
+      for (let index = 0; index < PREDICTIONS; index += 1) {
+        const score = values[row + index];
+        if (score > bestScores[index]) {
+          bestScores[index] = score;
+          bestClasses[index] = label;
         }
       }
+    }
+    for (let index = 0; index < PREDICTIONS; index += 1) {
+      const confidence = bestScores[index];
+      const classIndex = bestClasses[index];
       if (confidence < SCORE_THRESHOLD) continue;
       const centerX = values[index];
       const centerY = values[PREDICTIONS + index];
       const width = values[PREDICTIONS * 2 + index];
       const height = values[PREDICTIONS * 3 + index];
       const box = mapBoxToSource(
-        centerX, centerY, width, height, scale, padX, padY, image.naturalWidth, image.naturalHeight,
+        centerX, centerY, width, height, scale, padX, padY, sourceWidth, sourceHeight,
       );
       if (!box) continue;
       detections.push({
@@ -379,4 +396,36 @@ export async function detectObjects(uri: string): Promise<DetectionResult> {
     console.warn('Local YOLO11 inference unavailable', error);
     return { available: false, detections: [] };
   }
+}
+
+export async function detectObjects(uri: string): Promise<DetectionResult> {
+  try {
+    const image = await loadImage(uri);
+    return detectSource(image, image.naturalWidth, image.naturalHeight);
+  } catch (error) {
+    console.warn('Camera frame could not be decoded', error);
+    return { available: false, detections: [] };
+  }
+}
+
+/** Detect straight from the live camera video: no JPEG encode or decode per frame. */
+export function detectVideoFrame(video: HTMLVideoElement): Promise<DetectionResult> | null {
+  if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
+  return detectSource(video, video.videoWidth, video.videoHeight);
+}
+
+/** Load the model and compile its GPU shaders before the first camera frame. */
+let warmUp: Promise<void> | null = null;
+
+export function warmUpDetector() {
+  if (!warmUp) {
+    warmUp = (async () => {
+      const [ort, session] = await Promise.all([getOrtRuntime(), getSession()]);
+      const next = queue.then(() => session.run({ images: new ort.Tensor('float32', input, [1, 3, INPUT_SIZE, INPUT_SIZE]) }));
+      queue = next.catch(() => undefined);
+      await next;
+    })();
+    warmUp.catch(() => { warmUp = null; });
+  }
+  return warmUp;
 }
