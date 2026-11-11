@@ -68,8 +68,12 @@ def test_low_confidence_unverified_shared_duplicates_and_tracker_ids_are_rejecte
     auth = headers("device-a", "session-a")
 
     low = observation("unclear object")
-    low["confidence"] = 0.4
+    low["confidence"] = 0.39
     assert client.post("/v1/observations", headers=auth, json=low).status_code == 422
+
+    low_personal = observation("unclear umbrella", "personal", False)
+    low_personal["confidence"] = 0.6
+    assert client.post("/v1/observations", headers=auth, json=low_personal).status_code == 422
 
     unverified = observation("unconfirmed chair", verified=False)
     assert client.post("/v1/observations", headers=auth, json=unverified).status_code == 422
