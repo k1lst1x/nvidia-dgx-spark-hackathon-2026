@@ -69,12 +69,18 @@ export type SightObservation = {
   origin: 'manual' | 'detector';
 };
 
+export type GpuStatus = {
+  available: boolean;
+  gpus: Array<{ name: string; utilization_pct: number | null; memory_used_mb: number | null; memory_total_mb: number | null; temperature_c: number | null }>;
+};
+
 export type SightDashboard = {
   zone_id: string;
   connected_devices: number;
   recent_observations: SightObservation[];
   tracking_latency_ms: number | null;
   tracking_requests_last_5m: number;
+  gpu?: GpuStatus | null;
 };
 
 export type SightChanges = {
@@ -209,7 +215,9 @@ export async function getCampusAlerts(location?: string): Promise<CampusAlert[]>
 
     if (res.ok) {
       const serverAlerts = (await res.json()) as CampusAlert[];
-      if (Array.isArray(serverAlerts) && serverAlerts.length > 0) {
+      // The server is the shared memory: an empty answer means nothing is
+      // active (a cleared hazard), not "use the old local copy".
+      if (Array.isArray(serverAlerts)) {
         setStoredJson(LOCAL_STORAGE_KEY_ALERTS, serverAlerts);
         return filterAlerts(serverAlerts, location);
       }

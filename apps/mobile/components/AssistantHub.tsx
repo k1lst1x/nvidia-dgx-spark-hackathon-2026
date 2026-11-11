@@ -16,11 +16,13 @@ import {
   CAMPUS_LOCATIONS,
   getCampusAlerts,
   reportCampusAlert,
-  checkWhatChanged,
+  getSightChanges,
+  getSightDashboard,
   type CampusAlert,
   type CampusLocation,
 } from '../src/campusMemory';
 import SharedSightDashboard from './SharedSightDashboard';
+import { getApiUrl } from '../src/vision';
 
 type ActiveTab = 'hub' | 'settings' | 'telemetry';
 type SelectedMode = 'scene' | 'sign' | 'bridge';
@@ -32,6 +34,7 @@ const isElectron =
 
 export default function AssistantHub() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('hub');
+  const [serverStats, setServerStats] = useState<Array<[string, string]>>([['Server', 'Checking…']]);
   const [selectedMode, setSelectedMode] = useState<SelectedMode>('scene');
 
   // Settings State
@@ -86,14 +89,64 @@ export default function AssistantHub() {
     }
   };
 
+  // The Hub has no camera, so it must never judge the path. It reports what
+  // other students confirmed in this room recently; the camera screen's
+  // "Changed?" button compares what the camera actually sees.
   const handleCheckWhatChanged = async () => {
-    setDeltaMessage(`Analyzing baseline for ${campusLocation}…`);
-    const res = await checkWhatChanged(campusLocation, []);
-    setDeltaMessage(res.delta_summary);
+    setDeltaMessage(`Checking recent reports for ${campusLocation}…`);
+    let message: string;
+    try {
+      const changes = await getSightChanges(campusLocation);
+      message = changes.added.length
+        ? `New in ${campusLocation} in the last hour: ${changes.added.slice(0, 5).join(', ')}.`
+        : changes.previously_seen.length
+          ? `No new reports in ${campusLocation}. Still reported: ${changes.previously_seen.slice(0, 5).join(', ')}.`
+          : `No reports in ${campusLocation} in the last hour. To check your surroundings, use Changed? on the camera screen.`;
+    } catch {
+      message = 'Connect to the GuideLens server to hear what other students reported. To check your surroundings, use Changed? on the camera screen.';
+    }
+    setDeltaMessage(message);
     if (speechEnabled) {
-      Speech.speak(res.speech, { rate: Number(speechRate) });
+      Speech.speak(message, { rate: Number(speechRate) });
     }
   };
+
+  // Live server values for the Telemetry tab (nothing here is hard-coded).
+  useEffect(() => {
+    if (activeTab !== 'telemetry') return undefined;
+    let cancelled = false;
+    const load = async () => {
+      const base = getApiUrl();
+      if (!base) {
+        setServerStats([['Server', 'Not configured · set the server address in Settings']]);
+        return;
+      }
+      try {
+        const health = await fetch(`${base}/health`).then((response) => response.json());
+        const dashboard = await getSightDashboard(campusLocation).catch(() => null);
+        const gpu = (health.gpu?.available && health.gpu.gpus?.[0]) || null;
+        const rows: Array<[string, string]> = [
+          ['Server', `Online · ${base}`],
+          ['Scene descriptions', health.configured
+            ? `${health.provider === 'local' ? 'Local vision model (DGX Spark)' : 'Groq cloud'} · ${health.model}`
+            : 'Not configured'],
+          ['Metric depth', health.depth?.ready ? (health.depth?.metric ? 'On (meters)' : 'On (relative only)') : 'Off'],
+          ['GPU', gpu ? `${gpu.name} · ${gpu.utilization_pct ?? '—'}% busy${gpu.memory_used_mb != null ? ` · ${Math.round(gpu.memory_used_mb / 1024)} GB used` : ''}` : 'Not reported by this server'],
+          ['Tracking latency', dashboard?.tracking_latency_ms != null ? `${dashboard.tracking_latency_ms} ms average (5 min)` : 'No recent scans'],
+          ['Active phones', dashboard ? String(dashboard.connected_devices) : '—'],
+        ];
+        if (!cancelled) setServerStats(rows);
+      } catch {
+        if (!cancelled) setServerStats([['Server', `Offline · ${base}`]]);
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeTab, campusLocation]);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.localStorage) {
@@ -822,11 +875,11 @@ export default function AssistantHub() {
               <View style={s.specCard}>
                 <View style={s.specRow}>
                   <Text style={s.specKey}>Object Detector</Text>
-                  <Text style={s.specVal}>YOLOX-Nano (ONNX WASM / WebGL)</Text>
+                  <Text style={s.specVal}>YOLO11n on web · YOLOX-Nano in the native apps</Text>
                 </View>
                 <View style={s.specRow}>
                   <Text style={s.specKey}>Object Model Size</Text>
-                  <Text style={s.specVal}>3.7 MB (416×416 input, 80 COCO classes)</Text>
+                  <Text style={s.specVal}>10.7 MB (web) · 3.7 MB (native) · 80 COCO classes</Text>
                 </View>
                 <View style={s.specRow}>
                   <Text style={s.specKey}>Sign Language Model</Text>
@@ -845,9 +898,22 @@ export default function AssistantHub() {
                   <Text style={s.specVal}>MediaPipe Hands (21 3D pts) + Face + Pose</Text>
                 </View>
                 <View style={s.specRow}>
-                  <Text style={s.specKey}>Privacy Level</Text>
-                  <Text style={s.specValHighlight}>100% Zero-Telemetry · Air-Gapped</Text>
+                  <Text style={s.specKey}>Privacy</Text>
+                  <Text style={s.specValHighlight}>No camera frames stored · detection and sign tracking run on this device</Text>
                 </View>
+              </View>
+
+              <View style={s.settingsHeader}>
+                <Text style={s.settingsHeading}>Live Server</Text>
+                <Text style={s.settingsSub}>Read from the GuideLens server every 5 seconds.</Text>
+              </View>
+              <View style={s.specCard}>
+                {serverStats.map(([key, value]) => (
+                  <View key={key} style={s.specRow}>
+                    <Text style={s.specKey}>{key}</Text>
+                    <Text style={s.specVal}>{value}</Text>
+                  </View>
+                ))}
               </View>
 
               <View style={s.versionFooter}>

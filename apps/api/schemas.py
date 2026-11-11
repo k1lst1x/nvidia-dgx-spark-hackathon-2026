@@ -196,4 +196,6 @@ class SharedSightDashboard(BaseModel):
     recent_observations: list[Observation]
     tracking_latency_ms: int | None = None
     tracking_requests_last_5m: int = 0
+    # nvidia-smi on the DGX Spark: {"available": bool, "gpus": [...]}.
+    gpu: dict[str, object] | None = None
 

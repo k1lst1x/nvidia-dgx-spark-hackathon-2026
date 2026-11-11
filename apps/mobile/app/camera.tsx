@@ -36,6 +36,9 @@ type AssistFrame = {
   boxes: DetectionBox[];
 };
 
+// How often the camera checks this room's shared reports.
+const SHARED_ALERT_POLL_MS = 4000;
+
 export default function CameraScreen() {
   const { initialMode } = useLocalSearchParams<{ initialMode?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
@@ -53,7 +56,8 @@ export default function CameraScreen() {
   const [isCheckingDelta, setIsCheckingDelta] = useState(false);
   const [sharingSight, setSharingSight] = useState(false);
   const [sightNotice, setSightNotice] = useState('');
-  const hasSpokenAlert = useRef(false);
+  const announcedAlerts = useRef<Set<number>>(new Set());
+  const lastCoach = useRef({ text: '', at: 0 });
   const translationInFlight = useRef(false);
   const lastTranslation = useRef('');
   const lastApproachWarning = useRef('');
@@ -304,20 +308,64 @@ export default function CameraScreen() {
     speak(onDeviceSentence);
   }, [phraseComplete, onDeviceSentence]);
 
+  // Shared Sight: check this room's shared reports every few seconds. On
+  // arrival, say what is already reported (hazards first); afterwards, say
+  // each new report once. Reports this phone made are not read back to it.
   useEffect(() => {
-    if (mode !== 'scene') return;
-    let isMounted = true;
-    void getCampusAlerts(campusLocation).then((alerts) => {
-      if (!isMounted || alerts.length === 0) return;
-      const highest = alerts[0];
-      setActiveAlert(highest);
-      if (highest && !hasSpokenAlert.current && highest.description) {
-        hasSpokenAlert.current = true;
-        Speech.speak(`Campus alert for ${highest.location}: ${highest.description}`, { rate: 0.95 });
+    if (mode !== 'scene') return undefined;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let firstCheck = true;
+    announcedAlerts.current = new Set();
+    const rank = { high: 0, medium: 1, low: 2 } as const;
+    const describe = (alert: CampusAlert) => (alert.description && alert.description !== alert.label ? alert.description : alert.label);
+    const check = async () => {
+      const alerts = await getCampusAlerts(campusLocation).catch(() => null);
+      if (cancelled) return;
+      if (alerts) {
+        const fromOthers = alerts.filter((alert) => alert.reported_by !== 'you' && alert.reported_by !== 'this_device');
+        const fresh = fromOthers
+          .filter((alert) => !announcedAlerts.current.has(alert.id))
+          .sort((left, right) => rank[left.severity] - rank[right.severity]);
+        fresh.forEach((alert) => announcedAlerts.current.add(alert.id));
+        setActiveAlert(fromOthers.slice().sort((left, right) => rank[left.severity] - rank[right.severity])[0] ?? null);
+        if (fresh.length) {
+          const spoken = firstCheck
+            ? `${fresh.length === 1 ? 'One report' : `${fresh.length} reports`} in ${campusLocation}: ${fresh.slice(0, 2).map((alert) => `${describe(alert)}, ${alert.relative_time}`).join('. ')}.`
+            : `New report in ${campusLocation}: ${describe(fresh[0])}.`;
+          Speech.speak(spoken, { rate: 0.95 });
+        }
+        firstCheck = false;
       }
-    });
-    return () => { isMounted = false; };
+      timer = setTimeout(() => void check(), SHARED_ALERT_POLL_MS);
+    };
+    void check();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [mode, campusLocation]);
+
+  // Camera coach, spoken: one short instruction at a time, never repeated
+  // within 8 s, and the same advice at most every 20 s.
+  useEffect(() => {
+    if (mode !== 'scene' || !cameraCoach) return;
+    const advice = cameraCoach.blur
+      ? 'Hold steady.'
+      : cameraCoach.poor_lighting
+        ? "It's dark here. Turn on the flashlight or find more light."
+        : cameraCoach.overexposed
+          ? 'Too bright. Tilt the camera away from the light.'
+          : cameraCoach.cropped_labels.length
+            ? `Move back a little. The ${cameraCoach.cropped_labels[0]} is cut off.`
+            : '';
+    if (!advice) return;
+    const now = Date.now();
+    const sinceLast = now - lastCoach.current.at;
+    if (sinceLast < 8000 || (advice === lastCoach.current.text && sinceLast < 20000)) return;
+    lastCoach.current = { text: advice, at: now };
+    Speech.speak(advice, { rate: 1.0 });
+  }, [cameraCoach, mode]);
 
   const handleWhatChanged = async () => {
     Speech.stop();

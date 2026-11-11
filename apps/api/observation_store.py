@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -246,18 +247,50 @@ def list_shared(zone_id: str, limit: int = 30, now: float | None = None) -> list
         return [_serialize(row) for row in rows]
 
 
+# Words that frame a question but name nothing: "where are my keys" -> "keys".
+_RECALL_STOP_WORDS = {
+    "a", "an", "the", "my", "mine", "me", "i", "i'm", "im", "you", "your", "is", "are", "was", "were", "be",
+    "where", "what", "when", "which", "who", "how", "did", "do", "does", "have", "has", "had", "can", "could",
+    "find", "found", "leave", "left", "put", "placed", "see", "seen", "saw", "last", "lost", "of", "to", "in",
+    "on", "at", "for", "it", "its", "please", "help", "tell", "show", "remember", "again",
+}
+
+
+def _recall_terms(query: str) -> list[str]:
+    """Content words of a question, singular, for matching saved labels."""
+    words = re.findall(r"[a-z0-9']+", query.lower())
+    terms = []
+    for word in words:
+        if word in _RECALL_STOP_WORDS or len(word) < 2:
+            continue
+        stem = word[:-2] if word.endswith("es") and len(word) > 4 else word[:-1] if word.endswith("s") and len(word) > 3 else word
+        if stem not in terms:
+            terms.append(stem)
+    return terms
+
+
 def search_personal(device_id: str, query: str = "", limit: int = 50, now: float | None = None) -> list[dict[str, Any]]:
+    """This device's private notes that best match a question, best match first."""
     cleanup_expired(now)
     current = now or time.time()
-    needle = f"%{query.strip()}%"
+    terms = _recall_terms(query)
     with db_connection() as conn:
         rows = conn.execute("""
             SELECT * FROM observations
             WHERE privacy_scope='personal' AND source_device=? AND active=1 AND expires_at > ?
-              AND (?='' OR label LIKE ? OR category LIKE ? OR description LIKE ? OR zone_id LIKE ?)
-            ORDER BY observed_at DESC LIMIT ?
-        """, (device_id, current, query.strip(), needle, needle, needle, needle, max(1, min(limit, 100)))).fetchall()
-        return [_serialize(row) for row in rows]
+            ORDER BY observed_at DESC LIMIT 500
+        """, (device_id, current)).fetchall()
+    if not terms:
+        return [_serialize(row) for row in rows[: max(1, min(limit, 100))]]
+    scored = []
+    for row in rows:
+        text = " ".join(str(row[field] or "").lower() for field in ("label", "description", "category", "zone_id"))
+        label = str(row["label"] or "").lower()
+        score = sum(2 if term in label else 1 for term in terms if term in text)
+        if score:
+            scored.append((score, row["observed_at"], row))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [_serialize(row) for _score, _at, row in scored[: max(1, min(limit, 100))]]
 
 
 def delete_owned(observation_id: int, source_device: str) -> bool:
@@ -303,6 +336,73 @@ def dashboard(zone_id: str, limit: int = 20, now: float | None = None) -> dict[s
         "tracking_latency_ms": average, "tracking_requests_last_5m": len(values),
     }
 
+
+# ---------------------------------------------------------------------------
+# Campus alerts: the legacy /v1/memory/* API, now backed by shared observations
+# ---------------------------------------------------------------------------
+# Before, alerts lived in campus_memory.py while the camera's share button
+# wrote here, so phone B never heard phone A's report. Every report path now
+# writes and reads these shared, verified observations.
+
+ALERT_TTL_SECONDS = float(os.getenv("CAMPUS_ALERT_TTL_HOURS", "12")) * 3600
+_ALERT_CATEGORIES = {"hazard", "obstacle", "sign", "room_status"}
+_ALERT_SEVERITY = {"hazard": "high", "obstacle": "medium"}
+
+
+def _as_alert(row: sqlite3.Row, viewer_device: str, now: float) -> dict[str, Any]:
+    category = row["category"] if row["category"] in _ALERT_CATEGORIES else "obstacle"
+    return {
+        "id": row["id"],
+        "location": row["zone_id"],
+        "category": category,
+        "label": row["label"],
+        "description": row["description"] or row["label"],
+        "severity": _ALERT_SEVERITY.get(category, "low"),
+        # Never expose another phone's identifiers; say whose report it is.
+        "reported_by": "you" if row["source_device"] == viewer_device else "another student",
+        "created_at": _iso(row["observed_at"]),
+        "relative_time": _relative_time(row["observed_at"], now),
+        "is_active": True,
+    }
+
+
+def shared_alerts(viewer_device: str, location: str | None = None, limit: int = 20, now: float | None = None) -> list[dict[str, Any]]:
+    """Active shared, verified reports, newest first, optionally for one room."""
+    current = now or time.time()
+    cleanup_expired(current)
+    where = "privacy_scope='shared' AND verification_status='verified' AND active=1 AND expires_at > ?"
+    params: list[Any] = [current]
+    if location and location.strip() and location.strip() != "All Campus":
+        where += " AND zone_id LIKE ?"
+        params.append(f"%{location.strip()}%")
+    params.append(max(1, min(limit, 100)))
+    with db_connection() as conn:
+        rows = conn.execute(f"SELECT * FROM observations WHERE {where} ORDER BY observed_at DESC LIMIT ?", params).fetchall()
+    return [_as_alert(row, viewer_device, current) for row in rows]
+
+
+def report_alert(
+    *, location: str, category: str, label: str, description: str,
+    source_device: str, source_session: str, now: float | None = None,
+) -> dict[str, Any]:
+    """A report a person typed or confirmed: shared and verified by definition."""
+    created = create_observation(
+        zone_id=location, category=category, label=label, description=description, confidence=1.0,
+        privacy_scope="shared", verified=True, expires_in_seconds=int(ALERT_TTL_SECONDS), origin="manual",
+        source_device=source_device, source_session=source_session, now=now,
+    )
+    with db_connection() as conn:
+        row = conn.execute("SELECT * FROM observations WHERE id=?", (created["id"],)).fetchone()
+    return _as_alert(row, source_device, now or time.time())
+
+
+def resolve_shared(observation_id: int) -> bool:
+    """Mark a shared report as cleared (anyone on campus can clear a hazard)."""
+    with db_connection() as conn:
+        result = conn.execute(
+            "UPDATE observations SET active=0 WHERE id=? AND privacy_scope='shared' AND active=1", (observation_id,),
+        )
+        return result.rowcount > 0
 
 # ---------------------------------------------------------------------------
 # Deaf-Blind bridge

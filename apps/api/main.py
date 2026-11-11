@@ -26,6 +26,7 @@ from depth import (
     relative_proximity_for_boxes,
     surface_readings_for_boxes,
 )
+from gpu_status import gpu_status
 from motion import MotionHistory
 from obstacle_points import OBSTACLE_MAX_RANGE_M, OBSTACLE_POINTS_ENABLED, obstacle_points
 from point_cloud import cloud_for_surface, open3d_status
@@ -83,6 +84,86 @@ def _apply_vision_options(payload: dict) -> dict:
     if VISION_DISABLE_THINKING:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     return payload
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+# With a local model on the DGX Spark, Groq's cloud is only a backup.
+VISION_FALLBACK_TO_GROQ = os.getenv("VISION_FALLBACK_TO_GROQ", "true").lower() in {"1", "true", "yes"}
+SPARK_VISION_TIMEOUT_S = float(os.getenv("SPARK_VISION_TIMEOUT_S", "10"))
+_last_vision_answer: dict[str, object] = {"provider": None, "at": None, "fell_back": False}
+
+
+def _vision_providers(interactive: bool = False) -> list[dict[str, object]]:
+    """Ordered vision endpoints: the Spark first, Groq only as backup."""
+    providers: list[dict[str, object]] = []
+    if VISION_PROVIDER == "local":
+        providers.append({
+            "name": "spark", "url": VISION_API_URL, "model": MODEL, "key": os.getenv("VISION_API_KEY"),
+            "timeout": min(SPARK_VISION_TIMEOUT_S, 8.0) if interactive else SPARK_VISION_TIMEOUT_S, "attempts": 1,
+        })
+        groq_key = os.getenv("GROQ_API_KEY")
+        if VISION_FALLBACK_TO_GROQ and groq_key:
+            providers.append({"name": "groq", "url": GROQ_API_URL, "model": GROQ_MODEL, "key": groq_key,
+                              "timeout": 8.0 if interactive else 12.0, "attempts": 2 if interactive else 3})
+    elif _vision_configured():
+        providers.append({"name": "groq", "url": VISION_API_URL, "model": MODEL, "key": _vision_api_key(),
+                          "timeout": 8.0 if interactive else 12.0, "attempts": 2 if interactive else 3})
+    return providers
+
+
+async def _post_vision(payload: dict, parse, *, interactive: bool = False):
+    """Send a chat request to each provider in order and return the first valid parse.
+
+    A provider that times out, is unreachable, rate-limits, errors, or returns
+    output that does not parse is skipped for the next one, so a Spark outage
+    falls back to Groq instead of failing the request.
+    """
+    providers = _vision_providers(interactive)
+    if not providers:
+        raise HTTPException(503, "Vision service is not configured")
+    failure = HTTPException(502, "Vision provider request failed")
+    for index, provider in enumerate(providers):
+        headers = {"Content-Type": "application/json"}
+        if provider["key"]:
+            headers["Authorization"] = f"Bearer {provider['key']}"
+        body = _apply_vision_options({**payload, "model": provider["model"]})
+        timeout = httpx.Timeout(float(provider["timeout"]), connect=3.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(int(provider["attempts"])):
+                try:
+                    response = await client.post(str(provider["url"]), headers=headers, json=body)
+                    if response.status_code == 429 or response.status_code >= 500:
+                        failure = HTTPException(
+                            429 if response.status_code == 429 else 502,
+                            "Vision provider is rate-limited; try again shortly" if response.status_code == 429
+                            else "Vision provider request failed",
+                        )
+                        if attempt + 1 < int(provider["attempts"]):
+                            retry = float(response.headers.get("retry-after", 0) or 0)
+                            await asyncio.sleep(max(retry, min(0.5 * (2**attempt) + random.random(), 4)))
+                            continue
+                        break
+                    response.raise_for_status()
+                    parsed = parse(response.json()["choices"][0]["message"]["content"])
+                    _last_vision_answer.update(provider=provider["name"], at=time.time(), fell_back=index > 0)
+                    if index:
+                        logger.warning("vision_fallback_used provider=%s", provider["name"])
+                    return parsed
+                except (httpx.TimeoutException, httpx.NetworkError):
+                    failure = HTTPException(504, "Vision provider timed out")
+                    if attempt + 1 < int(provider["attempts"]):
+                        await asyncio.sleep(0.5 * (2**attempt) + random.random())
+                        continue
+                    break
+                except (KeyError, IndexError, json.JSONDecodeError, ValidationError):
+                    failure = HTTPException(502, "Vision provider returned an invalid response")
+                    break
+                except httpx.HTTPStatusError as exc:
+                    logger.warning("vision_error provider=%s status=%s", provider["name"], exc.response.status_code)
+                    failure = HTTPException(502, "Vision provider request failed")
+                    break
+        logger.warning("vision_provider_failed provider=%s detail=%s", provider["name"], failure.detail)
+    raise failure
 
 
 MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "1500000"))
@@ -435,32 +516,7 @@ async def _call_groq(
         "max_completion_tokens": 220,
         "stream": False,
     }
-    timeout = httpx.Timeout(12.0, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(3):
-            try:
-                response = await client.post(
-                    VISION_API_URL,
-                    headers=_vision_headers(),
-                    json=_apply_vision_options(payload),
-                )
-                if response.status_code == 429 or response.status_code >= 500:
-                    if attempt < 2:
-                        retry = float(response.headers.get("retry-after", 0))
-                        await asyncio.sleep(max(retry, min(0.5 * (2**attempt) + random.random(), 4)))
-                        continue
-                response.raise_for_status()
-                raw = response.json()["choices"][0]["message"]["content"]
-                return VisionResult.model_validate(json.loads(raw))
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt == 2:
-                    raise HTTPException(504, "Vision provider timed out")
-                await asyncio.sleep(0.5 * (2**attempt) + random.random())
-            except (KeyError, json.JSONDecodeError, ValidationError):
-                raise HTTPException(502, "Vision provider returned an invalid response")
-            except httpx.HTTPStatusError as exc:
-                logger.warning("groq_error status=%s", exc.response.status_code)
-                raise HTTPException(502, "Vision provider request failed")
+    return await _post_vision(payload, lambda raw: VisionResult.model_validate(json.loads(raw)))
     raise HTTPException(502, "Vision provider request failed")
 
 
@@ -513,70 +569,47 @@ async def _call_groq_sign(
     }
     # Sign Context is interactive. Do not leave the camera UI waiting through
     # three long cloud retries; the next overlapping window can try again.
-    timeout = httpx.Timeout(8.0, connect=3.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for attempt in range(2):
-            try:
-                response = await client.post(
-                    VISION_API_URL,
-                    headers=_vision_headers(),
-                    json=_apply_vision_options(payload),
-                )
-                if response.status_code == 429:
-                    raise HTTPException(429, "Sign translation is rate-limited by the vision provider. Try again after the reset time in your Groq console.")
-                if response.status_code == 429 or response.status_code >= 500:
-                    if attempt < 1:
-                        retry = float(response.headers.get("retry-after", 0))
-                        await asyncio.sleep(max(retry, min(0.5 * (2**attempt) + random.random(), 4)))
-                        continue
-                response.raise_for_status()
-                raw = response.json()["choices"][0]["message"]["content"]
-                result = SignTranslation.model_validate(json.loads(raw))
-                combined = f"{result.transcript} {result.segment}".strip()
-                if combined and not english_text(combined):
-                    return SignTranslation(
-                        transcript=previous_transcript,
-                        segment="",
-                        confidence=0,
-                        is_final=False,
-                        should_speak=False,
-                    )
-                # The model may only append to an accepted transcript. Enforce that contract
-                # server-side so a noisy window cannot rewrite a user's conversation.
-                if previous_transcript and not result.transcript.startswith(previous_transcript):
-                    return SignTranslation(
-                        transcript=previous_transcript,
-                        segment="",
-                        confidence=0,
-                        is_final=False,
-                        should_speak=False,
-                    )
-                # Some vision providers fill ``segment`` correctly but omit the
-                # accumulated transcript. Normalize that valid first-window
-                # response instead of silently throwing it away in the UI.
-                if not result.transcript.strip() and result.segment.strip():
-                    result.transcript = f"{previous_transcript} {result.segment}".strip()
-                continuation = english_text(result.transcript[len(previous_transcript):])
-                result.segment = continuation
-                result.transcript = f"{previous_transcript} {continuation}".strip()
-                if result.confidence < SIGN_MIN_CONFIDENCE or not result.segment.strip():
-                    return SignTranslation(
-                        transcript=previous_transcript,
-                        segment="",
-                        confidence=result.confidence,
-                        is_final=False,
-                        should_speak=False,
-                    )
-                return result
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if attempt == 1:
-                    raise HTTPException(504, "Sign translation provider timed out; try the next phrase")
-                await asyncio.sleep(0.5 * (2**attempt) + random.random())
-            except (KeyError, json.JSONDecodeError, ValidationError):
-                raise HTTPException(502, "Vision provider returned an invalid response")
-            except httpx.HTTPStatusError as exc:
-                logger.warning("groq_sign_error status=%s", exc.response.status_code)
-                raise HTTPException(502, "Vision provider request failed")
+    # Sign Context is interactive: short timeouts, and the next overlapping
+    # window can try again.
+    result = await _post_vision(
+        payload, lambda raw: SignTranslation.model_validate(json.loads(raw)), interactive=True,
+    )
+    combined = f"{result.transcript} {result.segment}".strip()
+    if combined and not english_text(combined):
+        return SignTranslation(
+            transcript=previous_transcript,
+            segment="",
+            confidence=0,
+            is_final=False,
+            should_speak=False,
+        )
+    # The model may only append to an accepted transcript. Enforce that contract
+    # server-side so a noisy window cannot rewrite a user's conversation.
+    if previous_transcript and not result.transcript.startswith(previous_transcript):
+        return SignTranslation(
+            transcript=previous_transcript,
+            segment="",
+            confidence=0,
+            is_final=False,
+            should_speak=False,
+        )
+    # Some vision providers fill ``segment`` correctly but omit the
+    # accumulated transcript. Normalize that valid first-window
+    # response instead of silently throwing it away in the UI.
+    if not result.transcript.strip() and result.segment.strip():
+        result.transcript = f"{previous_transcript} {result.segment}".strip()
+    continuation = english_text(result.transcript[len(previous_transcript):])
+    result.segment = continuation
+    result.transcript = f"{previous_transcript} {continuation}".strip()
+    if result.confidence < SIGN_MIN_CONFIDENCE or not result.segment.strip():
+        return SignTranslation(
+            transcript=previous_transcript,
+            segment="",
+            confidence=result.confidence,
+            is_final=False,
+            should_speak=False,
+        )
+    return result
     raise HTTPException(502, "Vision provider request failed")
 
 
@@ -614,8 +647,11 @@ def health():
     return {
         "status": "ok",
         "provider": VISION_PROVIDER,
+        "gpu": gpu_status(),
         "configured": _vision_configured(),
         "model": MODEL,
+        "vision_providers": [str(provider["name"]) for provider in _vision_providers()],
+        "last_vision_answer": dict(_last_vision_answer),
         "yolo": {
             "enabled": YOLO_ENABLED,
             "model": YOLO_MODEL if YOLO_ENABLED else None,
@@ -849,9 +885,11 @@ async def interpret_unisign_experimental(sequence: UniSignRawRequest):
 
 @app.get("/v1/memory/alerts", response_model=list[CampusAlert])
 async def get_campus_alerts(request: Request, location: str | None = None):
-    """Retrieve active campus memory alerts, shared across student devices."""
-    _authorize_sight(request)
-    return [CampusAlert.model_validate(alert) for alert in campus_memory.get_active_alerts(location)]
+    """Shared, verified campus reports for a room (one store for every phone)."""
+    device_id, session_id = _authorize_sight(request)
+    # A camera polling for alerts is an active phone on the dashboard.
+    observation_store.touch_device(device_id, session_id)
+    return [CampusAlert.model_validate(alert) for alert in observation_store.shared_alerts(device_id, location)]
 
 
 def _authorize_sight(request: Request) -> tuple[str, str]:
@@ -919,21 +957,22 @@ async def shared_sight_dashboard(request: Request, zone_id: str, limit: int = 20
     if not zone_id.strip() or len(zone_id) > 80:
         raise HTTPException(422, "zone_id must contain 1 to 80 characters")
     observation_store.touch_device(device_id, session_id)
-    return SharedSightDashboard.model_validate(observation_store.dashboard(zone_id, limit))
+    return SharedSightDashboard.model_validate({**observation_store.dashboard(zone_id, limit), "gpu": gpu_status()})
 
 
 @app.post("/v1/memory/observe", response_model=CampusAlert)
 async def observe_campus_hazard(request: Request, body: CampusAlertCreateRequest):
-    """Record an obstacle, hazard, or room status into shared campus memory."""
-    _, client_id = _authorize_sight(request)
-    alert = campus_memory.add_alert(
-        location=body.location,
-        category=body.category,
-        label=body.label,
-        description=body.description,
-        severity=body.severity,
-        reported_by=client_id,
-    )
+    """Record a hazard, obstacle, sign, or room status a person confirmed."""
+    device_id, session_id = _authorize_sight(request)
+    try:
+        alert = observation_store.report_alert(
+            location=body.location, category=body.category, label=body.label,
+            description=body.description, source_device=device_id, source_session=session_id,
+        )
+    except observation_store.DuplicateObservationError as error:
+        raise HTTPException(409, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
     return CampusAlert.model_validate(alert)
 
 
@@ -941,8 +980,7 @@ async def observe_campus_hazard(request: Request, body: CampusAlertCreateRequest
 async def resolve_campus_alert(request: Request, alert_id: int):
     """Mark a campus hazard as cleared or resolved."""
     _authorize_sight(request)
-    ok = campus_memory.resolve_alert(alert_id)
-    if not ok:
+    if not observation_store.resolve_shared(alert_id):
         raise HTTPException(404, "Alert not found")
     return {"status": "resolved", "id": alert_id}
 

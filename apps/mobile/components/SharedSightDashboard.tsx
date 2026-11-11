@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useState } from 'react';
+import * as Speech from 'expo-speech';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import RoomSketchMap from './RoomSketchMap';
 import {
@@ -58,8 +59,22 @@ export default function SharedSightDashboard({ zoneId }: Props) {
 
   const search = async () => {
     try {
-      setRecall(await searchPersonalRecall(query));
+      const found = await searchPersonalRecall(query);
+      setRecall(found);
       setNotice('');
+      // Answer out loud with place and time, for users who cannot read the list.
+      if (query.trim()) {
+        const best = found[0];
+        if (best) {
+          const minutes = Math.max(0, Math.round((Date.now() - new Date(best.timestamp).getTime()) / 60000));
+          const when = minutes < 1 ? 'just now' : minutes < 60 ? `${minutes} minute${minutes === 1 ? '' : 's'} ago`
+            : `${Math.round(minutes / 60)} hour${Math.round(minutes / 60) === 1 ? '' : 's'} ago`;
+          const detail = best.description && best.description !== best.label ? ` ${best.description}.` : '';
+          Speech.speak(`Your ${best.label}: ${best.zone_id}, ${when}.${detail}`, { rate: 0.95 });
+        } else {
+          Speech.speak(`I could not find that in your saved notes.`, { rate: 0.95 });
+        }
+      }
     } catch (error) { setNotice((error as Error).message); }
   };
 
@@ -133,9 +148,14 @@ export default function SharedSightDashboard({ zoneId }: Props) {
         </Pressable>
       </View>
       <View style={styles.metrics}>
-        <Text style={styles.metric}>{dashboard?.connected_devices ?? 0} devices active</Text>
+        <Text style={styles.metric}>{dashboard?.connected_devices ?? 0} {dashboard?.connected_devices === 1 ? 'phone' : 'phones'} active</Text>
         <Text style={styles.metric}>{dashboard?.tracking_latency_ms == null ? 'latency —' : `tracking ${dashboard.tracking_latency_ms} ms avg`}</Text>
         <Text style={styles.metric}>{dashboard?.tracking_requests_last_5m ?? 0} scans / 5m</Text>
+        <Text style={styles.metric}>
+          {dashboard?.gpu?.available && dashboard.gpu.gpus[0]
+            ? `Spark GPU ${dashboard.gpu.gpus[0].utilization_pct ?? '—'}%`
+            : 'GPU not reported'}
+        </Text>
       </View>
       <Text style={styles.deviceNote}>This device: {currentSightDevice()}. Configure SHARED_SIGHT_DEVICE_IDS on the server to restrict access.</Text>
       <RoomSketchMap

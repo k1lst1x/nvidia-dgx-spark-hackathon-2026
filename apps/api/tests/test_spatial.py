@@ -211,3 +211,15 @@ def test_track_geometry_returns_obstacles_without_any_detection(monkeypatch):
     assert objects == []
     assert obstacles
     assert len(calls) == 1  # depth runs once per frame
+
+
+def test_gpu_status_parses_nvidia_smi_and_handles_no_gpu(monkeypatch):
+    import gpu_status
+
+    parsed = gpu_status.parse("NVIDIA GB10, 37, 20480, [N/A], 61\n")
+    assert parsed["available"] is True
+    gpu = parsed["gpus"][0]
+    assert gpu["name"] == "NVIDIA GB10" and gpu["utilization_pct"] == 37 and gpu["memory_total_mb"] is None
+    monkeypatch.setattr(gpu_status.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(gpu_status, "_cache", None)
+    assert gpu_status.gpu_status() == {"available": False, "gpus": []}

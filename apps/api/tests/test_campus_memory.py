@@ -45,7 +45,7 @@ def test_post_observation_and_resolve():
     new_obs = {
         "location": "Room 204",
         "category": "hazard",
-        "label": "spilled coffee",
+        "label": f"spilled coffee {uuid.uuid4().hex[:6]}",
         "description": "Coffee spilled near desk 3.",
         "severity": "medium",
     }
@@ -57,13 +57,43 @@ def test_post_observation_and_resolve():
     assert response.status_code == 200
     alert = response.json()
     alert_id = alert["id"]
-    assert alert["label"] == "spilled coffee"
-    assert alert["reported_by"] == "student-test-device"
+    assert alert["label"] == new_obs["label"]
+    assert alert["reported_by"] == "you"
 
     # Resolve it
     res = client.post(f"/v1/memory/resolve/{alert_id}")
     assert res.status_code == 200
     assert res.json()["status"] == "resolved"
+
+
+def test_two_phones_one_memory():
+    """Phone A reports a hazard; phone B, in the same room, gets it from the same store."""
+    phone_a = TestClient(app, headers={"X-Device-ID": f"phone-a-{uuid.uuid4().hex[:6]}", "X-Session-ID": "sa"})
+    phone_b = TestClient(app, headers={"X-Device-ID": f"phone-b-{uuid.uuid4().hex[:6]}", "X-Session-ID": "sb"})
+    room = f"Room {uuid.uuid4().hex[:6]}"
+    # Through the Hub's report form...
+    reported = phone_a.post("/v1/memory/observe", json={
+        "location": room, "category": "hazard", "label": "wet floor", "description": "Wet floor by the door.",
+    })
+    assert reported.status_code == 200
+    # ...and through the camera's verified share button.
+    shared = phone_a.post("/v1/observations", json={
+        "zone_id": room, "category": "room_status", "label": "closed door", "description": "Room is closed.",
+        "confidence": 0.9, "privacy_scope": "shared", "verified": True,
+    })
+    assert shared.status_code == 200
+    alerts = phone_b.get(f"/v1/memory/alerts?location={room}").json()
+    assert {a["label"] for a in alerts} == {"wet floor", "closed door"}
+    assert all(a["reported_by"] == "another student" for a in alerts)
+    # A private note never reaches another phone.
+    phone_a.post("/v1/observations", json={
+        "zone_id": room, "category": "object", "label": "my keys", "confidence": 0.9, "privacy_scope": "personal",
+    })
+    assert "my keys" not in {a["label"] for a in phone_b.get(f"/v1/memory/alerts?location={room}").json()}
+    # Clearing the hazard removes it for everyone.
+    hazard = next(a for a in alerts if a["label"] == "wet floor")
+    assert phone_b.post(f"/v1/memory/resolve/{hazard['id']}").status_code == 200
+    assert "wet floor" not in {a["label"] for a in phone_a.get(f"/v1/memory/alerts?location={room}").json()}
 
 
 def test_what_changed_detects_delta():
@@ -182,3 +212,23 @@ def test_bridge_conversations_expire():
         pass
     else:
         raise AssertionError("an expired conversation must not be readable")
+
+
+def test_personal_recall_understands_questions():
+    me = TestClient(app, headers={"X-Device-ID": f"recall-{uuid.uuid4().hex[:6]}", "X-Session-ID": "s"})
+    room = f"Recall room {uuid.uuid4().hex[:6]}"
+    for label, description in [("keys", "On the study table"), ("glasses", "Next to the printer"), ("water bottle", "")]:
+        assert me.post("/v1/observations", json={
+            "zone_id": room, "category": "personal_item", "label": label, "description": description,
+            "confidence": 0.9, "privacy_scope": "personal",
+        }).status_code == 200
+
+    def ask(question):
+        return [item["label"] for item in me.get("/v1/personal/observations", params={"query": question}).json()]
+
+    assert ask("where are my keys")[0] == "keys"
+    assert ask("Where did I leave my key?")[0] == "keys"
+    assert ask("have you seen my glasses")[0] == "glasses"
+    assert ask("bottle")[0] == "water bottle"
+    assert ask("where is my umbrella") == []
+    assert len(ask("")) == 3
