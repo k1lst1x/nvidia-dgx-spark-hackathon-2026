@@ -1,6 +1,8 @@
 /** Compact, locally downloaded training samples for the causal CTC recognizer. */
 
-export const TEMPORAL_FEATURE_COUNT = 281;
+import { SIGN_FEATURE_COUNT, SIGN_FEATURE_SCHEMA } from './signFeatures';
+
+export const TEMPORAL_FEATURE_COUNT = SIGN_FEATURE_COUNT;
 
 export type TrainingAnnotation = {
   id: string;
@@ -13,7 +15,11 @@ export type TrainingAnnotation = {
 export type LandmarkTrainingSample = TrainingAnnotation & {
   language: 'ASL';
   fps: number;
+  /** Layout of each row of `frames` (see docs/sign/FEATURE_SCHEMA_281.md). */
+  feature_schema: string;
   frames: number[][];
+  /** Capture time of each row of `frames`, in ms from the first frame, so dropped or late frames are visible. */
+  timestamps_ms: number[];
   /**
    * Uncompressed MediaPipe Holistic observations. These are deliberately
    * separate from the 281-value CTC representation: downstream models with a
@@ -41,6 +47,7 @@ export type RawHolisticFrame = {
  */
 export class SignRecorder {
   private frames: number[][] = [];
+  private timestamps: number[] = [];
   private rawFrames: RawHolisticFrame[] = [];
   private lastTimestamp = -Infinity;
   private active = false;
@@ -53,8 +60,21 @@ export class SignRecorder {
     return this.active;
   }
 
+  get frameCount() {
+    return this.frames.length;
+  }
+
+  /** Stop and throw the capture away (for example, a wrong sign). */
+  discard() {
+    this.active = false;
+    this.frames = [];
+    this.timestamps = [];
+    this.rawFrames = [];
+  }
+
   start() {
     this.frames = [];
+    this.timestamps = [];
     this.rawFrames = [];
     this.lastTimestamp = -Infinity;
     this.active = true;
@@ -67,6 +87,7 @@ export class SignRecorder {
     }
     if (!features.every(Number.isFinite)) throw new Error('Landmark features must be finite numbers');
     this.frames.push([...features]);
+    this.timestamps.push(timestamp);
     this.lastTimestamp = timestamp;
   }
 
@@ -91,10 +112,13 @@ export class SignRecorder {
       glosses,
       text: annotation.text?.trim(),
       fps: this.fps,
+      feature_schema: SIGN_FEATURE_SCHEMA,
       frames: this.frames,
+      timestamps_ms: this.timestamps.map((value) => Math.round(value - this.timestamps[0])),
       raw_holistic: this.rawFrames.length ? this.rawFrames : undefined,
     };
     this.frames = [];
+    this.timestamps = [];
     this.rawFrames = [];
     return sample;
   }

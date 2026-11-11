@@ -1,6 +1,7 @@
 import { CSSProperties, useEffect, useRef } from 'react';
 import { ASLGestureEngine, type ASLSessionState } from '../src/aslClassifier';
 import { ASLWordEngine, type ASLWordState } from '../src/aslWordClassifier.web';
+import { buildSignFeatureFrame } from '../src/signFeatures';
 import { TEMPORAL_FEATURE_COUNT, type RawHolisticFrame, type SignRecorder } from '../src/landmarkRecorder.web';
 
 // Public CDN copies. The app serves its own copies under /mediapipe (see
@@ -300,29 +301,14 @@ function createCtcFeatureFrame(
     else if (!left) left = points;
   });
 
-  const allHandIndices = Array.from({ length: 21 }, (_, index) => index);
-  const allPoseIndices = Array.from({ length: 33 }, (_, index) => index);
-  const facePoints = face?.faceLandmarks[0] ?? null;
-  const posePoints = pose?.landmarks[0] ?? null;
-  const blendshapes = Array<number>(52).fill(0);
-  face?.faceBlendshapes?.[0]?.categories
-    .slice()
-    .sort((a, b) => a.categoryName.localeCompare(b.categoryName))
-    .slice(0, 52)
-    .forEach((shape, index) => { blendshapes[index] = shape.score; });
-
-  // The causal CTC Transformer consumes this stable layout:
-  // hands (126) + pose (99) + face blendshapes (52) + masks (4) = 281.
-  return [
-    ...flattenLandmarks(left, allHandIndices),
-    ...flattenLandmarks(right, allHandIndices),
-    ...flattenLandmarks(posePoints, allPoseIndices),
-    ...blendshapes,
-    left ? 1 : 0,
-    right ? 1 : 0,
-    facePoints ? 1 : 0,
-    posePoints ? 1 : 0,
-  ];
+  // Layout "visionmate-281-v1": defined and tested in src/signFeatures.ts.
+  return buildSignFeatureFrame({
+    leftHand: left,
+    rightHand: right,
+    pose: pose?.landmarks[0] ?? null,
+    facePresent: Boolean(face?.faceLandmarks[0]),
+    blendshapes: face?.faceBlendshapes?.[0]?.categories,
+  });
 }
 
 function copyRawLandmarks(points: Landmark[] | null | undefined) {

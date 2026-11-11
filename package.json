@@ -11,6 +11,7 @@
     "web": "npm --workspace apps/mobile run web",
     "build:web": "npm --workspace apps/mobile run build:web",
     "typecheck": "npm --workspace apps/mobile run typecheck",
+    "test:unit": "npm --workspace apps/mobile run test:unit",
     "build:desktop": "npm run build:web && npm --workspace apps/desktop run sync-web"
   },
   "engines": {

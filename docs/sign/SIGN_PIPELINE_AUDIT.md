@@ -15,13 +15,13 @@ DGX Spark.
 | Fingerspelling classifier (24 static letters) | **Runs**; 88.1% on its own 679-image test split | `asl_fingerspelling_landmarks.json` |
 | Cloud sign decoder (vision LLM over 3 frames) | **Runs when a vision provider is configured** | `/v1/interpret-sign` |
 | 281-feature causal CTC Transformer | **Code only. No checkpoint, no training data, not loaded anywhere** | `apps/api/training/sign_transformer.py` |
-| `SignRecorder` (281-feature capture) | **Code only. No screen uses it** | `apps/mobile/src/landmarkRecorder.web.ts` |
+| `SignRecorder` (281-feature capture) | **Usable at `/record`** (added after this audit) | `apps/mobile/app/record.tsx` |
 | YOLO11 sign detector fallback | **Not operational: weights are not in the repo** | `apps/api/yolo_sign.py` |
 | Uni-Sign backend | **Not operational: off by default, assets not present, mapping unverified** | `apps/api/unisign_backend.py` |
 | OpenHands | **Not present in the code** | no references |
 | Sign Language Bridge (Qwen3-VL LoRA) | **Not present in the code** | no references |
 | Sign Language Translator | **Not present in the code** | no references |
-| Pinto keypoint / point-history ONNX models | **Bundled but never loaded** | no references in `src/`, `components/`, `app/` |
+| Pinto keypoint / point-history ONNX models | **Removed** (were bundled, never loaded, no licence recorded) | — |
 | Native apps (iOS/Android) | **No sign tracking** | `HandTracker.native.tsx` renders nothing |
 
 The system that runs today is an **isolated-sign recognizer with a word-by-word
@@ -59,10 +59,20 @@ The 281 layout is specified in `FEATURE_SCHEMA_281.md`.
 390 layout: left hand 21×3, right hand 21×3, 76 selected face landmarks ×3,
 12 pose landmarks ×3 (`POSE_INDICES = 0, 11–16, 23–27`). Missing parts are
 zeros. Coordinates are raw MediaPipe image-normalized values.
-**Not verified:** that this matches the upstream model's training
-preprocessing (landmark selection, order, NaN handling, any normalization).
-The upstream repository was not readable from this environment. Until that is
-checked, the model's accuracy in this app is unknown.
+**Verified against the upstream repository** (`aymenwnia/ASL-translator`,
+`src/preprocess_kaggle.py` and `src/live_demo_transformer.py`): the same 76
+face and 12 pose indices in the same order, hands first (left, then right),
+missing values as zeros, clips shorter than 64 frames zero-padded at the end,
+and the same 0.3 confidence threshold. Upstream splits train and test by
+participant.
+
+**Still open: left and right hands.** The training data came from MediaPipe
+Holistic, where "left" is the signer's own left hand. The app's Holistic path
+matches that. Its fallback path (separate hand tracker) uses the hand
+tracker's own label on an unmirrored image, which may be the opposite hand.
+One real-camera check settles it: with the fallback active, raise the right
+hand and see which slot fills. Not changed here because it cannot be verified
+without a camera.
 
 ## 3. Models that run
 
@@ -189,16 +199,15 @@ and 10 words), so it cannot recognize signs that depend on movement.
 
 ## 6. Known failure modes
 
-1. **Unverified input layout** for the 250-word model (section 2).
+1. **Left/right hand assignment** in the fallback tracking path (section 2).
 2. **No "no sign" class.** Any movement is scored against 250 words; the
    threshold of 0.30 is low for 250 classes. False words are likely on
    non-signing movement.
 3. **Rules override the model** with fixed confidence (3.2).
 4. **Handedness** comes from MediaPipe's label. With a mirrored front camera
    it can be swapped, which moves the hand into the wrong slot of both vectors.
-5. **Speech before the phrase is final** (section 5).
-6. **Pause = end of sentence.** There is no "finish sentence" control in Sign
-   to voice.
+5. ~~Speech before the phrase is final~~ Fixed: see section 9.
+6. ~~Pause = end of sentence, no manual control~~ Fixed: see section 9.
 7. **Cloud decoder can invent text** (3.4), and its fallback is missing.
 8. **Blendshape order** in the 281 vector is alphabetical, not MediaPipe's
    order (`FEATURE_SCHEMA_281.md`). Harmless while consistent, but nothing
@@ -230,3 +239,22 @@ the only landmark model runs in the browser.
   (yes); sentence finalization (pause only); no unstable speech (**no**);
   performance on target hardware (**no**); tested against verified ASL data
   (**no**); limits documented (this file).
+
+## 9. Changes made after the audit
+
+- **Utterance controller** (`apps/mobile/src/signUtterance.ts`, 8 unit tests):
+  idle → signing → possible end → finalized. Hands down for 0.9 s starts a
+  1.6 s grace period; hands returning cancels it. Sign to voice now shows
+  provisional signs with "…", has a **Finish sentence** button, speaks only
+  the final sentence, once, and shows "Couldn't recognize that" instead of
+  text when nothing was confirmed. The timings are first guesses and need
+  tuning with real signers.
+- **281 layout pinned** (`apps/mobile/src/signFeatures.ts`, 3 unit tests): one
+  definition, a fixed blendshape name list, and a test vector.
+- **Recording screen** at `/record` (linked from Hub → Telemetry): signer code,
+  gloss labels, consent and label-check boxes; saves landmark JSON with
+  per-frame timestamps and the schema name. No video.
+- **Not changed:** the cloud decoder still speaks its own segments; the Bridge
+  still sends one sign at a time; the rules still override the model.
+- **Not tested with a real camera or signer.** The controller is tested with
+  simulated timings only.

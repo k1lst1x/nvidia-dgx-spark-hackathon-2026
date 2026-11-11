@@ -10,7 +10,8 @@
     "web": "expo start --web",
     "prepare:web-assets": "node scripts/prepare-web-assets.mjs",
     "build:web": "npm run prepare:web-assets && expo export --platform web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --test tests/*.test.cjs"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

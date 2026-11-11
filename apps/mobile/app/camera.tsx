@@ -15,6 +15,7 @@ import {
   type WhatChangedResult,
 } from '../src/campusMemory';
 import { glossToEnglish, signWordToEnglish } from '../src/signEnglish';
+import { UtteranceController, initialUtterance, type UtteranceState } from '../src/signUtterance';
 import { AssistMode, getApiUrl, hasVisionBackend, interpretSignSequence, useVisionLoop } from '../src/vision';
 import type { VisionObject } from '../src/vision';
 
@@ -62,8 +63,10 @@ export default function CameraScreen() {
   const lastTranslation = useRef('');
   const lastApproachWarning = useRef('');
   const lastObstacleWarning = useRef('');
-  const lastSpokenCommit = useRef(0);
-  const lastSpokenPhrase = useRef('');
+  // Decides when the confirmed signs form a finished sentence (src/signUtterance.ts).
+  const utteranceController = useRef(new UtteranceController());
+  const [utterance, setUtterance] = useState<UtteranceState>(initialUtterance);
+  const spokenUtterance = useRef(0);
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -161,9 +164,19 @@ export default function CameraScreen() {
               : 'Frame your hands, face, and upper body to sign';
 
   const offlineWord = signContext.wordState?.currentWord;
-  const onDeviceWords = signContext.wordState?.words ?? [];
-  const phraseComplete = signContext.wordState?.phraseComplete ?? false;
+  // Signs of the current utterance: provisional while signing, final once it ends.
+  const onDeviceWords = utterance.words;
+  const utteranceFinal = utterance.phase === 'finalized';
   const onDeviceSentence = onDeviceWords.length ? glossToEnglish(onDeviceWords) : '';
+  const signStatus = signContext.error
+    ? 'Tracking problem'
+    : utterance.phase === 'finalized'
+      ? (utterance.outcome === 'recognized' ? 'Final' : 'Unable to recognize')
+      : utterance.phase === 'possible_end'
+        ? 'Sentence ending…'
+        : utterance.phase === 'signing'
+          ? (onDeviceWords.length ? 'Signing · provisional' : 'Signing detected')
+          : signContext.handCount > 0 ? 'Tracking hands' : 'Ready · show your hands';
   const currentLetter = signContext.aslState?.currentLetter;
   const spelledText = signContext.aslState?.spelledText;
   const isHoldingLetter = signContext.aslState?.isHolding;
@@ -171,7 +184,8 @@ export default function CameraScreen() {
   const contextBoardText = displayedTranscript
     || (spelledText ? `Spelled: "${spelledText}"` : '')
     || (isHoldingLetter && currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
-    || (onDeviceSentence ? `${onDeviceSentence} (On-device, word by word)` : '')
+    || (utteranceFinal && utterance.outcome === 'unrecognized' ? "Couldn't recognize that. Please sign it again." : '')
+    || (onDeviceSentence ? (utteranceFinal ? onDeviceSentence : `${onDeviceSentence} …`) : '')
     || (offlineWord ? `Reading: "${signWordToEnglish(offlineWord)}"…` : '')
     || (currentLetter ? `Letter: "${currentLetter}" (Hold to type)` : '')
     || (isAnalysingContext
@@ -222,7 +236,7 @@ export default function CameraScreen() {
     setIsAnalysingContext(false);
     translationInFlight.current = false;
     lastTranslation.current = '';
-    lastSpokenPhrase.current = '';
+    setUtterance(utteranceController.current.reset());
     setCaptureVersion((value) => value + 1);
   };
 
@@ -286,27 +300,33 @@ export default function CameraScreen() {
     }
   }, [isSignMode, vision?.should_speak, vision?.speech, vision?.urgency, vision?.scene_key]);
 
-  // Speak each confirmed on-device sign as it lands, then the whole phrase as
-  // one English sentence once the signer lowers their hands.
+  // Feed the utterance controller: on every tracker update, and on a timer so
+  // a sentence still ends when nothing on screen changes.
   useEffect(() => {
-    const commitCount = signContext.wordState?.commitCount ?? 0;
-    if (commitCount <= lastSpokenCommit.current) {
-      lastSpokenCommit.current = Math.min(lastSpokenCommit.current, commitCount);
-      return;
-    }
-    lastSpokenCommit.current = commitCount;
-    if (translation || onDeviceWords.length === 0) return;
-    const word = onDeviceWords[onDeviceWords.length - 1];
-    speak(onDeviceWords.length === 1 ? glossToEnglish([word]) : signWordToEnglish(word));
-  }, [signContext.wordState?.commitCount]);
+    if (!usesBrowserHandTracking) return undefined;
+    const feed = () => {
+      const words = signContext.wordState?.words ?? [];
+      const next = utteranceController.current.update({
+        now: Date.now(),
+        handsVisible: signContext.handCount > 0,
+        commitCount: signContext.wordState?.commitCount ?? 0,
+        latestWord: words[words.length - 1],
+      });
+      setUtterance((previous) => (previous === next ? previous : next));
+    };
+    feed();
+    const timer = setInterval(feed, 200);
+    return () => clearInterval(timer);
+  }, [usesBrowserHandTracking, signContext.handCount, signContext.wordState?.commitCount]);
 
+  // Speak once, when a sentence is final. Provisional signs are shown, never
+  // spoken, and an unrecognized attempt is not turned into words.
   useEffect(() => {
-    if (!phraseComplete || translation || onDeviceWords.length < 2) return;
-    const key = onDeviceWords.join(' ');
-    if (key === lastSpokenPhrase.current) return;
-    lastSpokenPhrase.current = key;
-    speak(onDeviceSentence);
-  }, [phraseComplete, onDeviceSentence]);
+    if (utterance.finalizedCount <= spokenUtterance.current) return;
+    spokenUtterance.current = utterance.finalizedCount;
+    if (utterance.outcome !== 'recognized' || translation) return;
+    speak(glossToEnglish(utterance.words));
+  }, [utterance.finalizedCount]);
 
   // Shared Sight: check this room's shared reports every few seconds. On
   // arrival, say what is already reported (hazards first); afterwards, say
@@ -616,7 +636,7 @@ export default function CameraScreen() {
           {usesBrowserHandTracking ? (
             <View style={[c.aslWordCard, c.aslWordCardPanel]}>
               <View style={c.aslWordHeader}>
-                <Text style={c.aslWordLabel}>SIGN CONTEXT</Text>
+                <Text style={c.aslWordLabel} accessibilityLiveRegion="polite">SIGN · {signStatus.toUpperCase()}</Text>
                 <View style={c.aslHeaderActions}>
                   <Pressable
                     onPress={() => setShowLandmarks((visible) => !visible)}
@@ -642,6 +662,16 @@ export default function CameraScreen() {
                 <Text style={c.aslCursor}>_</Text>
               </Text>
               <View style={c.aslWordActions}>
+                <Pressable
+                  onPress={() => setUtterance(utteranceController.current.finish())}
+                  disabled={utterance.phase !== 'signing' && utterance.phase !== 'possible_end'}
+                  style={[c.aslActionBtn, c.aslFinishBtn, utterance.phase !== 'signing' && utterance.phase !== 'possible_end' && c.aslSpeakMiniBtnDisabled]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Finish sentence and speak it"
+                >
+                  <Ionicons name="checkmark-done" size={14} color="#07110F" />
+                  <Text style={[c.aslActionText, c.aslFinishText]}>Finish sentence</Text>
+                </Pressable>
                 <Pressable
                   onPress={() => aslEngineRef.current?.addSpace()}
                   style={c.aslActionBtn}
@@ -984,6 +1014,8 @@ const c = StyleSheet.create({
     borderRadius: 10,
     paddingVertical: 9,
   },
+  aslFinishBtn: { backgroundColor: '#B7FF56', flex: 1.6 },
+  aslFinishText: { color: '#07110F' },
   aslActionClearBtn: {
     backgroundColor: 'rgba(255, 130, 111, 0.12)',
   },

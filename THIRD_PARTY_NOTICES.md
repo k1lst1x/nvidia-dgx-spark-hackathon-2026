@@ -38,3 +38,27 @@ This model recognizes isolated signs from a fixed 250-word vocabulary. The
 dataset authors state that the dataset is not intended as a general ASL-to-English
 translation or natural-language interface. GuideLens therefore labels this
 feature experimental and does not claim continuous-ASL translation accuracy.
+
+## Ultralytics YOLO11
+
+GuideLens bundles `yolo11n.onnx` (web object detection) and `yolo11n.pt`
+(optional server tracking), and uses the Ultralytics package on the server.
+
+- Source: https://github.com/ultralytics/ultralytics
+- License: AGPL-3.0, or an Ultralytics Enterprise licence
+
+AGPL-3.0 applies to distributing these weights and to offering the server
+that uses them over a network. Review it, or obtain an Enterprise licence,
+before any distribution beyond the hackathon.
+
+## MediaPipe
+
+GuideLens uses `@mediapipe/tasks-vision` 1.2.0 and serves the hand, face,
+pose and holistic landmarker models downloaded at build time from Google.
+
+- Source: https://github.com/google-ai-edge/mediapipe
+- Package license: Apache License 2.0
+- Model terms: see each model card; not independently verified by this project
+
+The 250-word sign model's input layout was checked against its upstream
+repository; see `docs/sign/SIGN_PIPELINE_AUDIT.md`.

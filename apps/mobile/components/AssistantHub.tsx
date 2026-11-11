@@ -916,6 +916,18 @@ export default function AssistantHub() {
                 ))}
               </View>
 
+              <Pressable
+                onPress={() => router.push('/record' as any)}
+                style={s.specCard}
+                accessibilityRole="button"
+                accessibilityLabel="Record labelled sign samples, for the team"
+              >
+                <View style={s.specRow}>
+                  <Text style={s.specKey}>Sign data (team)</Text>
+                  <Text style={s.specValHighlight}>Record labelled signs →</Text>
+                </View>
+              </Pressable>
+
               <View style={s.versionFooter}>
                 <Text style={s.versionFooterText}>
                   GuideLens Native Edition · Built for SFBU × NVIDIA DGX Hackathon 2026

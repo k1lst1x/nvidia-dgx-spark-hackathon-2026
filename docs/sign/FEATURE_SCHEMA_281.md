@@ -1,7 +1,7 @@
 # Feature schema `visionmate-281-v1`
 
-The 281-value frame built by `createCtcFeatureFrame` in
-`apps/mobile/components/HandTracker.web.tsx`, sampled by `SignRecorder`, and
+The 281-value frame built by `buildSignFeatureFrame` in
+`apps/mobile/src/signFeatures.ts` (called from `HandTracker.web.tsx`), sampled by `SignRecorder`, and
 required by `VisionMateTransformer` (`FEATURE_DIM = 281`).
 
 **Status:** this is what the code produces. No model has been trained on it
@@ -37,20 +37,18 @@ left `i*3 + a`, right `63 + i*3 + a`. Pose landmark `j`: `126 + j*3 + a`.
   missing, the first hand goes to the right slot, the second to the left.
   The label describes the hand as MediaPipe sees the image, so a mirrored
   preview can swap it. **Not verified against a real signer.**
-- **Blendshapes:** the 52 categories MediaPipe returns are sorted with
-  `localeCompare` on the category name, and the first 52 are kept. This is
-  not MediaPipe's native order. Sorting depends on the browser's locale
-  rules; all names are ASCII, so the order should be stable, but it is
-  **not pinned by a test or a fixed list**.
+- **Blendshapes:** placed by name using the fixed list `BLENDSHAPE_ORDER`
+  (the 52 MediaPipe names, alphabetical; `_neutral` first). This is not
+  MediaPipe's native order. Unknown names are ignored. A unit test pins the
+  list and the positions.
 - **Blendshapes are not geometry.** They carry expression strength, not
   where the mouth or eyebrows are. Models that need face landmarks must take
   them from `raw_holistic.face`, never from these 52 values.
 - **Presence flags** mean "MediaPipe returned this part", not a confidence.
 - **Timing:** `SignRecorder` keeps a frame only if at least 1000/fps ms
-  passed since the last kept frame (default 20 FPS, so ≥ 50 ms). Timestamps
-  are **not stored with the 281 frames**; only `fps` is. Dropped or late
-  frames are therefore invisible in a recording. `raw_holistic` frames do
-  carry `timestamp_ms`.
+  passed since the last kept frame (default 20 FPS, so ≥ 50 ms). Each
+  recording stores `timestamps_ms`, one per frame, from the first frame, so
+  dropped or late frames are visible.
 
 ## Recording format (`SignRecorder.stop`)
 
@@ -58,8 +56,8 @@ left `i*3 + a`, right `63 + i*3 + a`. Pose landmark `j`: `126 + j*3 + a`.
 {
   "id": "sample-001", "signerId": "signer-a", "language": "ASL",
   "glosses": ["ME", "NEED", "WATER"], "text": "I need water.",
-  "fps": 20,
-  "frames": [[281 numbers], ...],
+  "fps": 20, "feature_schema": "visionmate-281-v1",
+  "frames": [[281 numbers], ...], "timestamps_ms": [0, 50, 101],
   "raw_holistic": [{"timestamp_ms": 0, "left_hand": [...], "right_hand": [...],
                     "face": [...], "pose": [...],
                     "confidence_representation": "not_available_from_mediapipe_tasks"}]
@@ -74,10 +72,8 @@ Only one producer of this vector exists (the web tracker), so training and
 inference cannot disagree yet. They will if a second producer is written
 (for example a Python MediaPipe script for datasets). Before that happens:
 
-1. Freeze the blendshape order as an explicit list of 52 names.
-2. Store per-frame timestamps beside `frames`.
-3. Add a shared test vector: one fixed set of landmarks and the exact 281
-   values every producer must output.
+1. Reproduce the test vector in `apps/mobile/tests/signFeatures.test.cjs`
+   exactly (the blendshape list, timestamps and the vector are now pinned).
 
 ## Open questions to settle with data
 

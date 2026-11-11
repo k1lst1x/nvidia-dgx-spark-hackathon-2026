@@ -17,8 +17,7 @@ advice.
 | Fingerspelling classifier | 24 letters | this project | this project | "American Sign Language Image Dataset" zip named in the README: **source and licence not recorded** | Must be identified before any redistribution. |
 | ONNX Runtime Web | inference runtime | MIT (in repo notice) | n/a | n/a | OK |
 | YOLOX Nano | object detection (native) | Apache-2.0 (in repo notice) | Apache-2.0 | COCO | OK. Not a sign model. |
-| YOLO11n (`yolo11n.onnx`, `yolo11n.pt`) | object detection (web, server) | **AGPL-3.0** or Ultralytics Enterprise | same | COCO | Not a sign model, but it is bundled: AGPL obligations apply to distribution. Noted in `.env.example`; **missing from `THIRD_PARTY_NOTICES.md`**. |
-| Pinto keypoint / point-history ONNX | nothing (unused) | **not recorded** | **not recorded** | unknown | Bundled without a notice and not used. Remove, or document source and licence. |
+| YOLO11n (`yolo11n.onnx`, `yolo11n.pt`) | object detection (web, server) | **AGPL-3.0** or Ultralytics Enterprise | same | COCO | Not a sign model, but it is bundled: AGPL obligations apply to distribution. Recorded in `THIRD_PARTY_NOTICES.md`. |
 | Vision LLM for `/v1/interpret-sign` | cloud sign decoding | provider terms | model licence of the configured model (for example Qwen): **not verified** | n/a | Frames leave the device when Groq is used. |
 
 ## In code but not operational
@@ -39,8 +38,8 @@ advice.
 
 ## Actions
 
-1. Add YOLO11 (AGPL-3.0) and MediaPipe to `THIRD_PARTY_NOTICES.md`.
-2. Remove the unused Pinto models or record their source and licence.
+1. Done: YOLO11 and MediaPipe are in `THIRD_PARTY_NOTICES.md`; the unused Pinto models were removed.
+2. The 250-word model's MIT licence was confirmed in its upstream repository.
 3. Record the source and licence of the fingerspelling dataset.
 4. Read the Google ISLR competition rules for commercial use of derived models.
 5. Keep Uni-Sign behind its flag and out of any commercial build.

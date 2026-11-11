@@ -25,6 +25,8 @@ export type HandTrackerProps = {
     clearText: () => void;
   } | null>;
   showLandmarks?: boolean;
+  /** Web only: records labelled landmark samples (app/record.tsx). */
+  trainingRecorder?: import('../src/landmarkRecorder.web').SignRecorder;
 };
 
 export default function HandTracker(_props: HandTrackerProps) {
