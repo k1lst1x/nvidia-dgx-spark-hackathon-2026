@@ -102,7 +102,9 @@ How it is driven (`ASLWordEngine`):
 3. A window votes only if its top class is ≥ 0.30 and at least 0.10 ahead of
    the runner-up (`apps/mobile/src/signConfirmation.ts`). A sign is confirmed
    after 2 consecutive votes at ≥ 0.45, or 3 below that. The 0.10 margin is a
-   guess, not tuned on data.
+   guess, not tuned on data. By default only the 45 core signs can vote
+   (`asl_core_vocabulary.json`, `FIXED_VOCABULARY_PLAN.md`); Settings can
+   switch back to all 250.
 4. The same sign is not confirmed again within 2.5 s.
 5. The buffer resets after 8 frames with no hands. The phrase ends after 30
    frames with no hands. A phrase holds at most 12 words.

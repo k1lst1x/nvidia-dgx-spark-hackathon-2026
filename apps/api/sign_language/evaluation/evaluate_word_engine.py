@@ -69,21 +69,24 @@ def model_label(gloss: str) -> str:
     return re.sub(r"[^a-z0-9]", "", gloss.lower())
 
 
-def vote(top: list[tuple[str, float]], margin: float) -> str:
+def vote(top: list[tuple[str, float]], margin: float, allowed: set[str] | None = None) -> str:
     best = top[0]
     if best[1] < WORD_CONFIDENCE_FLOOR:
         return ""
     if len(top) > 1 and best[1] - top[1][1] < margin:
         return ""
+    if allowed is not None and best[0] not in allowed:
+        return ""
     return best[0]
 
 
-def replay(windows: list[tuple[float, list[tuple[str, float]]]], margin: float) -> list[str]:
+def replay(windows: list[tuple[float, list[tuple[str, float]]]], margin: float,
+           allowed: set[str] | None = None) -> list[str]:
     """Words the engine confirms from a clip's inference windows (time ms, top 3)."""
     committed: list[str] = []
     candidate, stable, last, last_time = "", 0, "", -math.inf
     for now, top in windows:
-        if vote(top, margin):
+        if vote(top, margin, allowed):
             label, confidence = top[0]
             stable = stable + 1 if label == candidate else 1
             candidate = label
@@ -137,12 +140,16 @@ def main() -> None:
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--margins", type=float, nargs="+", default=[0.0, 0.05, 0.1, 0.15, 0.2])
     parser.add_argument("--output", type=Path, help="write per-sample results as JSON")
+    parser.add_argument("--core-vocabulary", type=Path,
+                        help="asl_core_vocabulary.json: confirm only these signs, as the app does by default")
     args = parser.parse_args()
 
     import onnxruntime as ort
 
     classes = json.loads(args.labels.read_text(encoding="utf-8"))["classes"]
     session = ort.InferenceSession(str(args.model), providers=["CPUExecutionProvider"])
+    allowed = (set(json.loads(args.core_vocabulary.read_text(encoding="utf-8"))["signs"])
+               if args.core_vocabulary else None)
 
     results, skipped = [], []
     for path in sorted(args.samples.glob("*.json")):
@@ -160,7 +167,7 @@ def main() -> None:
         results.append({
             "file": path.name, "signer": sample.get("signerId", ""), "expected": expected,
             "windows": len(windows), "best_window_top1": best_window,
-            "committed": {str(margin): replay(windows, margin) for margin in args.margins},
+            "committed": {str(margin): replay(windows, margin, allowed) for margin in args.margins},
         })
 
     signs = [r for r in results if r["expected"] != NO_SIGN]

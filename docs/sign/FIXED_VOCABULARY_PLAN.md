@@ -64,6 +64,7 @@ python apps/api/sign_language/evaluation/evaluate_word_engine.py `
   --samples datasets/visionmate_signs/all `
   --model apps/mobile/assets/models/asl_word_transformer.onnx `
   --labels apps/mobile/assets/models/asl_word_labels.json `
+  --core-vocabulary apps/mobile/assets/models/asl_core_vocabulary.json `
   --output datasets/visionmate_signs/word_engine_results.json
 ```
 
@@ -77,8 +78,12 @@ confusions. The rule-based gestures are not replayed, and recordings are at
 
 1. **Pick the floor and margin** that keep false words on `NONE` clips near
    zero, then check what that costs in correct words.
-2. **Restrict output to the 45 signs.** Words outside the vocabulary are
-   never confirmed, which removes most of the confusions seen above.
+2. ~~Restrict output to the 45 signs.~~ Done: the app confirms only the signs
+   in `apps/mobile/assets/models/asl_core_vocabulary.json` unless Settings →
+   Sign Vocabulary is set to All (250). On the How2Sign clips this takes the
+   false words from 11 to 0 (pass `--core-vocabulary` to the script). Those
+   clips contain none of the 45 signs, so they show that unknown signing is
+   rejected, not how well the 45 are recognized.
 3. **If the 250-word model is too weak on these signs,** train a small
    classifier on the recordings with an explicit no-sign class, as a
    separate model. The existing ONNX model is not modified.

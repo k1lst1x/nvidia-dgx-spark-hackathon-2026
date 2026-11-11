@@ -1,0 +1,12 @@
+{
+  "description": "Signs the word engine may confirm by default. All are labels of asl_word_transformer.onnx. See docs/sign/FIXED_VOCABULARY_PLAN.md.",
+  "signs": [
+    "yes", "no", "not", "fine", "bad", "same",
+    "hello", "bye", "please", "thankyou",
+    "water", "drink", "food", "hungry", "thirsty", "potty", "sleep", "sick", "owie",
+    "wait", "stay", "go", "look", "find", "give", "open", "close", "stuck", "finish",
+    "say", "talk", "hear", "listen", "where", "who", "why",
+    "minemy", "yourself", "police", "home", "outside", "stairs",
+    "now", "later", "tomorrow"
+  ]
+}

@@ -1,6 +1,6 @@
 import labelsJson from '../assets/models/asl_word_labels.json';
 import { getOrtRuntime } from './ortRuntime.web';
-import { requiredStableWindows, windowVote } from './signConfirmation';
+import { CORE_SIGNS, readSignVocabulary, requiredStableWindows, windowVote } from './signConfirmation';
 
 type OrtTensor = { data: Float32Array };
 type OrtSession = { run: (feeds: Record<string, unknown>) => Promise<Record<string, OrtTensor>> };
@@ -578,7 +578,7 @@ export class ASLWordEngine {
       const best = top3[0];
       const now = performance.now();
 
-      if (windowVote(top3)) {
+      if (windowVote(top3, readSignVocabulary() === 'core' ? CORE_SIGNS : undefined)) {
         if (best.label === this.candidate) {
           this.stablePredictions += 1;
         } else {

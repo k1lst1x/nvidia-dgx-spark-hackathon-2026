@@ -12,6 +12,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { readSignVocabulary, type SignVocabulary } from '../src/signConfirmation';
 import {
   CAMPUS_LOCATIONS,
   getCampusAlerts,
@@ -41,6 +42,7 @@ export default function AssistantHub() {
   const [speechEnabled, setSpeechEnabled] = useState(true);
   const [speechRate, setSpeechRate] = useState<'0.9' | '1.0' | '1.2'>('1.0');
   const [sensitivity, setSensitivity] = useState<'high' | 'balanced' | 'strict'>('balanced');
+  const [signVocabulary, setSignVocabulary] = useState<SignVocabulary>('core');
   const [apiUrl, setApiUrl] = useState('http://localhost:8000');
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'online' | 'offline'>('idle');
   const [pingLatency, setPingLatency] = useState<number | null>(null);
@@ -163,6 +165,8 @@ export default function AssistantHub() {
         setSensitivity(storedSens);
       }
 
+      setSignVocabulary(readSignVocabulary());
+
       const storedUrl = window.localStorage.getItem('guidelens_api_url');
       if (storedUrl) {
         const migratedUrl = storedUrl.replace(/^http:\/\/(localhost|127\.0\.0\.1):8082$/, 'http://$1:8000');
@@ -195,6 +199,11 @@ export default function AssistantHub() {
     if (speechEnabled) {
       Speech.speak(`Speech speed set to ${rate}x`, { rate: Number(rate) });
     }
+  };
+
+  const changeSignVocabulary = (value: SignVocabulary) => {
+    setSignVocabulary(value);
+    saveSetting('sign_vocabulary', value);
   };
 
   const changeSensitivity = (val: 'high' | 'balanced' | 'strict') => {
@@ -791,6 +800,41 @@ export default function AssistantHub() {
                           style={[
                             s.segmentedOptionText,
                             sensitivity === item.key && s.segmentedOptionTextActive,
+                          ]}
+                        >
+                          {item.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={s.settingRow}>
+                  <View style={s.settingCol}>
+                    <Text style={s.settingLabel}>Sign Vocabulary</Text>
+                    <Text style={s.settingDesc}>
+                      Core accepts 45 everyday signs and ignores the rest. All 250 also accepts rarer words, with many more false words.
+                    </Text>
+                  </View>
+                  <View style={s.segmentedRow}>
+                    {(
+                      [
+                        { key: 'core', label: 'Core (45)' },
+                        { key: 'all', label: 'All (250)' },
+                      ] as const
+                    ).map((item) => (
+                      <Pressable
+                        key={item.key}
+                        onPress={() => changeSignVocabulary(item.key)}
+                        style={[
+                          s.segmentedOption,
+                          signVocabulary === item.key && s.segmentedOptionActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            s.segmentedOptionText,
+                            signVocabulary === item.key && s.segmentedOptionTextActive,
                           ]}
                         >
                           {item.label}
