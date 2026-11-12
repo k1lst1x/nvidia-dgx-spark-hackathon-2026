@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import device_manager
+
 logger = logging.getLogger("guidelens.depth")
 
 
@@ -126,7 +128,6 @@ class DepthAnythingMetric:
         )
         self.repo_path = Path(os.getenv("DEPTH_ANYTHING_REPO", default_repo))
         self.checkpoint = Path(os.getenv("DEPTH_ANYTHING_CHECKPOINT", default_checkpoint))
-        self.device = os.getenv("DEPTH_ANYTHING_DEVICE", "cuda")
         self.max_depth = float(os.getenv("DEPTH_ANYTHING_MAX_DEPTH_M", "20"))
         # "auto": the model's native 518 on a GPU; 364 on CPU, where 518 takes
         # seconds per frame and the app drops replies older than 3 s.
@@ -167,6 +168,7 @@ class DepthAnythingMetric:
         if not self.ready or self._load_error:
             return None
         try:
+            import numpy as np
             import torch
 
             if str(self.repo_path) not in sys.path:
@@ -178,22 +180,26 @@ class DepthAnythingMetric:
                 if self.is_metric
                 else {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]}
             )
-            wants_gpu = self.device in {"auto", "cuda"} or self.device.startswith("cuda:")
-            device = ("cuda" if self.device == "auto" else self.device) if wants_gpu and torch.cuda.is_available() else (
-                "cpu" if wants_gpu else self.device
-            )
-            self._device_used = device
-            if self._input_size_setting == "auto":
-                self.input_size = 518 if device.startswith("cuda") else 364
-            else:
-                self.input_size = int(self._input_size_setting)
-            model = DepthAnythingV2(**config)
             try:
                 state = torch.load(self.checkpoint, map_location="cpu", weights_only=True)
             except Exception:
                 state = torch.load(self.checkpoint, map_location="cpu", weights_only=False)
-            model.load_state_dict(state)
-            self._model = model.to(device).eval()
+
+            def load(device: str):
+                model = DepthAnythingV2(**config)
+                model.load_state_dict(state)
+                return model.to(device).eval()
+
+            def warm(model, device: str) -> None:
+                self._use_input_size(device)
+                self._forward(model, np.full((480, 640, 3), 127, dtype=np.uint8))
+
+            model, device = device_manager.load_with_fallback(
+                device_manager.select_device("depth"), load, warm, model=self.checkpoint.name,
+            )
+            self._device_used = device
+            self._use_input_size(device)
+            self._model = model
             return self._model
         except Exception as exc:
             self._load_error = type(exc).__name__
@@ -219,23 +225,33 @@ class DepthAnythingMetric:
         image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
         if image is None:
             return None
+        started = time.perf_counter()
+        result = self._forward(model, image)
+        self.last_ms = int((time.perf_counter() - started) * 1000)
+        return result
+
+    def _use_input_size(self, device: str) -> None:
+        if self._input_size_setting == "auto":
+            self.input_size = 364 if device == "cpu" else 518
+        else:
+            self.input_size = int(self._input_size_setting)
+
+    def _forward(self, model, image):
         # The upstream helper chooses a device independently of the configured
         # model device. Run the shared preprocessing path explicitly so CPU,
         # CUDA, and MPS deployments cannot create an image/model device mismatch.
         import torch
         import torch.nn.functional as functional
 
-        started = time.perf_counter()
         tensor, (height, width) = model.image2tensor(image, self.input_size)
         device = next(model.parameters()).device
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device.type == "cuda"):
+        half = device_manager.half_enabled("depth", str(device))
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=half):
             prediction = model(tensor.to(device))
         prediction = functional.interpolate(
             prediction.float()[:, None], (height, width), mode="bilinear", align_corners=True
         )[0, 0]
-        result = prediction.detach().cpu().numpy()
-        self.last_ms = int((time.perf_counter() - started) * 1000)
-        return result
+        return prediction.detach().cpu().numpy()
 
 
 def readings_for_boxes(depth_map, objects: list[Box]) -> list[DepthReading]:

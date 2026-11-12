@@ -6,6 +6,7 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
+import device_manager
 from schemas import DetectedObject
 
 SIGN_CLASSES = {
@@ -20,9 +21,9 @@ SIGN_CLASSES = {
 
 
 class YoloSignDetector:
-    def __init__(self, *, model_path: str | None = None, confidence: float = 0.40, device: str = "cpu"):
+    def __init__(self, *, model_path: str | None = None, confidence: float = 0.40, device: str | None = None):
         self.confidence = confidence
-        self.device = device
+        self.device = device_manager.select_device("sign", device).device
         self._lock = threading.Lock()
         self._logger = logging.getLogger("guidelens.yolo_sign")
 

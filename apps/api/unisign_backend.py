@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import device_manager
 from unisign_adapter import UniSignAdapter, UniSignCompatibilityError
 
 
@@ -28,7 +29,7 @@ class UniSignBackend:
         self.repo = Path(os.getenv("UNISIGN_REPO", "/opt/uni-sign"))
         self.checkpoint = Path(os.getenv("UNISIGN_CHECKPOINT", "/models/how2sign_pose_only_slt.pth"))
         self.mt5_path = Path(os.getenv("UNISIGN_MT5_PATH", "/models/mt5-base"))
-        self.device = os.getenv("UNISIGN_DEVICE", "cuda")
+        self.device = device_manager.requested_device("sign")
         self.allow_presence_proxy = os.getenv("UNISIGN_ALLOW_MEDIAPIPE_PRESENCE_PROXY", "false").lower() in {"1", "true", "yes"}
         self._model: Any | None = None
         self._torch: Any | None = None
@@ -54,8 +55,8 @@ class UniSignBackend:
             raise UniSignBackendError("Missing Uni-Sign assets: " + ", ".join(missing))
         try:
             import torch
-            if self.device.startswith("cuda") and not torch.cuda.is_available():
-                raise UniSignBackendError("UNISIGN_DEVICE requests CUDA but CUDA is unavailable")
+            choice = device_manager.select_device("sign")
+            self.device = choice.device
             # Uni-Sign imports config.mt5_path by value during models import.
             # Override only the local configuration value, leaving architecture
             # and checkpoint parameter names untouched.
@@ -70,6 +71,7 @@ class UniSignBackend:
             model.load_state_dict(state_dict, strict=True)
             model.eval().to(self.device)
             self._model, self._torch = model, torch
+            device_manager.record("sign", choice, self.device, model="uni-sign")
         except Exception as error:  # Preserve the original error for health/UI diagnostics.
             self.load_error = str(error)
             raise UniSignBackendError(f"Uni-Sign could not load: {error}") from error

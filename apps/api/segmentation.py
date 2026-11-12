@@ -11,8 +11,10 @@ import logging
 import os
 import threading
 import time
-from functools import lru_cache
 from io import BytesIO
+
+import device_manager
+from yolo_tracker import precision
 
 logger = logging.getLogger("guidelens.segmentation")
 
@@ -33,25 +35,33 @@ class YoloSegmenter:
     def __init__(self) -> None:
         self.enabled = os.getenv("ULTRALYTICS_YOLO_SEG_ENABLED", "false").lower() in {"1", "true", "yes"}
         self.model_path = os.getenv("ULTRALYTICS_YOLO_SEG_MODEL", "yolo11n-seg.pt")
-        from yolo_tracker import resolve_device
-
-        self.device = resolve_device(os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu"))
+        self._choice = device_manager.select_device("segmentation")
+        self.device = self._choice.device
         self.confidence = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
         self.last_ms: int | None = None
         self._lock = threading.Lock()
+        self._loaded = None
 
     def status(self) -> dict[str, object]:
         return {
             "enabled": self.enabled,
             "model": self.model_path if self.enabled else None,
+            "device": self.device if self._loaded is not None else None,
             "last_ms": self.last_ms,
         }
 
-    @lru_cache(maxsize=1)
     def _model(self):
-        from ultralytics import YOLO
+        """Load once and verify the device; the caller holds the lock."""
+        if self._loaded is None:
+            from ultralytics import YOLO
+            from yolo_tracker import warm_up_yolo
 
-        return YOLO(self.model_path)
+            self._loaded, self.device = device_manager.load_with_fallback(
+                self._choice, lambda _device: YOLO(self.model_path),
+                lambda model, device: warm_up_yolo(model, device, device_manager.half_enabled("segmentation", device)),
+                model=self.model_path,
+            )
+        return self._loaded
 
     def masks_for(self, image_bytes: bytes, objects: list) -> list:
         """Return one full-frame boolean mask per object, or None when unmatched."""
@@ -68,7 +78,7 @@ class YoloSegmenter:
             with self._lock:
                 result = self._model().predict(
                     source=image, conf=self.confidence, imgsz=640, device=self.device, verbose=False, max_det=12,
-                    half=self.device.startswith("cuda"),
+                    **precision(device_manager.half_enabled("segmentation", self.device)),
                     # Masks at the original frame size. Resizing the letterboxed
                     # inference mask would include the padding and shift it.
                     retina_masks=True,

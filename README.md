@@ -178,10 +178,13 @@ Scene Assist can additionally run an official Ultralytics YOLO checkpoint in the
 # .env
 ULTRALYTICS_YOLO_ENABLED=true
 ULTRALYTICS_YOLO_MODEL=yolo11n.pt
-# Use 0 on a CUDA-equipped DGX host, otherwise leave cpu.
-ULTRALYTICS_YOLO_DEVICE=cpu
+# auto = CUDA, then Apple MPS, then CPU. See docs/DEVICES.md.
+YOLO_DEVICE=auto
 docker compose up --build
+# With an NVIDIA GPU: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
+
+Each model picks its device on startup (`YOLO_DEVICE`, `SEG_DEVICE`, `DEPTH_DEVICE`, `SIGN_DEVICE`), runs one test inference there, and falls back to CPU if that fails. `/health` → `devices` shows what each model runs on and why. [docs/DEVICES.md](docs/DEVICES.md) covers installing a CUDA or MPS build of PyTorch on Windows, Linux, DGX Spark and macOS, and lists measured CPU vs GPU speeds.
 
 The checkpoint downloads into the service's model cache the first time Scene Assist runs; it is not committed to this repository. Ultralytics distributes its implementation under AGPL-3.0 and offers an Enterprise license for proprietary distribution. Review the [Ultralytics license terms](https://docs.ultralytics.com/help/license/) before enabling it outside an AGPL-compatible project.
 
@@ -201,7 +204,7 @@ Then enable it locally:
 
 ```bash
 DEPTH_ANYTHING_ENABLED=true
-DEPTH_ANYTHING_DEVICE=cuda # use cpu when CUDA is unavailable
+DEPTH_DEVICE=auto # CUDA, then MPS, then CPU
 docker compose up --build
 ```
 

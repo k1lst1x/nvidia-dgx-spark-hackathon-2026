@@ -57,7 +57,8 @@ from schemas import (
 from unisign_backend import UniSignBackend, UniSignBackendError
 from sign_english import english_text, yolo_sign_phrase
 from yolo_sign import YoloSignDetector
-from yolo_tracker import YoloTracker, resolve_device
+from device_manager import report as device_report
+from yolo_tracker import YoloTracker
 
 VISION_API_URL = os.getenv("VISION_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 MODEL = os.getenv("VISION_MODEL") or os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
@@ -176,11 +177,9 @@ SIGN_FRAME_WIDTH = int(os.getenv("SIGN_FRAME_WIDTH", "320"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_ENABLED = os.getenv("POINT_CLOUD_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_INTERVAL_S = float(os.getenv("POINT_CLOUD_INTERVAL_S", "0.5"))
-YOLO_DEVICE = resolve_device(os.getenv("ULTRALYTICS_YOLO_DEVICE", "cpu"))
+YOLO_MODEL = os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
 # A larger model is cheap on a GPU and much slower on CPU, so CPU can use its own.
-YOLO_MODEL = (
-    os.getenv("ULTRALYTICS_YOLO_CPU_MODEL") if YOLO_DEVICE == "cpu" and os.getenv("ULTRALYTICS_YOLO_CPU_MODEL") else None
-) or os.getenv("ULTRALYTICS_YOLO_MODEL", "yolo11n.pt")
+YOLO_CPU_MODEL = os.getenv("ULTRALYTICS_YOLO_CPU_MODEL") or None
 YOLO_CONFIDENCE = float(os.getenv("ULTRALYTICS_YOLO_CONFIDENCE", "0.40"))
 # One Ultralytics model instance is shared by the API process. Keep the BoT-SORT
 # state scoped to one active camera feed so object IDs never bleed between users.
@@ -230,9 +229,9 @@ _unisign_backend = UniSignBackend()
 _yolo_sign_detector = YoloSignDetector()
 _motion_history = MotionHistory()
 _yolo_tracker = YoloTracker(
-    enabled=YOLO_ENABLED, model_path=YOLO_MODEL, device=YOLO_DEVICE,
+    enabled=YOLO_ENABLED, model_path=YOLO_MODEL, cpu_model_path=YOLO_CPU_MODEL,
     confidence=YOLO_CONFIDENCE, tracker_config=YOLO_TRACKER_CONFIG,
-    idle_seconds=YOLO_TRACK_IDLE_SECONDS,
+    idle_seconds=YOLO_TRACK_IDLE_SECONDS, on_reset=_motion_history.reset,
 )
 
 
@@ -678,9 +677,11 @@ def _warm_up_models() -> None:
             return
         frame = encoded.tobytes()
         if YOLO_ENABLED:
+            _yolo_tracker.load()
             _yolo_tracker.detect_with_masks(frame, "__warmup__")
         if _depth_model.ready:
             _depth_model.infer(frame)
+        logger.info("model_devices %s", {name: value.get("active") for name, value in device_report()["components"].items()})
     except Exception:
         logger.exception("model_warmup_failed")
 
@@ -702,9 +703,10 @@ def health():
         "model": MODEL,
         "vision_providers": [str(provider["name"]) for provider in _vision_providers()],
         "last_vision_answer": dict(_last_vision_answer),
+        "devices": device_report(),
         "yolo": {
             "enabled": YOLO_ENABLED,
-            "model": YOLO_MODEL if YOLO_ENABLED else None,
+            "model": _yolo_tracker.model_path if YOLO_ENABLED else None,
             "tracker": "botsort",
             "camera_motion_compensation": "sparseOptFlow",
             "segmentation_enabled": _segmenter.enabled,

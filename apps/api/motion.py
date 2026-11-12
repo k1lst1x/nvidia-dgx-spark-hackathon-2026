@@ -162,6 +162,10 @@ class MotionHistory:
         self.stale_seconds = stale_seconds
         self._tracks: dict[str, dict[int, deque[SurfaceMeasurement]]] = defaultdict(dict)
 
+    def reset(self, session_id: str) -> None:
+        """Forget a session whose tracker restarted: its track IDs now mean other objects."""
+        self._tracks.pop(session_id, None)
+
     def _expire(self, session_id: str, now: float) -> None:
         tracks = self._tracks[session_id]
         for track_id in list(tracks):

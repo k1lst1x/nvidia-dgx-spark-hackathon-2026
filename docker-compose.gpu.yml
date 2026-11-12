@@ -1,0 +1,12 @@
+# NVIDIA GPU for the API container (Linux or Windows WSL 2 with the NVIDIA
+# Container Toolkit). Use together with the main file:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+services:
+  api:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

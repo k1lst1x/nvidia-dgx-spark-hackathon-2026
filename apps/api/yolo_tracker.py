@@ -5,7 +5,9 @@ import threading
 import time
 from functools import lru_cache
 from io import BytesIO
+from typing import Callable
 
+import device_manager
 from schemas import DetectedObject
 
 # BoT-SORT keeps a track alive through frames where the detector is unsure
@@ -17,23 +19,51 @@ CONFIRMED_TRACK_HITS = 3
 
 
 def resolve_device(device: str) -> str:
-    """'auto' picks the first CUDA GPU when this PyTorch build can use it."""
-    if device and device != "auto":
-        return device
-    try:
-        import torch
+    """'auto' picks CUDA, then MPS, then CPU, as far as this PyTorch build can use them."""
+    return device_manager.select_device("yolo", device).device
 
-        return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+@lru_cache(maxsize=1)
+def _has_quantize() -> bool:
+    try:
+        from ultralytics.cfg import DEFAULT_CFG_DICT
     except ImportError:
-        return "cpu"
+        return False
+    return "quantize" in DEFAULT_CFG_DICT
+
+
+def precision(half: bool) -> dict[str, object]:
+    """FP16/FP32 argument for this Ultralytics version (8.4 replaced `half` with `quantize`)."""
+    if _has_quantize():
+        return {"quantize": 16 if half else None}
+    return {"half": half}
+
+
+def warm_up_yolo(model, device: str, half: bool = False) -> None:
+    """One inference on a blank frame: proves the device runs this model."""
+    import numpy as np
+
+    model.predict(source=np.full((480, 640, 3), 127, dtype=np.uint8), imgsz=640, device=device, verbose=False,
+                  **precision(half))
 
 
 class YoloTracker:
-    def __init__(self, *, enabled: bool, model_path: str, device: str, confidence: float, tracker_config: str, idle_seconds: float):
+    """One shared YOLO model; BoT-SORT state belongs to one camera session at a time.
+
+    The device is fixed when the model loads. If the accelerator fails later,
+    the model is rebuilt on CPU and the session starts over with fresh track
+    IDs; a session is never continued across devices.
+    """
+
+    def __init__(self, *, enabled: bool, model_path: str, device: str | None = None, confidence: float,
+                 tracker_config: str, idle_seconds: float, cpu_model_path: str | None = None,
+                 on_reset: Callable[[str], None] | None = None):
         self.enabled = enabled
-        self.model_path = model_path
-        self.device = resolve_device(device)
-        self.half = self.device.startswith("cuda")
+        self._gpu_model_path = model_path
+        self._cpu_model_path = cpu_model_path or model_path
+        self._choice = device_manager.select_device("yolo", device)
+        self.device = self._choice.device
+        self.half = device_manager.half_enabled("yolo", self.device)
         self.confidence = confidence
         self.tracker_config = tracker_config
         self.idle_seconds = idle_seconds
@@ -42,7 +72,15 @@ class YoloTracker:
         self._session: str | None = None
         self._seen_at = 0.0
         self._hits: dict[int, int] = {}
+        self._loaded = None
+        self._on_reset = on_reset
+        self.restarts = 0
         self._logger = logging.getLogger("guidelens")
+
+    @property
+    def model_path(self) -> str:
+        """A larger model is cheap on a GPU and much slower on CPU, so CPU can use its own."""
+        return self._cpu_model_path if self.device == "cpu" else self._gpu_model_path
 
     @property
     def segments(self) -> bool:
@@ -50,15 +88,54 @@ class YoloTracker:
         return self.model_path.removesuffix(".pt").endswith("-seg")
 
     def status(self) -> dict[str, object]:
-        return {"device": self.device, "half": self.half, "segments": self.segments, "last_ms": self.last_ms}
+        return {"device": self.device, "half": self.half, "segments": self.segments, "last_ms": self.last_ms,
+                "restarts": self.restarts}
 
-    @lru_cache(maxsize=1)
-    def _model(self):
+    def _load(self, device: str):
         try:
             from ultralytics import YOLO
         except ImportError as exc:
             raise RuntimeError("Ultralytics is not installed; rebuild the API image with requirements.txt") from exc
-        return YOLO(self.model_path)
+        path = self._cpu_model_path if device == "cpu" else self._gpu_model_path
+        return YOLO(path)
+
+    def _model(self):
+        """Load once; the caller holds the lock."""
+        if self._loaded is None:
+            def warm(model, device):
+                warm_up_yolo(model, device, device_manager.half_enabled("yolo", device))
+
+            self._loaded, self.device = device_manager.load_with_fallback(
+                self._choice, self._load, warm, model=self._gpu_model_path,
+            )
+            self.half = device_manager.half_enabled("yolo", self.device)
+        return self._loaded
+
+    def load(self) -> None:
+        """Load and verify the model now instead of on the first camera frame."""
+        if self.enabled:
+            with self._lock:
+                self._model()
+
+    def _forget_session(self, session_id: str | None) -> None:
+        self._hits.clear()
+        if session_id and self._on_reset:
+            self._on_reset(session_id)
+
+    def _restart_on_cpu(self, error: BaseException) -> None:
+        """The accelerator failed mid-session: new CPU model, new tracker, new session."""
+        failed = self.device
+        self._logger.error("yolo_accelerator_failed device=%s; restarting on cpu: %s", failed, error)
+        self._loaded = None
+        device_manager.release(failed)
+        self._forget_session(self._session)
+        self._session = None
+        self._loaded = self._load("cpu")
+        warm_up_yolo(self._loaded, "cpu")
+        self.device, self.half = "cpu", False
+        self.restarts += 1
+        device_manager.record("yolo", self._choice, "cpu", fallback_from=failed,
+                              error=f"{type(error).__name__}: {error}"[:300], model=self._cpu_model_path)
 
     @staticmethod
     def _position(x: float, y: float, width: float, height: float) -> str:
@@ -72,6 +149,12 @@ class YoloTracker:
             reset = getattr(tracker, "reset", None)
             if reset:
                 reset()
+
+    def _track(self, model, image):
+        return model.track(
+            source=image, persist=True, tracker=self.tracker_config, conf=TRACKER_INPUT_CONFIDENCE,
+            imgsz=640, device=self.device, verbose=False, max_det=20, retina_masks=True, **precision(self.half),
+        )[0]
 
     def detect(self, image_bytes: bytes, session_id: str) -> list[DetectedObject]:
         return self.detect_with_masks(image_bytes, session_id)[0]
@@ -93,12 +176,16 @@ class YoloTracker:
                 now = time.monotonic()
                 if self._session and (self._session != session_id or now - self._seen_at > self.idle_seconds):
                     self._reset(model)
-                    self._hits.clear()
+                    self._forget_session(self._session)
                 self._session, self._seen_at = session_id, now
-                result = model.track(
-                    source=image, persist=True, tracker=self.tracker_config, conf=TRACKER_INPUT_CONFIDENCE,
-                    imgsz=640, device=self.device, half=self.half, verbose=False, max_det=20, retina_masks=True,
-                )[0]
+                try:
+                    result = self._track(model, image)
+                except Exception as error:
+                    if self.device == "cpu" or not device_manager.is_accelerator_error(error):
+                        raise
+                    self._restart_on_cpu(error)
+                    self._session, self._seen_at = session_id, time.monotonic()
+                    result = self._track(self._loaded, image)
                 tracked = getattr(result.boxes, "is_track", False)
                 live_ids = set()
                 if tracked and result.boxes.id is not None:

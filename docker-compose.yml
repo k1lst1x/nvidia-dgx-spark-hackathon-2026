@@ -1,6 +1,11 @@
 services:
   api:
-    build: ./apps/api
+    build:
+      context: ./apps/api
+      args:
+        # Empty: the PyTorch build pip picks for this platform. Set to e.g.
+        # https://download.pytorch.org/whl/cu130 to pin a CUDA build.
+        TORCH_INDEX_URL: "${TORCH_INDEX_URL:-}"
     ports: ["8082:8000"]
     environment:
       VISION_API_URL: "${VISION_API_URL:-https://api.groq.com/openai/v1/chat/completions}"
@@ -21,7 +26,17 @@ services:
       # downloaded by the container on first use; see README for AGPL licensing.
       ULTRALYTICS_YOLO_ENABLED: "${ULTRALYTICS_YOLO_ENABLED:-false}"
       ULTRALYTICS_YOLO_MODEL: "${ULTRALYTICS_YOLO_MODEL:-yolo11n.pt}"
-      ULTRALYTICS_YOLO_DEVICE: "${ULTRALYTICS_YOLO_DEVICE:-cpu}"
+      # auto = CUDA, then MPS, then CPU. A GPU needs docker-compose.gpu.yml too.
+      # Empty means auto; the older ULTRALYTICS_/DEPTH_ANYTHING_ names still work.
+      YOLO_DEVICE: "${YOLO_DEVICE:-}"
+      SEG_DEVICE: "${SEG_DEVICE:-}"
+      DEPTH_DEVICE: "${DEPTH_DEVICE:-}"
+      SIGN_DEVICE: "${SIGN_DEVICE:-}"
+      ULTRALYTICS_YOLO_DEVICE: "${ULTRALYTICS_YOLO_DEVICE:-}"
+      DEPTH_ANYTHING_DEVICE: "${DEPTH_ANYTHING_DEVICE:-}"
+      YOLO_HALF: "${YOLO_HALF:-false}"
+      SEG_HALF: "${SEG_HALF:-false}"
+      DEPTH_HALF: "${DEPTH_HALF:-false}"
       # Optional masks beside BoT-SORT. Off by default; a failure returns boxes only.
       ULTRALYTICS_YOLO_SEG_ENABLED: "${ULTRALYTICS_YOLO_SEG_ENABLED:-false}"
       ULTRALYTICS_YOLO_SEG_MODEL: "${ULTRALYTICS_YOLO_SEG_MODEL:-yolo11n-seg.pt}"
@@ -39,7 +54,6 @@ services:
       YOLO_TRACKER_CONFIG: "${YOLO_TRACKER_CONFIG:-/app/botsort.yaml}"
       DEPTH_ANYTHING_ENABLED: "${DEPTH_ANYTHING_ENABLED:-false}"
       DEPTH_ANYTHING_MODE: "${DEPTH_ANYTHING_MODE:-metric}"
-      DEPTH_ANYTHING_DEVICE: "${DEPTH_ANYTHING_DEVICE:-cuda}"
       DEPTH_ANYTHING_CHECKPOINT: "${DEPTH_ANYTHING_CHECKPOINT:-/models/depth_anything_v2_metric_hypersim_vits.pth}"
       # Keep real-world collision warnings disabled until ground-truth and
       # accessibility safety validation are complete.
