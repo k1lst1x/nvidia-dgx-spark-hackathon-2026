@@ -33,6 +33,10 @@ module.exports = {
       'expo-asset',
       'onnxruntime-react-native',
       ['expo-camera', { cameraPermission: 'Allow GuideLens to identify nearby objects and obstacles.' }],
+      ['expo-speech-recognition', {
+        microphonePermission: 'Allow GuideLens to use the microphone for Bridge replies.',
+        speechRecognitionPermission: 'Allow GuideLens to turn spoken Bridge replies into text.',
+      }],
     ],
     experiments: {
       typedRoutes: true,

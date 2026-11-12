@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Speech from 'expo-speech';
+import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -30,7 +31,9 @@ import {
   type BridgeMessage,
   type BridgeRole,
 } from '../src/campusMemory';
+import { initialBridgeSignGate, updateBridgeSignGate } from '../src/bridgeSignGate';
 import { signLabelToPhrase } from '../src/signPhrases';
+import { useVisionLoop } from '../src/vision';
 
 const QUICK_DEAF_SIGNS = [
   'THANK YOU',
@@ -60,8 +63,6 @@ const POLL_MS = 1500;
 const STATUS_EVERY_POLLS = 4;
 // A sign is sent at this confidence, and only once until the hands drop or
 // the word changes, so a held sign is not repeated every few seconds.
-const SIGN_SEND_CONFIDENCE = 0.7;
-const SIGN_REARM_CONFIDENCE = 0.4;
 
 const ROLE_OPTIONS: Array<{ role: DeviceRole; title: string; detail: string; icon: keyof typeof Ionicons.glyphMap }> = [
   { role: 'deaf', title: 'I sign', detail: 'Deaf side: camera reads my signs, replies appear in large text.', icon: 'hand-right' },
@@ -106,6 +107,13 @@ export default function DeafBlindBridgeScreen() {
   const [spelled, setSpelled] = useState('');
   const [cameraFacing, setCameraFacing] = useState<'front' | 'back'>('front');
   const [isListeningMic, setIsListeningMic] = useState(false);
+  const cameraRef = useRef<CameraView>(null);
+  const nativeDeafRole = Platform.OS !== 'web' && (role === 'deaf' || role === 'both');
+  const { result: nativeSignResult, state: nativeSignState } = useVisionLoop(
+    cameraRef,
+    'sign',
+    Boolean(code && nativeDeafRole && permission?.granted && bridgeServerConfigured()),
+  );
 
   const roleRef = useRef(role);
   const codeRef = useRef(code);
@@ -118,9 +126,9 @@ export default function DeafBlindBridgeScreen() {
   const handled = useRef<Set<string>>(new Set());
   // Partner state already announced, so joining an occupied room is not said twice.
   const previousPartner = useRef(false);
-  const lastSentWord = useRef('');
-  const signArmed = useRef(true);
+  const signGate = useRef(initialBridgeSignGate());
   const autoJoinTried = useRef(false);
+  const lastNativeSign = useRef('');
   const aslEngineRef = useRef<{ backspace: () => string; addSpace: () => string; clearText: () => void } | null>(null);
   const scrollViewRef = useRef<{ scrollToEnd: (options?: { animated?: boolean }) => void } | null>(null);
 
@@ -169,6 +177,8 @@ export default function DeafBlindBridgeScreen() {
     setCode(nextCode);
     setSync(nextCode === LOCAL_BRIDGE_CODE ? 'local' : 'connecting');
     setSetupError('');
+    signGate.current = initialBridgeSignGate();
+    lastNativeSign.current = '';
     if (nextCode !== LOCAL_BRIDGE_CODE) router.setParams({ code: nextCode, role: nextRole });
   }, []);
 
@@ -225,6 +235,8 @@ export default function DeafBlindBridgeScreen() {
     setSync('local');
     setPartnerJoined(false);
     setJoinInput('');
+    signGate.current = initialBridgeSignGate();
+    lastNativeSign.current = '';
     router.setParams({ code: undefined, role: undefined } as never);
   };
 
@@ -293,6 +305,15 @@ export default function DeafBlindBridgeScreen() {
     void send('deaf', phrase);
   };
 
+  // Native phones use the configured API's phrase decoder. The browser keeps
+  // its on-device word engine, and both paths retain quick-sign fallback.
+  useEffect(() => {
+    const phrase = nativeSignResult?.should_speak ? nativeSignResult.speech.trim() : '';
+    if (!phrase || phrase === lastNativeSign.current) return;
+    lastNativeSign.current = phrase;
+    handleDeafSigned(phrase);
+  }, [nativeSignResult?.scene_key, nativeSignResult?.should_speak, nativeSignResult?.speech]);
+
   const handleBlindReply = (text: string) => {
     if (!text.trim()) return;
     setCustomReply('');
@@ -300,19 +321,27 @@ export default function DeafBlindBridgeScreen() {
     void send('blind', text);
   };
 
+  useSpeechRecognitionEvent('start', () => setIsListeningMic(true));
+  useSpeechRecognitionEvent('end', () => setIsListeningMic(false));
+  useSpeechRecognitionEvent('error', (event) => {
+    setIsListeningMic(false);
+    if (event.error !== 'aborted' && event.error !== 'no-speech') {
+      setSetupError('Voice reply could not start. Use a quick reply or type your message.');
+    }
+  });
+  useSpeechRecognitionEvent('result', (event) => {
+    if (!event.isFinal) return;
+    const transcript = event.results[0]?.transcript.trim();
+    if (transcript) handleBlindReply(transcript);
+  });
+
   const handleContextChange = (state: SignContextState) => {
     setSpelled(state.aslState?.spelledText?.trim() ?? '');
     const word = state.wordState?.currentWord ?? '';
     const confidence = state.wordState?.currentConfidence ?? 0;
-    if (!state.handCount || !word || confidence < SIGN_REARM_CONFIDENCE) {
-      signArmed.current = true;
-      return;
-    }
-    if (confidence < SIGN_SEND_CONFIDENCE) return;
-    if (word === lastSentWord.current && !signArmed.current) return;
-    lastSentWord.current = word;
-    signArmed.current = false;
-    handleDeafSigned(signLabelToPhrase(word));
+    const next = updateBridgeSignGate(signGate.current, state.handCount, word, confidence);
+    signGate.current = next.gate;
+    if (next.shouldSend) handleDeafSigned(signLabelToPhrase(word));
   };
 
   const sendTypedSign = () => {
@@ -329,32 +358,26 @@ export default function DeafBlindBridgeScreen() {
     setSpelled('');
   };
 
-  const toggleMicListening = () => {
-    if (typeof window === 'undefined') return;
-    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRec) {
-      speak('Speech recognition is not available here. Use the reply buttons.');
-      return;
-    }
+  const toggleMicListening = async () => {
     if (isListeningMic) {
+      ExpoSpeechRecognitionModule.stop();
       setIsListeningMic(false);
       return;
     }
     try {
-      const recognition = new SpeechRec();
-      recognition.lang = 'en-US';
-      recognition.interimResults = false;
-      recognition.maxAlternatives = 1;
-      recognition.onstart = () => setIsListeningMic(true);
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        if (transcript) handleBlindReply(transcript);
-      };
-      recognition.onerror = () => setIsListeningMic(false);
-      recognition.onend = () => setIsListeningMic(false);
-      recognition.start();
+      if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
+        setSetupError('Speech recognition is not available on this device. Use a quick reply or type your message.');
+        return;
+      }
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!permission.granted) {
+        setSetupError('Microphone and speech-recognition permission are needed for voice replies.');
+        return;
+      }
+      ExpoSpeechRecognitionModule.start({ lang: 'en-US', interimResults: false, continuous: false });
     } catch {
       setIsListeningMic(false);
+      setSetupError('Voice reply could not start. Use a quick reply or type your message.');
     }
   };
 
@@ -529,7 +552,7 @@ export default function DeafBlindBridgeScreen() {
               {Platform.OS === 'web' ? (
                 <HandTracker onContextChange={handleContextChange} aslEngineRef={aslEngineRef} showLandmarks />
               ) : permission?.granted ? (
-                <CameraView facing={cameraFacing} style={StyleSheet.absoluteFill} />
+                <CameraView ref={cameraRef} facing={cameraFacing} style={StyleSheet.absoluteFill} />
               ) : (
                 <View style={s.cameraFallback}>
                   <Ionicons name="videocam-off" size={32} color="#607B6E" />
@@ -538,7 +561,11 @@ export default function DeafBlindBridgeScreen() {
               )}
               <View style={s.cameraOverlayBar}>
                 <Text style={s.overlayPrompt}>
-                  {Platform.OS === 'web' ? 'Sign with hands in frame or pick a sign:' : 'Sign reading runs in the browser app. Pick a sign:'}
+                  {Platform.OS === 'web'
+                    ? 'Sign with hands in frame or pick a sign:'
+                    : !bridgeServerConfigured() || nativeSignState === 'offline'
+                      ? 'Sign decoding needs the GuideLens server. Use a quick sign or type:'
+                      : 'Reading your signed phrase… or use a quick sign:'}
                 </Text>
                 {Platform.OS !== 'web' && (
                   <Pressable style={s.flipBtn} onPress={() => setCameraFacing((c) => (c === 'front' ? 'back' : 'front'))}>
@@ -671,16 +698,14 @@ export default function DeafBlindBridgeScreen() {
             </View>
 
             <View style={s.inputRow}>
-              {Platform.OS === 'web' && (
-                <Pressable
-                  style={[s.micBtn, isListeningMic && s.micBtnActive]}
-                  onPress={toggleMicListening}
-                  accessibilityRole="button"
-                  accessibilityLabel={isListeningMic ? 'Stop microphone' : 'Speak reply'}
-                >
-                  <Ionicons name={isListeningMic ? 'mic' : 'mic-outline'} size={22} color={isListeningMic ? '#07110F' : '#FFD043'} />
-                </Pressable>
-              )}
+              <Pressable
+                style={[s.micBtn, isListeningMic && s.micBtnActive]}
+                onPress={() => void toggleMicListening()}
+                accessibilityRole="button"
+                accessibilityLabel={isListeningMic ? 'Stop microphone' : 'Speak reply'}
+              >
+                <Ionicons name={isListeningMic ? 'mic' : 'mic-outline'} size={22} color={isListeningMic ? '#07110F' : '#FFD043'} />
+              </Pressable>
               <TextInput
                 style={s.customInput}
                 value={customReply}

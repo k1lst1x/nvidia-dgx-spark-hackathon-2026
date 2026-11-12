@@ -16,5 +16,8 @@
   },
   "engines": {
     "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "expo-speech-recognition": "^58.0.1"
   }
 }
