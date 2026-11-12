@@ -597,7 +597,11 @@ export default function LiveSceneMap({ detections, obstacles = null, blocked = n
         const label = ensureLabel(`ray:${key}`, 'ray', () => scratchLabel.copy(onFloor(OBSTACLE_RANGE_M * 0.86, ray.shown, 0.02)));
         label.priority = 70 + Math.abs(ray.angle);
         const name = ray.label.charAt(0).toUpperCase() + ray.label.slice(1);
-        setLabel(label, [{ text: name, color: '#DDF0FB' }, { text: '· no distance', color: '#8FD3FF' }],
+        // A local detector can reliably say that an object is in the camera
+        // view, but it cannot make a safe range claim without metric depth.
+        // Keep that limitation out of the primary object label: "no distance"
+        // reads like a failed value rather than useful live status.
+        setLabel(label, [{ text: name, color: '#DDF0FB' }, { text: '· in view', color: '#8FD3FF' }],
           'font-size:10px;padding:2px 6px;border-radius:7px;background:rgba(6,14,18,.86);border:1px dashed rgba(143,211,255,.45)');
       });
       rayVisuals.forEach((visual, key) => {

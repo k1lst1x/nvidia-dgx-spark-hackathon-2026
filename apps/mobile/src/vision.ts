@@ -341,7 +341,7 @@ function boxMatchScore(left: VisionObject, right: VisionObject) {
  * motion, track id) when a fresh server object with the same label overlaps.
  *
  * Without this, every local scan replaced the server's objects with copies
- * that had no distance, so the map showed "no distance" for everything. Local
+ * that had no distance, so the map showed an unhelpful missing range. Local
  * tracker ids are dropped because they share a number space with the server's
  * BoT-SORT ids and would merge two different objects on the map.
  */
@@ -364,7 +364,9 @@ export function withTrackedDepth(objects: VisionObject[], tracked: TrackedSnapsh
     const match = fresh[best];
     return {
       ...item,
-      distance_m: match.distance_m ?? null,
+      // Keep the local size-based estimate when the matching cloud frame did
+      // not produce metric depth. A valid cloud measurement always wins.
+      distance_m: match.distance_m ?? item.distance_m ?? null,
       relative_proximity: match.relative_proximity ?? item.relative_proximity ?? null,
       spatial: match.spatial ?? item.spatial,
       motion: match.motion ?? item.motion,
@@ -396,10 +398,12 @@ export function synthesizeLocalSceneResult(
     y: d.y,
     width: d.width,
     height: d.height,
-    // Local YOLOX has no calibrated depth source. Its class-height heuristic
-    // remains internal to layout prioritization, but must not be presented as
-    // a real-world range or approaching-object measurement.
-    distance_m: null,
+    // The local tracker derives an approximate range from the detected box
+    // height and a class-height prior. It is useful for the live map, but is
+    // not calibrated depth and never drives mobility or collision warnings.
+    distance_m: typeof d.distance_m === 'number' && Number.isFinite(d.distance_m) && d.distance_m > 0
+      ? d.distance_m
+      : null,
     relative_proximity: null,
     track_id: d.id ?? null,
   }));

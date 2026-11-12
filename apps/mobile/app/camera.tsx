@@ -59,6 +59,7 @@ function deduplicateConsecutivePhrases(text: string): string {
 export default function CameraScreen() {
   const { initialMode } = useLocalSearchParams<{ initialMode?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
+  const [cameraPermissionError, setCameraPermissionError] = useState('');
   const [mode, setMode] = useState<AssistMode>(initialMode === 'sign' ? 'sign' : 'scene');
   const [speaking, setSpeaking] = useState(true);
   const [showLandmarks, setShowLandmarks] = useState(true);
@@ -94,6 +95,40 @@ export default function CameraScreen() {
 
   const isSignMode = mode === 'sign';
   const showVisionDebug = process.env.EXPO_PUBLIC_VISION_DEBUG === 'true';
+
+  const requestCameraAccess = async () => {
+    setCameraPermissionError('');
+    try {
+      let nextPermission = await requestPermission();
+
+      // Some desktop browsers do not update Expo's permission hook until the
+      // browser camera API has been asked directly from a click handler. This
+      // fallback keeps the permission prompt tied to the user's button press.
+      if (!nextPermission.granted && Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: false,
+        });
+        stream.getTracks().forEach((track) => track.stop());
+        nextPermission = await requestPermission();
+      }
+
+      if (!nextPermission.granted) {
+        setCameraPermissionError(
+          nextPermission.canAskAgain
+            ? 'Camera access was not granted. Select Allow in your browser prompt and try again.'
+            : 'Camera access is blocked. Open your browser’s site settings for this page, allow Camera, then reload GuideLens.',
+        );
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : '';
+      setCameraPermissionError(
+        /secure|https/i.test(detail)
+          ? 'Camera access requires a secure page. Use localhost or HTTPS, then try again.'
+          : 'Camera access is unavailable. Check that no other app is using the camera and allow it in browser site settings.',
+      );
+    }
+  };
   const usesBrowserHandTracking = isSignMode && Platform.OS === 'web';
   const { result: vision, state: visionState, detections, cameraCoach, obstacles, blocked, performance, scanNow } = useVisionLoop(
     cameraRef,
@@ -490,7 +525,10 @@ export default function CameraScreen() {
         <View style={c.permissionIcon}><Ionicons name="camera" size={34} color="#B7FF56" /></View>
         <Text style={c.permissionTitle}>Let your camera help communicate</Text>
         <Text style={c.permissionText}>GuideLens needs camera access for scene assistance and sign-context capture. This prototype does not save video.</Text>
-        <Pressable onPress={requestPermission} style={c.allow}><Text style={c.allowText}>Allow camera access</Text></Pressable>
+        <Pressable onPress={requestCameraAccess} style={c.allow} accessibilityRole="button" accessibilityLabel="Allow camera access">
+          <Text style={c.allowText}>Allow camera access</Text>
+        </Pressable>
+        {cameraPermissionError ? <Text style={c.permissionError} accessibilityRole="alert">{cameraPermissionError}</Text> : null}
         <Pressable onPress={() => router.back()}><Text style={c.backText}>Go back</Text></Pressable>
       </SafeAreaView>
     );
@@ -872,6 +910,7 @@ const c = StyleSheet.create({
   permissionIcon: { width: 76, height: 76, borderRadius: 24, backgroundColor: '#142D24', alignItems: 'center', justifyContent: 'center' },
   permissionTitle: { color: '#F4FAF6', fontSize: 26, fontWeight: '800', marginTop: 24, textAlign: 'center' },
   permissionText: { color: '#94A9A0', fontSize: 15, lineHeight: 23, textAlign: 'center', maxWidth: 430, marginTop: 12 },
+  permissionError: { color: '#FFD288', fontSize: 14, lineHeight: 20, textAlign: 'center', maxWidth: 430, marginTop: 14 },
   allow: { backgroundColor: '#B7FF56', borderRadius: 14, paddingHorizontal: 24, paddingVertical: 15, marginTop: 28 },
   allowText: { color: '#07110F', fontWeight: '800' },
   backText: { color: '#91A79E', marginTop: 18 },
