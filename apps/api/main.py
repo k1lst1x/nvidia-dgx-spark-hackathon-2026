@@ -194,14 +194,23 @@ logger = logging.getLogger("guidelens")
 app = FastAPI(title="GuideLens Vision API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    # Expo/Web may serve the same local app via either hostname. Support both
-    # explicit loopback origins by default; production still supplies its own
+    # Expo/Web and Electron serve the local app via dynamic or standard loopback ports.
+    # Support loopback origins on any port by default; production still supplies its own
     # comma-separated CORS_ORIGINS value.
     allow_origins=os.getenv(
         "CORS_ORIGINS", "http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082"
     ).split(","),
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "X-Session-ID", "X-Device-ID", "X-Device-Secret", "X-Shared-Sight-Key"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$",
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "X-Session-ID",
+        "X-Device-ID",
+        "X-Device-Secret",
+        "X-Shared-Sight-Key",
+        "X-Moderator-Key",
+        "Authorization",
+    ],
 )
 
 _slots = asyncio.Semaphore(MAX_CONCURRENCY)
