@@ -40,6 +40,22 @@ type AssistFrame = {
 // How often the camera checks this room's shared reports.
 const SHARED_ALERT_POLL_MS = 4000;
 
+function deduplicateConsecutivePhrases(text: string): string {
+  if (!text) return '';
+  const sentences = text.match(/[^.!?]+[.!?]*|\S+/g) || [];
+  const kept: string[] = [];
+  for (const s of sentences) {
+    const trimmed = s.trim();
+    if (!trimmed) continue;
+    const norm = trimmed.replace(/[.!?,]+$/g, '').trim().toLowerCase();
+    const lastNorm = kept.length > 0 ? kept[kept.length - 1].replace(/[.!?,]+$/g, '').trim().toLowerCase() : '';
+    if (norm !== lastNorm) {
+      kept.push(trimmed);
+    }
+  }
+  return kept.join(' ');
+}
+
 export default function CameraScreen() {
   const { initialMode } = useLocalSearchParams<{ initialMode?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
@@ -270,8 +286,11 @@ export default function CameraScreen() {
       if (interpreted && interpreted.transcript) {
         // A vision model can produce a sentence that was not signed, so it is
         // shown for the signer to check and spoken only from the Speak button.
-        setTranslation(interpreted.transcript);
-        lastTranslation.current = interpreted.transcript;
+        const clean = deduplicateConsecutivePhrases(interpreted.transcript);
+        if (clean) {
+          setTranslation(clean);
+          lastTranslation.current = clean;
+        }
       }
     } catch {
       // Cloud is offline or unreachable: silently continue on-device without any error!

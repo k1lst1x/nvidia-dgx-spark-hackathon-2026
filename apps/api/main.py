@@ -173,7 +173,7 @@ MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "1500000"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "4"))
 MIN_REQUEST_INTERVAL = float(os.getenv("MIN_REQUEST_INTERVAL", "1.5"))
 TRACK_MIN_REQUEST_INTERVAL = float(os.getenv("TRACK_MIN_REQUEST_INTERVAL", "0.7"))
-SIGN_MIN_CONFIDENCE = float(os.getenv("SIGN_MIN_CONFIDENCE", "0.45"))
+SIGN_MIN_CONFIDENCE = float(os.getenv("SIGN_MIN_CONFIDENCE", "0.60"))
 SIGN_FRAME_WIDTH = int(os.getenv("SIGN_FRAME_WIDTH", "320"))
 YOLO_ENABLED = os.getenv("ULTRALYTICS_YOLO_ENABLED", "false").lower() in {"1", "true", "yes"}
 POINT_CLOUD_ENABLED = os.getenv("POINT_CLOUD_ENABLED", "false").lower() in {"1", "true", "yes"}
@@ -913,13 +913,24 @@ async def interpret_sign(request: Request, sequence: SignSequenceRequest):
         ]
         if words:
             top, sign_word = words[0]
-            new_transcript = (sequence.previous_transcript + " " + sign_word).strip() if sequence.previous_transcript else sign_word
+            prev = sequence.previous_transcript.strip()
+            norm_prev = prev.rstrip(".!?, ").lower()
+            norm_word = sign_word.rstrip(".!?, ").lower()
+            if norm_prev.endswith(norm_word):
+                # The gesture is being held across consecutive sample windows; do not duplicate
+                new_transcript = prev
+                segment = ""
+                should_speak = False
+            else:
+                new_transcript = (prev + " " + sign_word).strip() if prev else sign_word
+                segment = sign_word
+                should_speak = True
             result = SignTranslation(
                 transcript=new_transcript,
-                segment=sign_word,
+                segment=segment,
                 confidence=top.confidence,
                 is_final=True,
-                should_speak=True,
+                should_speak=should_speak,
             )
         else:
             raise exc

@@ -21,7 +21,7 @@ SIGN_CLASSES = {
 
 
 class YoloSignDetector:
-    def __init__(self, *, model_path: str | None = None, confidence: float = 0.40, device: str | None = None):
+    def __init__(self, *, model_path: str | None = None, confidence: float = 0.55, device: str | None = None):
         self.confidence = confidence
         self.device = device_manager.select_device("sign", device).device
         self._lock = threading.Lock()

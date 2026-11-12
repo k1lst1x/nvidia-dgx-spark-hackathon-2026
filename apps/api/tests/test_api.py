@@ -118,6 +118,36 @@ def test_sign_fallback_speaks_a_confident_whole_word(monkeypatch):
     assert response.json()["segment"] == "Hello."
 
 
+def test_sign_fallback_does_not_repeat_held_gesture_in_transcript(monkeypatch):
+    import main
+    from schemas import DetectedObject
+
+    sign = DetectedObject(label="I Love You", confidence=0.85, position="center", x=0, y=0, width=1, height=1)
+    monkeypatch.setattr(main._yolo_sign_detector, "detect", lambda _: [sign])
+
+    # First detection establishes the phrase
+    res1 = client.post(
+        "/v1/interpret-sign",
+        headers={"X-Session-ID": "fallback-repeat-test"},
+        json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 3, "previous_transcript": ""},
+    )
+    assert res1.status_code == 200
+    assert res1.json()["transcript"] == "I love you."
+    assert res1.json()["segment"] == "I love you."
+
+    # Consecutive window with same held gesture must NOT duplicate the phrase in transcript
+    main._clear_rate_limits_for_tests()
+    res2 = client.post(
+        "/v1/interpret-sign",
+        headers={"X-Session-ID": "fallback-repeat-test"},
+        json={"frames": ["data:image/jpeg;base64,ZmFrZQ=="] * 3, "previous_transcript": "I love you."},
+    )
+    assert res2.status_code == 200
+    assert res2.json()["transcript"] == "I love you."
+    assert res2.json()["segment"] == ""
+    assert res2.json()["should_speak"] is False
+
+
 def test_unisign_is_opt_in_and_does_not_load_from_health_check():
     status = client.get("/v1/unisign/status")
     assert status.status_code == 200
