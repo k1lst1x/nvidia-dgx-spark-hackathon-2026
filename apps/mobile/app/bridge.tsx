@@ -128,7 +128,6 @@ export default function DeafBlindBridgeScreen() {
   const previousPartner = useRef(false);
   const signGate = useRef(initialBridgeSignGate());
   const autoJoinTried = useRef(false);
-  const lastNativeSign = useRef('');
   const aslEngineRef = useRef<{ backspace: () => string; addSpace: () => string; clearText: () => void } | null>(null);
   const scrollViewRef = useRef<{ scrollToEnd: (options?: { animated?: boolean }) => void } | null>(null);
 
@@ -178,7 +177,6 @@ export default function DeafBlindBridgeScreen() {
     setSync(nextCode === LOCAL_BRIDGE_CODE ? 'local' : 'connecting');
     setSetupError('');
     signGate.current = initialBridgeSignGate();
-    lastNativeSign.current = '';
     if (nextCode !== LOCAL_BRIDGE_CODE) router.setParams({ code: nextCode, role: nextRole });
   }, []);
 
@@ -236,7 +234,6 @@ export default function DeafBlindBridgeScreen() {
     setPartnerJoined(false);
     setJoinInput('');
     signGate.current = initialBridgeSignGate();
-    lastNativeSign.current = '';
     router.setParams({ code: undefined, role: undefined } as never);
   };
 
@@ -309,8 +306,7 @@ export default function DeafBlindBridgeScreen() {
   // its on-device word engine, and both paths retain quick-sign fallback.
   useEffect(() => {
     const phrase = nativeSignResult?.should_speak ? nativeSignResult.speech.trim() : '';
-    if (!phrase || phrase === lastNativeSign.current) return;
-    lastNativeSign.current = phrase;
+    if (!phrase) return;
     handleDeafSigned(phrase);
   }, [nativeSignResult?.scene_key, nativeSignResult?.should_speak, nativeSignResult?.speech]);
 
