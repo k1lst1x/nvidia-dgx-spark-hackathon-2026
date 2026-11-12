@@ -557,8 +557,9 @@ export class ASLWordEngine {
     if (this.frames.length > config.seq_len) this.frames.shift();
     this.predictionCounter += 1;
 
-    // Run inference every 3 frames once at least 12 frames have accumulated
-    if (this.frames.length < 12 || this.inFlight || this.predictionCounter % 3 !== 0) {
+    // Run inference every 2 frames once at least 12 frames have accumulated.
+    // inFlight skips a frame if the previous guess has not finished yet.
+    if (this.frames.length < 12 || this.inFlight || this.predictionCounter % 2 !== 0) {
       this.emit(this.candidate, 0, []);
       return;
     }
