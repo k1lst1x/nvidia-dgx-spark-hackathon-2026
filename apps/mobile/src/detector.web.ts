@@ -5,7 +5,9 @@ import { assetUrl, getOrtRuntime, runtimeHasWebGpu, type OrtSession } from './or
 const INPUT_SIZE = 640;
 const SCORE_THRESHOLD = 0.4;
 const IOU_THRESHOLD = 0.45;
-const MAX_RESULTS = 12;
+// Keep enough independent objects for a busy room. The downstream UI and
+// speech summary still prioritize the nearest/highest-confidence results.
+const MAX_RESULTS = 20;
 const MAX_FRAME_COVERAGE = 0.96;
 const PREDICTIONS = 8400;
 const LABEL_CONFIDENCE_FLOORS: Record<string, number> = {
