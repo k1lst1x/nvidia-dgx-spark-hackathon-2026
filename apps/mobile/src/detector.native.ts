@@ -32,7 +32,10 @@ async function getSession() {
       const asset = Asset.fromModule(MODEL);
       await asset.downloadAsync();
       if (!asset.localUri) throw new Error('YOLOX model asset is unavailable');
-      return InferenceSession.create(asset.localUri, { executionProviders: ['xnnpack', 'cpu'] });
+      return InferenceSession.create(asset.localUri, {
+        executionProviders: ['xnnpack', 'cpu'],
+        logSeverityLevel: 3,
+      });
     })();
   }
   return sessionPromise;

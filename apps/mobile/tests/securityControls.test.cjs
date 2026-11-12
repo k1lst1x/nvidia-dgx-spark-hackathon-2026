@@ -68,3 +68,31 @@ test('isSecureEndpoint enforces transport security', () => {
   assert.strictEqual(vision.isSecureEndpoint('http://campus-vision.internal'), false);
   assert.strictEqual(vision.isSecureEndpoint('ftp://localhost'), false);
 });
+
+test('tflite startup notice suppression intercepts console.error and LogBox notices', () => {
+  const originalError = console.error;
+  let calls = [];
+  const capture = (...args) => { calls.push(args); };
+
+  try {
+    console.error = capture;
+    loadTs('app/_layout.tsx', {
+      'expo-router': { Stack: () => null },
+      'expo-status-bar': { StatusBar: () => null },
+      'react-native': { LogBox: { ignoreLogs: () => {} } },
+    });
+
+    // Suppressed:
+    console.error('INFO: Created TensorFlow Lite XNNPACK delegate for CPU.');
+    console.error('Created TensorFlow Lite');
+    console.error('XNNPACK delegate for CPU');
+    assert.strictEqual(calls.length, 0);
+
+    // Unsuppressed:
+    console.error('Fatal crash occurred in app logic');
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0][0], 'Fatal crash occurred in app logic');
+  } finally {
+    console.error = originalError;
+  }
+});
