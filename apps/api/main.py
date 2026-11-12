@@ -34,6 +34,7 @@ from point_cloud import cloud_for_surface, open3d_status
 from rate_limit import LimitExceeded, LimitRule, TieredSlidingWindowLimiter
 from segmentation import YoloSegmenter
 from slam import OrbSlamClient
+from sign_translator import EnglishToSignRequest, EnglishToSignResponse, translate_english_to_asl
 from visualization import RerunView
 from schemas import (
     BridgeConversation,
@@ -960,6 +961,14 @@ async def detect_sign_yolo(request: Request, file: UploadFile = File(...)):
         "primary_sign": primary,
         "confidence": conf,
     }
+
+
+@app.post("/v1/translate-to-sign", response_model=EnglishToSignResponse)
+async def translate_to_sign_endpoint(request: Request, body: EnglishToSignRequest):
+    """Translate spoken or typed English into ASL Gloss and fingerspelling tokens."""
+    session_id = _session_id(request)
+    _rate_limit(request, session_id)
+    return translate_english_to_asl(body.text)
 
 
 @app.get("/v1/unisign/status")

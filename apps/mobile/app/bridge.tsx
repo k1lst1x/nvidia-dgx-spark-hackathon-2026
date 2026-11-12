@@ -3,7 +3,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -16,6 +16,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import HandTracker, { type SignContextState } from '../components/HandTracker';
+import SignPlayer from '../components/SignPlayer';
+import { translateEnglishToASLGloss } from '../src/aslGlossTranslator';
 import {
   BridgeGoneError,
   LOCAL_BRIDGE_CODE,
@@ -379,6 +381,10 @@ export default function DeafBlindBridgeScreen() {
 
   const lastDeaf = [...messages].reverse().find((item) => item.sender_role === 'deaf');
   const lastBlind = [...messages].reverse().find((item) => item.sender_role === 'blind');
+  const lastBlindAsl = useMemo(() => {
+    if (!lastBlind?.text) return null;
+    return translateEnglishToASLGloss(lastBlind.text);
+  }, [lastBlind?.text]);
   const pendingCount = messages.filter((item) => item.pending).length;
   const shareLink = code && code !== LOCAL_BRIDGE_CODE && Platform.OS === 'web' && typeof window !== 'undefined'
     ? `${window.location.origin}/bridge?code=${code}&role=${role === 'deaf' ? 'blind' : 'deaf'}`
@@ -631,6 +637,17 @@ export default function DeafBlindBridgeScreen() {
                 <Text style={s.giantText} accessibilityLiveRegion="assertive">
                   {lastBlind ? lastBlind.text.toUpperCase() : 'WAITING FOR A REPLY'}
                 </Text>
+                {lastBlindAsl && lastBlindAsl.tokens.length > 0 && (
+                  <View style={s.bridgeSignPlayerBox}>
+                    <View style={s.bridgeSignPlayerTitleRow}>
+                      <Ionicons name="hand-left" size={13} color="#C8FF72" />
+                      <Text style={s.bridgeSignPlayerTitle}>
+                        ASL SIGN PLAYBACK: {lastBlindAsl.aslSentence}
+                      </Text>
+                    </View>
+                    <SignPlayer tokens={lastBlindAsl.tokens} height={240} autoPlay={true} />
+                  </View>
+                )}
               </View>
             )}
           </View>
@@ -674,6 +691,17 @@ export default function DeafBlindBridgeScreen() {
                 <Text style={s.giantText} accessibilityRole="text" accessibilityLiveRegion="assertive">
                   {lastBlind ? lastBlind.text.toUpperCase() : 'PRESS A REPLY BELOW OR SPEAK'}
                 </Text>
+                {lastBlindAsl && lastBlindAsl.tokens.length > 0 && (
+                  <View style={s.bridgeSignPlayerBox}>
+                    <View style={s.bridgeSignPlayerTitleRow}>
+                      <Ionicons name="hand-left" size={13} color="#C8FF72" />
+                      <Text style={s.bridgeSignPlayerTitle}>
+                        ASL SIGN PLAYBACK: {lastBlindAsl.aslSentence}
+                      </Text>
+                    </View>
+                    <SignPlayer tokens={lastBlindAsl.tokens} height={240} autoPlay={true} />
+                  </View>
+                )}
               </View>
             )}
 
@@ -992,6 +1020,24 @@ const s = StyleSheet.create({
     fontWeight: '900',
     lineHeight: 32,
     letterSpacing: 0.5,
+  },
+  bridgeSignPlayerBox: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1A2E24',
+    gap: 8,
+  },
+  bridgeSignPlayerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  bridgeSignPlayerTitle: {
+    color: '#C8FF72',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.6,
   },
   sectionSubtitle: {
     color: '#9EB5AA',

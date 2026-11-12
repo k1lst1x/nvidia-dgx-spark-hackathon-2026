@@ -37,7 +37,13 @@ const benefits = [
     icon: 'people-outline' as const,
     eyebrow: 'DEAF–BLIND BRIDGE',
     title: 'Direct two-way conversation aid',
-    text: 'Connects two people who could not talk directly: ASL gestures speak aloud to the blind partner, while spoken voice replies appear in high-contrast giant text.',
+    text: 'Connects two people who could not talk directly: ASL gestures speak aloud to the blind partner, while spoken voice replies appear in high-contrast giant text with animated signs.',
+  },
+  {
+    icon: 'swap-horizontal-outline' as const,
+    eyebrow: 'ENGLISH ⇄ ASL SIGN STUDIO',
+    title: 'Bidirectional sign language translation',
+    text: 'Translates spoken or typed English into ASL grammar with animated 21-point skeletal hand gestures and instant fingerspelling fallback, offline-first.',
   },
   {
     icon: 'shield-checkmark-outline' as const,
@@ -280,6 +286,12 @@ function LandingPage() {
               <Pressable accessibilityRole="button" accessibilityLabel="Open live camera assistant" style={s.secondary}>
                 <Ionicons name="camera-outline" size={19} color="#DDE9E2" />
                 <Text style={s.secondaryText}>Camera Demo</Text>
+              </Pressable>
+            </Link>
+            <Link href={"/translate" as any} asChild>
+              <Pressable accessibilityRole="button" accessibilityLabel="Open English to ASL Sign Translator" style={s.secondary}>
+                <Ionicons name="swap-horizontal" size={19} color="#C8FF72" />
+                <Text style={[s.secondaryText, { color: '#C8FF72' }]}>ASL Studio</Text>
               </Pressable>
             </Link>
             <Pressable

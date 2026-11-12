@@ -685,6 +685,35 @@ export default function AssistantHub() {
                   <Ionicons name="chevron-forward" size={16} color="#07110F" />
                 </Pressable>
               </View>
+
+              {/* Card 4: English to ASL Sign Translator */}
+              <View style={s.featureCard}>
+                <View style={s.cardTopRow}>
+                  <View style={[s.cardIconCircle, s.cardIconCircleTranslate]}>
+                    <Ionicons name="swap-horizontal" size={22} color="#00E5FF" />
+                  </View>
+                  <View style={[s.cardTag, s.cardTagTranslate]}>
+                    <Text style={[s.cardTagText, s.cardTagTextTranslate]}>ASL Grammar + 3D Skeleton</Text>
+                  </View>
+                </View>
+
+                <Text style={s.cardTitle}>English to ASL Translator</Text>
+                <Text style={s.cardBody}>
+                  Converts spoken or typed English into grammatical ASL gloss with animated 21-point skeletal
+                  hand gestures, WH-reordering, and letter fingerspelling.
+                </Text>
+
+                <Pressable
+                  onPress={() => router.push('/translate' as any)}
+                  style={[s.cardActionBtn, s.cardActionBtnTranslate]}
+                  accessibilityLabel="Open English to ASL Translator"
+                >
+                  <Text style={[s.cardActionBtnText, s.cardActionBtnTextTranslate]}>
+                    Open ASL Studio
+                  </Text>
+                  <Ionicons name="chevron-forward" size={16} color="#00E5FF" />
+                </Pressable>
+              </View>
             </View>
 
             {/* Quick Status Bar */}
@@ -1900,6 +1929,24 @@ const s = StyleSheet.create({
   },
   cardActionBtnTextBridge: {
     color: '#07110F',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  cardIconCircleTranslate: {
+    backgroundColor: 'rgba(0, 229, 255, 0.12)',
+  },
+  cardTagTranslate: {
+    backgroundColor: 'rgba(0, 229, 255, 0.08)',
+  },
+  cardTagTextTranslate: {
+    color: '#00E5FF',
+  },
+  cardActionBtnTranslate: {
+    backgroundColor: 'rgba(0, 229, 255, 0.08)',
+    borderColor: 'rgba(0, 229, 255, 0.25)',
+  },
+  cardActionBtnTextTranslate: {
+    color: '#00E5FF',
     fontSize: 12,
     fontWeight: '800',
   },
