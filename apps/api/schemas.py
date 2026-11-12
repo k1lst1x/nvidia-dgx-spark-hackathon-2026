@@ -75,8 +75,25 @@ class SignTranslation(BaseModel):
     should_speak: bool
 
 
+class LandmarkPoint(BaseModel):
+    x: float = Field(ge=-10.0, le=10.0)
+    y: float = Field(ge=-10.0, le=10.0)
+    z: float | None = Field(default=None, ge=-10.0, le=10.0)
+    visibility: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class UniSignFrame(BaseModel):
+    pose: list[LandmarkPoint] | None = Field(default=None, max_length=33)
+    left_hand: list[LandmarkPoint] | None = Field(default=None, max_length=21)
+    right_hand: list[LandmarkPoint] | None = Field(default=None, max_length=21)
+    face: list[LandmarkPoint] | None = Field(default=None, max_length=478)
+    timestamp_ms: float | None = Field(default=None, ge=0)
+    confidence_representation: str | None = Field(default=None, max_length=64)
+
+
 class UniSignRawRequest(BaseModel):
-    raw_holistic: list[dict[str, object]] = Field(min_length=1, max_length=1024)
+    raw_holistic: list[UniSignFrame] = Field(min_length=1, max_length=256)
     experimental: bool = False
 
 
@@ -101,9 +118,18 @@ class CampusAlertCreateRequest(BaseModel):
     severity: Literal["low", "medium", "high"] = "medium"
 
 
+class BaselineObject(BaseModel):
+    label: str = Field(min_length=1, max_length=64)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    x: float = Field(default=0.5, ge=0.0, le=1.0)
+    y: float = Field(default=0.5, ge=0.0, le=1.0)
+    width: float | None = Field(default=None, ge=0.0, le=1.0)
+    height: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class WhatChangedRequest(BaseModel):
-    location: str = Field(default="Room 204", max_length=80)
-    current_objects: list[dict[str, object]] = Field(default_factory=list)
+    location: str = Field(default="Room 204", min_length=1, max_length=80)
+    current_objects: list[BaselineObject] = Field(default_factory=list, max_length=64)
     update_baseline: bool = False
 
 

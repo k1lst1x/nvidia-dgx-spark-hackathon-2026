@@ -12,15 +12,23 @@ from main import app
 
 @pytest.fixture
 def clients(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHARED_SIGHT_TOKEN", "shared-token-test")
     monkeypatch.setattr(observation_store, "DB_PATH", tmp_path / "shared-sight.sqlite3")
     observation_store.TRACKING_METRICS.clear()
     observation_store.init_db()
     return TestClient(app), TestClient(app)
 
 
-def headers(device: str, session: str) -> dict[str, str]:
+def headers(device: str, session: str, token: str | None = "shared-token-test") -> dict[str, str]:
     secret = hashlib.sha256(f"test-secret:{device}".encode()).hexdigest()
-    return {"X-Device-ID": f"device-{secret[:32]}", "X-Session-ID": session, "X-Device-Secret": secret}
+    h = {
+        "X-Device-ID": f"device-{hashlib.sha256(secret.encode()).hexdigest()[:32]}",
+        "X-Session-ID": session,
+        "X-Device-Secret": secret,
+    }
+    if token:
+        h["X-Shared-Sight-Key"] = token
+    return h
 
 
 def observation(label: str, scope: str = "shared", verified: bool = True) -> dict[str, object]:

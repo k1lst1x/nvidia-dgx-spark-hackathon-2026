@@ -5,18 +5,34 @@ import hashlib
 import uuid
 from fastapi.testclient import TestClient
 
+import os
+import hashlib
+import uuid
+import pytest
+from fastapi.testclient import TestClient
+
 os.environ.pop("GROQ_API_KEY", None)
 os.environ.pop("VISION_API_KEY", None)
 os.environ.pop("VISION_API_URL", None)
 
+import campus_memory
 from main import app  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _setup_campus_memory_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHARED_SIGHT_TOKEN", "test-sight-token")
+    monkeypatch.setattr(campus_memory, "DB_PATH", tmp_path / "campus_memory.db")
+    campus_memory.init_db()
+
 
 def _auth_headers(device: str, session: str | None = None) -> dict[str, str]:
     secret = hashlib.sha256(f"test-secret:{device}".encode()).hexdigest()
     return {
-        "X-Device-ID": f"device-{secret[:32]}",
+        "X-Device-ID": f"device-{hashlib.sha256(secret.encode()).hexdigest()[:32]}",
         "X-Session-ID": session or f"session-{device}",
         "X-Device-Secret": secret,
+        "X-Shared-Sight-Key": "test-sight-token",
     }
 
 
@@ -102,14 +118,14 @@ def test_two_phones_one_memory():
         "zone_id": room, "category": "object", "label": "my keys", "confidence": 0.9, "privacy_scope": "personal",
     })
     assert "my keys" not in {a["label"] for a in phone_b.get(f"/v1/memory/alerts?location={room}").json()}
-    # Clearing the hazard removes it for everyone.
+    # Clearing the hazard removes it for everyone: the reporting device can resolve its alert.
     hazard = next(a for a in alerts if a["label"] == "wet floor")
-    assert phone_b.post(f"/v1/memory/resolve/{hazard['id']}").status_code == 200
+    assert phone_a.post(f"/v1/memory/resolve/{hazard['id']}").status_code == 200
     assert "wet floor" not in {a["label"] for a in phone_a.get(f"/v1/memory/alerts?location={room}").json()}
 
 
 def test_what_changed_detects_delta():
-    location = "integration-test-delta-room"
+    location = f"integration-test-delta-room-{uuid.uuid4().hex[:6]}"
     baseline = [
         {"label": "table", "x": 0.2, "y": 0.5, "width": 0.6, "height": 0.4},
         {"label": "chair", "x": 0.25, "y": 0.55, "width": 0.15, "height": 0.25},

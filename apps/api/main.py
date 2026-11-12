@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -219,6 +220,11 @@ _bridge_limits = TieredSlidingWindowLimiter(
     peer=LimitRule(10, 300, detail="Bridge join limit exceeded"),
     global_budget=LimitRule(100, 60, max_keys=1, detail="Bridge join capacity exceeded"),
 )
+_memory_write_limits = TieredSlidingWindowLimiter(
+    session=LimitRule(60, 60, detail="Memory rate limit exceeded"),
+    peer=LimitRule(120, 60, detail="Memory source rate limit exceeded"),
+    global_budget=LimitRule(600, 60, max_keys=1, detail="Memory capacity limit exceeded"),
+)
 _depth_model = DepthAnythingMetric()
 _segmenter = YoloSegmenter()
 _slam = OrbSlamClient()
@@ -363,8 +369,18 @@ def _bridge_join_rate_limit(request: Request, device_id: str) -> None:
     )
 
 
+def _memory_rate_limit(request: Request, session_id: str) -> None:
+    peer = _peer_key(request)
+    _apply_limits(
+        _memory_write_limits,
+        ("session", _limited_key(peer, session_id)),
+        ("peer", peer),
+        ("global_budget", "global"),
+    )
+
+
 def _clear_rate_limits_for_tests() -> None:
-    for limiter in (_general_limits, _track_limits, _bridge_limits):
+    for limiter in (_general_limits, _track_limits, _bridge_limits, _memory_write_limits):
         limiter.clear()
 
 
@@ -933,12 +949,26 @@ async def unisign_status():
 
 
 @app.post("/v1/unisign/interpret")
-async def interpret_unisign_experimental(sequence: UniSignRawRequest):
+async def interpret_unisign_experimental(request: Request, sequence: UniSignRawRequest):
     """Research endpoint for explicitly opted-in MediaPipe compatibility runs."""
-    try:
-        return _unisign_backend.translate_raw_mediapipe(sequence.raw_holistic, experimental=sequence.experimental)
-    except UniSignBackendError as error:
-        raise HTTPException(503, str(error)) from error
+    if not _unisign_backend.allow_presence_proxy or not sequence.experimental:
+        raise HTTPException(
+            503,
+            "MediaPipe-to-Uni-Sign is experimental: set experimental=true and "
+            "UNISIGN_ALLOW_MEDIAPIPE_PRESENCE_PROXY=true after evaluation.",
+        )
+    if not _unisign_backend.enabled:
+        raise HTTPException(503, "Uni-Sign is disabled")
+    device_id, session_id = _authorize_sight(request)
+    _rate_limit(request, session_id)
+    async with _slots:
+        try:
+            raw_dicts = [f.model_dump(exclude_none=True) for f in sequence.raw_holistic]
+            return await asyncio.to_thread(
+                _unisign_backend.translate_raw_mediapipe, raw_dicts, experimental=sequence.experimental
+            )
+        except UniSignBackendError as error:
+            raise HTTPException(503, str(error)) from error
 
 
 @app.get("/v1/memory/alerts", response_model=list[CampusAlert])
@@ -952,19 +982,51 @@ async def get_campus_alerts(request: Request, location: str | None = None):
 
 def _authorize_sight(request: Request) -> tuple[str, str]:
     try:
+        shared_key = request.headers.get("X-Shared-Sight-Key") or request.headers.get("X-Moderator-Key")
         return observation_store.authorize_device(
             request.headers.get("X-Device-ID"),
             request.headers.get("X-Session-ID"),
             request.headers.get("X-Device-Secret"),
-            request.headers.get("X-Shared-Sight-Key"),
+            shared_key,
         )
     except observation_store.ObservationAccessError as error:
         raise HTTPException(401, str(error)) from error
 
 
+def _is_trusted_shared_mutator(request: Request, device_id: str) -> bool:
+    """Check whether caller is enrolled/authorized to mutate shared safety state."""
+    token = os.getenv("SHARED_SIGHT_TOKEN", "").strip()
+    allowed_devices = {v.strip() for v in os.getenv("SHARED_SIGHT_DEVICE_IDS", "").split(",") if v.strip()}
+    if not token and not allowed_devices:
+        return False
+    if allowed_devices and device_id in allowed_devices:
+        return True
+    if token:
+        supplied = request.headers.get("X-Shared-Sight-Key") or request.headers.get("X-Moderator-Key") or ""
+        if supplied and hmac.compare_digest(supplied, token):
+            return True
+    return False
+
+
+def _is_moderator(request: Request, device_id: str) -> bool:
+    """Check whether caller possesses moderator/administrator privileges."""
+    token = os.getenv("SHARED_SIGHT_TOKEN", "").strip()
+    moderator_token = os.getenv("SHARED_SIGHT_MODERATOR_TOKEN", token).strip()
+    allowed_devices = {v.strip() for v in os.getenv("SHARED_SIGHT_DEVICE_IDS", "").split(",") if v.strip()}
+    if allowed_devices and device_id in allowed_devices:
+        return True
+    mod_key = request.headers.get("X-Moderator-Key", "").strip()
+    if moderator_token and mod_key and hmac.compare_digest(mod_key, moderator_token):
+        return True
+    return False
+
+
 @app.post("/v1/observations", response_model=Observation)
 async def submit_observation(request: Request, body: ObservationCreateRequest):
     device_id, session_id = _authorize_sight(request)
+    if body.privacy_scope == "shared":
+        if not _is_trusted_shared_mutator(request, device_id):
+            raise HTTPException(403, "Shared safety mutations require trusted authorization")
     try:
         result = observation_store.create_observation(
             zone_id=body.zone_id,
@@ -1023,6 +1085,9 @@ async def shared_sight_dashboard(request: Request, zone_id: str, limit: int = 20
 async def observe_campus_hazard(request: Request, body: CampusAlertCreateRequest):
     """Record a hazard, obstacle, sign, or room status a person confirmed."""
     device_id, session_id = _authorize_sight(request)
+    if not _is_trusted_shared_mutator(request, device_id):
+        raise HTTPException(403, "Shared safety mutations require trusted authorization")
+    _memory_rate_limit(request, session_id)
     try:
         alert = observation_store.report_alert(
             location=body.location, category=body.category, label=body.label,
@@ -1038,8 +1103,13 @@ async def observe_campus_hazard(request: Request, body: CampusAlertCreateRequest
 @app.post("/v1/memory/resolve/{alert_id}")
 async def resolve_campus_alert(request: Request, alert_id: int):
     """Mark a campus hazard as cleared or resolved."""
-    _authorize_sight(request)
-    if not observation_store.resolve_shared(alert_id):
+    device_id, _session_id = _authorize_sight(request)
+    is_mod = _is_moderator(request, device_id)
+    try:
+        resolved = observation_store.resolve_shared(alert_id, actor_device=device_id, is_moderator=is_mod)
+    except observation_store.ObservationPermissionError as error:
+        raise HTTPException(403, str(error)) from error
+    if not resolved:
         raise HTTPException(404, "Alert not found")
     return {"status": "resolved", "id": alert_id}
 
@@ -1047,11 +1117,19 @@ async def resolve_campus_alert(request: Request, alert_id: int):
 @app.post("/v1/memory/what-changed", response_model=WhatChangedResponse)
 async def what_changed(request: Request, body: WhatChangedRequest):
     """Compare current objects against baseline memory for the location."""
-    _authorize_sight(request)
+    device_id, session_id = _authorize_sight(request)
+    _memory_rate_limit(request, session_id)
+    is_mod = _is_moderator(request, device_id)
+    baseline_exists = campus_memory.has_baseline(body.location)
+    if body.update_baseline and baseline_exists and not is_mod:
+        raise HTTPException(403, "Only an authorized moderator can replace an established room baseline")
+    if not baseline_exists and not _is_trusted_shared_mutator(request, device_id):
+        raise HTTPException(403, "Establishing a shared room baseline requires trusted authorization")
+    dict_objects = [obj.model_dump() for obj in body.current_objects]
     result = campus_memory.detect_what_changed(
         location=body.location,
-        current_objects=body.current_objects,
-        update_baseline=body.update_baseline,
+        current_objects=dict_objects,
+        update_baseline=body.update_baseline if (is_mod or not baseline_exists) else False,
     )
     return WhatChangedResponse.model_validate(result)
 

@@ -16,15 +16,24 @@ import observation_store
 from rate_limit import LimitExceeded, LimitRule, SlidingWindowLimiter, TieredSlidingWindowLimiter
 
 
-def auth(device: str, secret_label: str | None = None, session: str = "session") -> dict[str, str]:
+def auth(device: str, secret_label: str | None = None, session: str = "session", token: str | None = None) -> dict[str, str]:
     secret = hashlib.sha256(f"secret:{secret_label or device}".encode()).hexdigest()
-    return {"X-Device-ID": f"device-{secret[:32]}", "X-Session-ID": session, "X-Device-Secret": secret}
+    device_id = f"device-{hashlib.sha256(secret.encode()).hexdigest()[:32]}"
+    headers = {"X-Device-ID": device_id, "X-Session-ID": session, "X-Device-Secret": secret}
+    if token:
+        headers["X-Shared-Sight-Key"] = token
+    return headers
 
 
 @pytest.fixture(autouse=True)
 def isolated_security_state(tmp_path, monkeypatch):
     monkeypatch.setattr(observation_store, "DB_PATH", tmp_path / "security.sqlite3")
+    monkeypatch.setattr(main.campus_memory, "DB_PATH", tmp_path / "campus.sqlite3")
+    monkeypatch.delenv("SHARED_SIGHT_TOKEN", raising=False)
+    monkeypatch.delenv("SHARED_SIGHT_DEVICE_IDS", raising=False)
+    monkeypatch.delenv("SHARED_SIGHT_MODERATOR_TOKEN", raising=False)
     observation_store.init_db()
+    main.campus_memory.init_db()
     main._clear_rate_limits_for_tests()
     yield
     main._clear_rate_limits_for_tests()
@@ -224,3 +233,173 @@ def test_arbitrary_device_ids_cannot_create_credential_rows():
         assert client.get("/v1/personal/observations", headers=headers).status_code == 401
     with observation_store.db_connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM device_credentials").fetchone()[0] == 0
+
+
+def test_tampering_with_secret_suffix_is_rejected():
+    client = TestClient(main.app)
+    owner = auth("owner-device")
+    created = client.post("/v1/observations", headers=owner, json=_personal("cane"))
+    assert created.status_code == 200
+
+    # Attacker knows owner's device ID and tries to forge secret by altering only the suffix
+    tampered_headers = dict(owner)
+    # Alter the last 32 characters
+    tampered_headers["X-Device-Secret"] = owner["X-Device-Secret"][:32] + "0" * 32
+    assert client.get("/v1/personal/observations", headers=tampered_headers).status_code == 401
+    assert client.delete(f"/v1/observations/{created.json()['id']}", headers=tampered_headers).status_code == 401
+
+
+def test_knowing_victim_device_id_cannot_forge_credentials():
+    client = TestClient(main.app)
+    victim = auth("victim-device")
+    created = client.post("/v1/observations", headers=victim, json=_personal("wallet"))
+    assert created.status_code == 200
+
+    # Attacker knows victim's public device ID and attempts to access victim's personal data
+    attacker = auth("attacker-device")
+    attacker["X-Device-ID"] = victim["X-Device-ID"]
+    assert client.get("/v1/personal/observations", headers=attacker).status_code == 401
+    assert client.delete(f"/v1/observations/{created.json()['id']}", headers=attacker).status_code == 401
+
+
+def test_empty_token_and_allowlist_fails_closed_for_shared_mutations(monkeypatch):
+    monkeypatch.delenv("SHARED_SIGHT_TOKEN", raising=False)
+    monkeypatch.delenv("SHARED_SIGHT_DEVICE_IDS", raising=False)
+    client = TestClient(main.app)
+    caller = auth("anonymous-caller")
+
+    # Creating shared observation fails closed
+    shared_obs = {
+        "zone_id": "Hallway", "category": "obstacle", "label": "box",
+        "confidence": 0.9, "privacy_scope": "shared", "verified": True,
+    }
+    assert client.post("/v1/observations", headers=caller, json=shared_obs).status_code == 403
+
+    # Reporting campus hazard alert fails closed
+    hazard = {
+        "location": "Hallway", "category": "hazard", "label": "wet floor",
+        "description": "cleaning in progress", "severity": "medium",
+    }
+    assert client.post("/v1/memory/observe", headers=caller, json=hazard).status_code == 403
+
+    # Establishing baseline in new location fails closed
+    new_baseline = {
+        "location": "NewRoom",
+        "current_objects": [{"label": "door", "x": 0.5, "y": 0.5}],
+    }
+    assert client.post("/v1/memory/what-changed", headers=caller, json=new_baseline).status_code == 403
+
+
+def test_ordinary_reporter_cannot_resolve_another_devices_alert(monkeypatch):
+    monkeypatch.setenv("SHARED_SIGHT_TOKEN", "shared-token-123")
+    client = TestClient(main.app)
+    reporter_a = auth("device-a", token="shared-token-123")
+    reporter_b = auth("device-b", token="shared-token-123")
+
+    hazard = {
+        "location": "Hallway 200", "category": "hazard", "label": "wet floor",
+        "description": "Water spill", "severity": "medium",
+    }
+    res = client.post("/v1/memory/observe", headers=reporter_a, json=hazard)
+    assert res.status_code == 200
+    alert_id = res.json()["id"]
+
+    # Reporter B cannot resolve Reporter A's alert
+    res_b = client.post(f"/v1/memory/resolve/{alert_id}", headers=reporter_b)
+    assert res_b.status_code == 403
+    assert "moderator" in res_b.json()["detail"].lower()
+
+    # Reporter A (owner) can resolve its own alert
+    res_a = client.post(f"/v1/memory/resolve/{alert_id}", headers=reporter_a)
+    assert res_a.status_code == 200
+    assert res_a.json()["status"] == "resolved"
+
+
+def test_moderator_can_resolve_any_alert_and_replace_baseline(monkeypatch):
+    monkeypatch.setenv("SHARED_SIGHT_TOKEN", "shared-token-123")
+    monkeypatch.setenv("SHARED_SIGHT_MODERATOR_TOKEN", "moderator-token-999")
+    client = TestClient(main.app)
+    reporter = auth("device-reporter", token="shared-token-123")
+    moderator = auth("device-mod")
+    moderator["X-Moderator-Key"] = "moderator-token-999"
+
+    # Reporter posts alert
+    hazard = {
+        "location": "Hallway 200", "category": "hazard", "label": "ice",
+        "description": "slippery ice", "severity": "high",
+    }
+    res = client.post("/v1/memory/observe", headers=reporter, json=hazard)
+    assert res.status_code == 200
+    alert_id = res.json()["id"]
+
+    # Moderator can resolve reporter's alert
+    res_mod = client.post(f"/v1/memory/resolve/{alert_id}", headers=moderator)
+    assert res_mod.status_code == 200
+
+    # Establish baseline
+    base = {
+        "location": "Room 500",
+        "current_objects": [{"label": "desk", "x": 0.3, "y": 0.5}],
+    }
+    est = client.post("/v1/memory/what-changed", headers=reporter, json=base)
+    assert est.status_code == 200
+
+    # Reporter cannot replace established baseline
+    replace_req = {
+        "location": "Room 500",
+        "current_objects": [{"label": "chair", "x": 0.7, "y": 0.5}],
+        "update_baseline": True,
+    }
+    rep_res = client.post("/v1/memory/what-changed", headers=reporter, json=replace_req)
+    assert rep_res.status_code == 403
+    assert "moderator" in rep_res.json()["detail"].lower()
+
+    # Moderator CAN replace established baseline
+    mod_res = client.post("/v1/memory/what-changed", headers=moderator, json=replace_req)
+    assert mod_res.status_code == 200
+
+
+def test_what_changed_rejects_unbounded_objects(monkeypatch):
+    monkeypatch.setenv("SHARED_SIGHT_TOKEN", "token")
+    client = TestClient(main.app)
+    caller = auth("device-test", token="token")
+
+    # Send 65 objects (max is 64)
+    oversized = {
+        "location": "Room 100",
+        "current_objects": [{"label": f"item-{i}", "x": 0.5, "y": 0.5} for i in range(65)],
+    }
+    res = client.post("/v1/memory/what-changed", headers=caller, json=oversized)
+    assert res.status_code == 422
+
+
+def test_unisign_endpoint_admission_controls(monkeypatch):
+    monkeypatch.setattr(main._unisign_backend, "allow_presence_proxy", True)
+    monkeypatch.setattr(main._unisign_backend, "enabled", True)
+    client = TestClient(main.app)
+
+    # 1. Unauthenticated request rejected with 401
+    valid_payload = {
+        "raw_holistic": [{"pose": [{"x": 0.1, "y": 0.2}]}],
+        "experimental": True,
+    }
+    res = client.post("/v1/unisign/interpret", json=valid_payload)
+    assert res.status_code == 401
+
+    caller = auth("device-unisign")
+
+    # 2. Oversized payload (> 256 frames) rejected by schema validation
+    oversized = {
+        "raw_holistic": [{"pose": [{"x": 0.1, "y": 0.2}]} for _ in range(257)],
+        "experimental": True,
+    }
+    assert client.post("/v1/unisign/interpret", headers=caller, json=oversized).status_code == 422
+
+    # 3. Disabled Uni-Sign returns 503
+    valid_seq = {
+        "raw_holistic": [{"pose": [{"x": 0.1, "y": 0.2}], "left_hand": []}],
+        "experimental": True,
+    }
+    monkeypatch.setattr(main._unisign_backend, "enabled", False)
+    assert client.post("/v1/unisign/interpret", headers=caller, json=valid_seq).status_code == 503
+

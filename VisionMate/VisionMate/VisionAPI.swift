@@ -40,13 +40,14 @@ struct VisionConfiguration: Codable, Equatable {
     var model: String
 
     static let `default` = VisionConfiguration(
-        endpoint: "http://dgx-spark.local:8000/v1",
+        endpoint: "https://dgx-spark.local:8000/v1",
         model: "Qwen/Qwen3-VL-32B-Instruct"
     )
 }
 
 enum VisionAPIError: LocalizedError {
     case invalidEndpoint
+    case insecureEndpoint
     case invalidResponse
     case server(String)
 
@@ -54,6 +55,8 @@ enum VisionAPIError: LocalizedError {
         switch self {
         case .invalidEndpoint:
             "The DGX Spark server address is not valid. Open Settings and check it."
+        case .insecureEndpoint:
+            "Secure connection required. Non-local vision servers must use https:// to protect camera data and credentials."
         case .invalidResponse:
             "The vision server returned a response VisionMate could not understand."
         case .server(let message):
@@ -78,6 +81,15 @@ struct VisionAPI {
     ) async throws -> String {
         let endpoint = normalizedEndpoint(configuration.endpoint)
         guard let url = URL(string: endpoint) else { throw VisionAPIError.invalidEndpoint }
+        guard let scheme = url.scheme?.lowercased() else { throw VisionAPIError.invalidEndpoint }
+        let host = url.host?.lowercased() ?? ""
+        let isLoopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        if scheme == "http" && !isLoopback {
+            throw VisionAPIError.insecureEndpoint
+        }
+        if scheme != "https" && scheme != "http" {
+            throw VisionAPIError.invalidEndpoint
+        }
 
         let dataURL = "data:image/jpeg;base64,\(imageData.base64EncodedString())"
         let prompt = mode.instruction + "\n\n" + (userQuestion?.isEmpty == false

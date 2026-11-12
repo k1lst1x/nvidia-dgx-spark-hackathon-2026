@@ -140,14 +140,33 @@ const nextAnimationFrame = () => new Promise<void>((resolve) => {
 });
 const LOCAL_API_PORT = '8000';
 
+function isLoopbackHost(hostname: string): boolean {
+  return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname);
+}
+
+export function isSecureEndpoint(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol === 'https:') return true;
+    if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeApiUrl(value: string): string {
   const trimmed = value.trim().replace(/\/$/, '');
   try {
     const parsed = new URL(trimmed);
     // 8082 is Expo Web in this project; FastAPI listens on 8000.
-    if (['localhost', '127.0.0.1'].includes(parsed.hostname) && parsed.port === '8082') {
+    if (isLoopbackHost(parsed.hostname) && parsed.port === '8082') {
       parsed.port = LOCAL_API_PORT;
       return parsed.toString().replace(/\/$/, '');
+    }
+    // Enforce transport security: remote endpoints must use https
+    if (parsed.protocol === 'http:' && !isLoopbackHost(parsed.hostname)) {
+      return '';
     }
   } catch {
     // Preserve validation behavior for malformed custom values.

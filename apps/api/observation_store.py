@@ -35,6 +35,10 @@ class ObservationAccessError(PermissionError):
     pass
 
 
+class ObservationPermissionError(ObservationAccessError):
+    pass
+
+
 class DuplicateObservationError(ValueError):
     pass
 
@@ -156,10 +160,15 @@ def authorize_device(
     if allowed and device_id not in allowed:
         raise ObservationAccessError("This device is not authorized for Shared Sight")
     expected_key = os.getenv("SHARED_SIGHT_TOKEN", "")
-    if expected_key and not hmac.compare_digest(shared_key or "", expected_key):
-        raise ObservationAccessError("Shared Sight access key is invalid")
+    expected_mod_key = os.getenv("SHARED_SIGHT_MODERATOR_TOKEN", "")
+    if expected_key:
+        valid_key = hmac.compare_digest(shared_key or "", expected_key) or (
+            bool(expected_mod_key) and hmac.compare_digest(shared_key or "", expected_mod_key)
+        )
+        if not valid_key:
+            raise ObservationAccessError("Shared Sight access key is invalid")
     supplied_hash = hashlib.sha256(device_secret.encode("utf-8")).hexdigest()
-    derived_device_id = f"device-{device_secret[:32]}"
+    derived_device_id = f"device-{supplied_hash[:32]}"
     if hmac.compare_digest(device_id, derived_device_id):
         return device_id, session_id
 
@@ -443,9 +452,17 @@ def report_alert(
     return _as_alert(row, source_device, now or time.time())
 
 
-def resolve_shared(observation_id: int) -> bool:
-    """Mark a shared report as cleared (anyone on campus can clear a hazard)."""
+def resolve_shared(observation_id: int, actor_device: str, is_moderator: bool = False) -> bool:
+    """Mark a shared report as cleared: only the reporting device or an authorized moderator can resolve."""
     with db_connection() as conn:
+        row = conn.execute(
+            "SELECT source_device FROM observations WHERE id=? AND privacy_scope='shared' AND active=1",
+            (observation_id,),
+        ).fetchone()
+        if not row:
+            return False
+        if not is_moderator and row["source_device"] != actor_device:
+            raise ObservationPermissionError("Only the reporting device or an authorized moderator can clear this report")
         result = conn.execute(
             "UPDATE observations SET active=0 WHERE id=? AND privacy_scope='shared' AND active=1", (observation_id,),
         )

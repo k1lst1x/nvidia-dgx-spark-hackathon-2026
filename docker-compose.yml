@@ -6,7 +6,9 @@ services:
         # Empty: the PyTorch build pip picks for this platform. Set to e.g.
         # https://download.pytorch.org/whl/cu130 to pin a CUDA build.
         TORCH_INDEX_URL: "${TORCH_INDEX_URL:-}"
-    ports: ["8082:8000"]
+    # Bind to loopback by default to avoid exposing cleartext HTTP over the LAN.
+    # For remote network access, terminate TLS using a reverse proxy (e.g., Caddy or Nginx with HTTPS).
+    ports: ["127.0.0.1:8082:8000"]
     environment:
       VISION_API_URL: "${VISION_API_URL:-https://api.groq.com/openai/v1/chat/completions}"
       VISION_MODEL: "${VISION_MODEL:-}"

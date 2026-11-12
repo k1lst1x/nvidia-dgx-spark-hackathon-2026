@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,6 +35,7 @@ class UniSignBackend:
         self._model: Any | None = None
         self._torch: Any | None = None
         self.load_error: str | None = None
+        self._load_lock = threading.Lock()
 
     def status(self) -> dict[str, object]:
         assets_ready = self.repo.is_dir() and self.checkpoint.is_file() and self.mt5_path.is_dir()
@@ -48,35 +50,40 @@ class UniSignBackend:
     def _load(self) -> None:
         if self._model is not None:
             return
-        if not self.enabled:
-            raise UniSignBackendError("Uni-Sign is disabled")
-        missing = [str(path) for path in (self.repo, self.checkpoint, self.mt5_path) if not path.exists()]
-        if missing:
-            raise UniSignBackendError("Missing Uni-Sign assets: " + ", ".join(missing))
-        try:
-            import torch
-            choice = device_manager.select_device("sign")
-            self.device = choice.device
-            # Uni-Sign imports config.mt5_path by value during models import.
-            # Override only the local configuration value, leaving architecture
-            # and checkpoint parameter names untouched.
-            sys.path.insert(0, str(self.repo))
-            config = importlib.import_module("config")
-            config.mt5_path = str(self.mt5_path)
-            models = importlib.import_module("models")
-            args = SimpleNamespace(hidden_dim=256, dataset="How2Sign", rgb_support=False, label_smoothing=0.0)
-            model = models.Uni_Sign(args)
-            checkpoint = torch.load(self.checkpoint, map_location="cpu", weights_only=False)
-            state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
-            model.load_state_dict(state_dict, strict=True)
-            model.eval().to(self.device)
-            self._model, self._torch = model, torch
-            device_manager.record("sign", choice, self.device, model="uni-sign")
-        except Exception as error:  # Preserve the original error for health/UI diagnostics.
-            self.load_error = str(error)
-            raise UniSignBackendError(f"Uni-Sign could not load: {error}") from error
+        with self._load_lock:
+            if self._model is not None:
+                return
+            if not self.enabled:
+                raise UniSignBackendError("Uni-Sign is disabled")
+            missing = [str(path) for path in (self.repo, self.checkpoint, self.mt5_path) if not path.exists()]
+            if missing:
+                raise UniSignBackendError("Missing Uni-Sign assets: " + ", ".join(missing))
+            try:
+                import torch
+                choice = device_manager.select_device("sign")
+                self.device = choice.device
+                # Uni-Sign imports config.mt5_path by value during models import.
+                # Override only the local configuration value, leaving architecture
+                # and checkpoint parameter names untouched.
+                sys.path.insert(0, str(self.repo))
+                config = importlib.import_module("config")
+                config.mt5_path = str(self.mt5_path)
+                models = importlib.import_module("models")
+                args = SimpleNamespace(hidden_dim=256, dataset="How2Sign", rgb_support=False, label_smoothing=0.0)
+                model = models.Uni_Sign(args)
+                checkpoint = torch.load(self.checkpoint, map_location="cpu", weights_only=False)
+                state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
+                model.load_state_dict(state_dict, strict=True)
+                model.eval().to(self.device)
+                self._model, self._torch = model, torch
+                device_manager.record("sign", choice, self.device, model="uni-sign")
+            except Exception as error:  # Preserve the original error for health/UI diagnostics.
+                self.load_error = str(error)
+                raise UniSignBackendError(f"Uni-Sign could not load: {error}") from error
 
     def translate_raw_mediapipe(self, raw_frames: list[dict[str, object]], *, experimental: bool) -> dict[str, object]:
+        if not raw_frames or len(raw_frames) > 256:
+            raise UniSignBackendError("raw_frames must contain between 1 and 256 frames")
         if not experimental or not self.allow_presence_proxy:
             raise UniSignBackendError(
                 "MediaPipe-to-Uni-Sign is experimental: set experimental=true and "

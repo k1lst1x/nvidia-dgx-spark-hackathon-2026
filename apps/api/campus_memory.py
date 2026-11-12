@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -159,9 +160,24 @@ def resolve_alert(alert_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def has_baseline(location: str) -> bool:
+    """Check if a baseline is already established for the given location."""
+    with _get_connection() as conn:
+        cursor = conn.execute("SELECT 1 FROM location_baselines WHERE location = ? LIMIT 1;", (location,))
+        return cursor.fetchone() is not None
+
+
+def _normalize_object(item: Any) -> dict[str, Any]:
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+    if isinstance(item, dict):
+        return item
+    return dict(item)
+
+
 def detect_what_changed(
     location: str,
-    current_objects: list[dict[str, Any]],
+    current_objects: list[dict[str, Any] | Any],
     update_baseline: bool = False,
 ) -> dict[str, Any]:
     """Compare currently detected objects against stored baseline for a room/location.
@@ -170,6 +186,7 @@ def detect_what_changed(
     the static environment.
     """
     now = time.time()
+    normalized_objects = [_normalize_object(item) for item in current_objects]
     with _get_connection() as conn:
         cursor = conn.execute(
             "SELECT objects_json, updated_at FROM location_baselines WHERE location = ?;",
@@ -181,12 +198,12 @@ def detect_what_changed(
             # First time visiting this location: save current layout as baseline
             conn.execute(
                 "INSERT INTO location_baselines (location, objects_json, updated_at) VALUES (?, ?, ?);",
-                (location, json.dumps(current_objects), now),
+                (location, json.dumps(normalized_objects), now),
             )
             conn.commit()
             return {
                 "has_changed": False,
-                "delta_summary": f"Baseline established for {location} with {len(current_objects)} objects.",
+                "delta_summary": f"Baseline established for {location} with {len(normalized_objects)} objects.",
                 "speech": f"Baseline established for {location}. I will only announce what changes from now on.",
                 "added_objects": [],
                 "removed_objects": [],
@@ -198,35 +215,34 @@ def detect_what_changed(
         if update_baseline:
             conn.execute(
                 "UPDATE location_baselines SET objects_json = ?, updated_at = ? WHERE location = ?;",
-                (json.dumps(current_objects), now, location),
+                (json.dumps(normalized_objects), now, location),
             )
             conn.commit()
 
-    # Compare current objects with baseline
-    baseline_labels = [obj.get("label", "").lower() for obj in baseline_objects]
-    current_labels = [obj.get("label", "").lower() for obj in current_objects]
+    # Compare current objects with baseline in linear O(N) time using Counter
+    baseline_labels = [str(obj.get("label", "")).lower() for obj in baseline_objects if obj.get("label")]
+    current_labels = [str(obj.get("label", "")).lower() for obj in normalized_objects if obj.get("label")]
 
-    added: list[str] = []
-    for label in current_labels:
-        if label and baseline_labels.count(label) < current_labels.count(label) and label not in added:
-            added.append(label)
+    baseline_counts = Counter(baseline_labels)
+    current_counts = Counter(current_labels)
 
-    removed: list[str] = []
-    for label in baseline_labels:
-        if label and current_labels.count(label) < baseline_labels.count(label) and label not in removed:
-            removed.append(label)
+    added: list[str] = [label for label, count in current_counts.items() if count > baseline_counts[label]]
+    removed: list[str] = [label for label, count in baseline_counts.items() if count > current_counts[label]]
 
-    # Detect moved obstacles in the central path (x ~ 0.35 to 0.65)
+    # Detect moved obstacles in linear O(N) time via hash lookup
+    baseline_x: dict[str, float] = {}
+    for b in baseline_objects:
+        lbl = str(b.get("label", "")).lower()
+        if lbl and lbl not in baseline_x:
+            baseline_x[lbl] = float(b.get("x", 0.5))
+
     moved: list[str] = []
-    for curr in current_objects:
-        label = curr.get("label", "").lower()
-        curr_x = curr.get("x", 0.5)
-        # Check if matched baseline object moved significantly
-        matching_baseline = [b for b in baseline_objects if b.get("label", "").lower() == label]
-        if matching_baseline:
-            base_x = matching_baseline[0].get("x", 0.5)
-            if abs(curr_x - base_x) > 0.20:
-                moved.append(label)
+    for curr in normalized_objects:
+        lbl = str(curr.get("label", "")).lower()
+        if lbl in baseline_x and lbl not in moved:
+            curr_x = float(curr.get("x", 0.5))
+            if abs(curr_x - baseline_x[lbl]) > 0.20:
+                moved.append(lbl)
 
     has_changed = bool(added or moved)
 
