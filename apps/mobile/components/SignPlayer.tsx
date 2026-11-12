@@ -194,7 +194,7 @@ export default function SignPlayer({
 }: SignPlayerProps) {
   const [tokenIndex, setTokenIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(autoPlay);
-  const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 1.0 | 1.5>(1.0);
+  const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 0.75 | 1.0 | 1.25>(1.0);
   const [isLooping, setIsLooping] = useState(true);
   const [viewMode, setViewMode] = useState<'3d' | 'skeleton'>(initialMode);
 
@@ -491,7 +491,8 @@ export default function SignPlayer({
     stateRef.current.targetPose = keyframes[0].landmarks;
     stateRef.current.currentSecondary = stateRef.current.targetSecondary;
     stateRef.current.targetSecondary = keyframes[0].secondaryLandmarks;
-    stateRef.current.keyframeDuration = (keyframes[0].durationMs || 400) / playbackSpeed;
+    // Paced slightly slower (~30%) for clear, deliberate human sign perception
+    stateRef.current.keyframeDuration = ((keyframes[0].durationMs || 420) * 1.30) / playbackSpeed;
 
     const render = (now: number) => {
       const elapsed = now - stateRef.current.startTime;
@@ -571,7 +572,9 @@ export default function SignPlayer({
           stateRef.current.targetPose = keyframes[nextKeyframeIdx].landmarks;
           stateRef.current.currentSecondary = stateRef.current.targetSecondary;
           stateRef.current.targetSecondary = keyframes[nextKeyframeIdx].secondaryLandmarks;
-          stateRef.current.keyframeDuration = (keyframes[nextKeyframeIdx].durationMs || 400) / playbackSpeed;
+          // Paced slightly slower (~30%) for clear, deliberate human sign perception
+          stateRef.current.keyframeDuration =
+            ((keyframes[nextKeyframeIdx].durationMs || 420) * 1.30) / playbackSpeed;
           stateRef.current.startTime = now;
         } else {
           const nextTokenIdx = tokenIndex + 1;
@@ -650,7 +653,7 @@ export default function SignPlayer({
   };
 
   const toggleSpeed = () => {
-    setPlaybackSpeed((curr) => (curr === 0.5 ? 1.0 : curr === 1.0 ? 1.5 : 0.5));
+    setPlaybackSpeed((curr) => (curr === 1.0 ? 0.75 : curr === 0.75 ? 0.5 : curr === 0.5 ? 1.25 : 1.0));
   };
 
   if (!tokens.length) {
