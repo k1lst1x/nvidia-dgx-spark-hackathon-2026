@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -8,6 +8,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import * as THREE from 'three';
 import {
   HAND_CONNECTIONS,
   HandPose,
@@ -21,10 +22,10 @@ export type SignPlayerProps = {
   autoPlay?: boolean;
   onSignComplete?: () => void;
   height?: number;
-  initialMode?: 'avatar' | 'skeleton';
+  initialMode?: '3d' | 'skeleton';
 };
 
-// Color palette for anatomical finger segments (standard MediaPipe accessibility scheme)
+// Color palette for 2D MediaPipe skeleton
 const FINGER_COLORS = {
   thumb: '#FFB800',
   index: '#00E5FF',
@@ -33,25 +34,7 @@ const FINGER_COLORS = {
   pinky: '#FF4081',
   palm: 'rgba(255, 255, 255, 0.4)',
   joint: '#FFFFFF',
-  secondaryHand: 'rgba(183, 255, 86, 0.65)',
-};
-
-// Natural human skin, hair, and clothing palette
-const SKIN = {
-  base: '#ECC09E',
-  shadow: '#CFA07E',
-  highlight: '#FCE4D0',
-  blush: 'rgba(224, 112, 112, 0.18)',
-  lip: '#C27474',
-  nail: '#F5D3BD',
-  nailShine: '#FFFFFF',
-  hair: '#22201F',
-  hairHighlight: '#3B3734',
-  hoodie: '#10261E',
-  hoodieShadow: '#091612',
-  hoodieTrim: '#1E4738',
-  badge: '#0D201A',
-  accent: '#B7FF56',
+  secondaryHand: 'rgba(183, 255, 86, 0.7)',
 };
 
 function getBoneColor(startIdx: number, endIdx: number): string {
@@ -63,21 +46,181 @@ function getBoneColor(startIdx: number, endIdx: number): string {
   return FINGER_COLORS.palm;
 }
 
+// Handshape classification lookup for authentic ASL linguistic guidance
+const ASL_HANDSHAPE_GUIDE: Record<
+  string,
+  {
+    handshape: string;
+    palmFacing: string;
+    motionGuide: string;
+    facialNMM: string;
+  }
+> = {
+  HELLO: {
+    handshape: 'ASL "Open-B" Handshape (Flat hand, thumb alongside)',
+    palmFacing: 'Palm Forward / Outward (Facing recipient)',
+    motionGuide: 'Begin with index edge near temple, push forward and outward 6–8" in a gentle saluting wave.',
+    facialNMM: 'Warm pleasant eye contact with a gentle welcoming smile.',
+  },
+  'THANK-YOU': {
+    handshape: 'ASL "Flat-B" Handshape (All fingers extended, touching)',
+    palmFacing: 'Palm Inward initially, opening forward toward recipient',
+    motionGuide: 'Fingertips gently touch chin/lips, then hand moves forward and slightly downward toward recipient.',
+    facialNMM: 'Slight head bow and appreciative smile (Non-Manual Marker).',
+  },
+  PLEASE: {
+    handshape: 'ASL "Flat-5" Handshape (Open palm, thumb relaxed)',
+    palmFacing: 'Palm Inward (Touching / facing chest)',
+    motionGuide: 'Flat open palm rubs circular clockwise motion over chest 2–3 times.',
+    facialNMM: 'Humble pleasant facial expression with eyes open.',
+  },
+  HELP: {
+    handshape: 'Dominant "Closed-A" / Fist over Non-dominant "Open-B" palm base',
+    palmFacing: 'Dominant thumb pointing UP; Base palm facing UP',
+    motionGuide: 'Rest closed fist upon open palm, lift both hands together upward 6–8" as a unified motion.',
+    facialNMM: 'Attentive, helpful expression; furrowed brows if asking for help.',
+  },
+  YES: {
+    handshape: 'ASL "S" Fist Handshape',
+    palmFacing: 'Palm Forward / Outward',
+    motionGuide: 'Fist nods at wrist forward and down 2–3 times, mimicking a nodding head.',
+    facialNMM: 'Nod head in affirmative synchronization with fist nods.',
+  },
+  NO: {
+    handshape: 'ASL "3" modified: Index + Middle snap shut against Thumb',
+    palmFacing: 'Palm Forward / Outward',
+    motionGuide: 'Index and middle fingers snap firmly against the thumb pad, like a closing mouth.',
+    facialNMM: 'Firm slight head shake in negative sync.',
+  },
+  STOP: {
+    handshape: 'Dominant "Open-B" chopping into Non-dominant "Open-B" palm',
+    palmFacing: 'Dominant palm facing side; Base palm facing UP',
+    motionGuide: 'Dominant pinky edge comes down firmly onto the flat upward base palm with decisive stop.',
+    facialNMM: 'Direct firm gaze, neutral or cautionary expression.',
+  },
+  WAIT: {
+    handshape: 'Both hands "Open-5" Handshapes (All fingers spread)',
+    palmFacing: 'Both palms facing inward toward body',
+    motionGuide: 'Both hands held forward at chest level, wiggling all fingers gently alternately.',
+    facialNMM: 'Patient, calm facial expression.',
+  },
+  'I-LOVE-YOU': {
+    handshape: 'ASL "I-L-Y" Handshape (Thumb, Index, Pinky extended; Middle and Ring folded)',
+    palmFacing: 'Palm Forward / Outward toward recipient',
+    motionGuide: 'Hold at chest/shoulder level with slight warm pulsation outward.',
+    facialNMM: 'Warm affectionate smile and open eye contact.',
+  },
+  WATER: {
+    handshape: 'ASL "W" Handshape (Index, Middle, Ring extended in W; Thumb holds Pinky)',
+    palmFacing: 'Palm facing Left / Side',
+    motionGuide: 'Index finger of W-hand taps chin twice gently.',
+    facialNMM: 'Neutral attentive expression.',
+  },
+  ROOM: {
+    handshape: 'Both hands "Open-B" (Flat walls)',
+    palmFacing: 'Palms face each other for side walls, then front/back for end walls',
+    motionGuide: 'Hands delineate the 4 perimeter walls of a room by boxing out parallel sides then rotating.',
+    facialNMM: 'Focused spatial eye gaze following the perimeter.',
+  },
+  WHERE: {
+    handshape: 'ASL "1" / Index Finger Extended',
+    palmFacing: 'Palm Forward / Outward',
+    motionGuide: 'Index finger wiggles side-to-side repeatedly at shoulder level.',
+    facialNMM: 'Furrowed eyebrows, tilted head (Essential ASL WH-question grammatical rule).',
+  },
+  FOLLOW: {
+    handshape: 'Both hands "10" / Thumbs-up A-fists',
+    palmFacing: 'Palms face inward toward centerline',
+    motionGuide: 'Dominant fist follows non-dominant fist forward in tandem, lead-and-follow trajectory.',
+    facialNMM: 'Encouraging, directional head nod.',
+  },
+  WELCOME: {
+    handshape: 'ASL "Open-B" Handshape (Curved welcoming palm)',
+    palmFacing: 'Palm Upward and Inward',
+    motionGuide: 'Hand sweeps smoothly from side inward toward the waist in a welcoming gesture.',
+    facialNMM: 'Friendly welcoming smile.',
+  },
+  NAME: {
+    handshape: 'Both hands "H" / Index + Middle fingers extended',
+    palmFacing: 'Palms face inward towards centerline',
+    motionGuide: 'Dominant H-fingers tap across non-dominant H-fingers twice at right angles.',
+    facialNMM: 'Neutral or questioning depending on context.',
+  },
+  GOOD: {
+    handshape: 'Dominant "Open-B" from lips to Non-dominant "Open-B" palm base',
+    palmFacing: 'Palm inward at lips, falls flat into palm facing up',
+    motionGuide: 'Fingertips touch lips, then drop smoothly into palm of flat non-dominant hand.',
+    facialNMM: 'Pleasant smile and head nod.',
+  },
+};
+
+// Helper: 3D point from MediaPipe landmark
+function landmarkToVec3(pt: { x: number; y: number; z: number }, scale = 2.8): THREE.Vector3 {
+  return new THREE.Vector3(
+    (pt.x - 0.5) * scale,
+    -(pt.y - 0.5) * scale,
+    -(pt.z || 0) * scale * 1.2,
+  );
+}
+
+// Helper: orient a cylinder between two 3D points
+function orientCylinderBetweenPoints(
+  mesh: THREE.Mesh,
+  p1: THREE.Vector3,
+  p2: THREE.Vector3,
+  thickness: number,
+) {
+  const dir = new THREE.Vector3().subVectors(p2, p1);
+  const length = dir.length();
+  if (length < 0.0001) return;
+
+  const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+  mesh.position.copy(mid);
+  mesh.scale.set(thickness, length, thickness);
+
+  const quat = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    dir.clone().normalize(),
+  );
+  mesh.quaternion.copy(quat);
+}
+
 export default function SignPlayer({
   tokens,
   autoPlay = true,
   onSignComplete,
-  height = 340,
-  initialMode = 'avatar',
+  height = 360,
+  initialMode = '3d',
 }: SignPlayerProps) {
   const [tokenIndex, setTokenIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(autoPlay);
   const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 1.0 | 1.5>(1.0);
   const [isLooping, setIsLooping] = useState(true);
-  const [viewMode, setViewMode] = useState<'avatar' | 'skeleton'>(initialMode);
+  const [viewMode, setViewMode] = useState<'3d' | 'skeleton'>(initialMode);
+
+  // 3D Orbit Drag Rotation State
+  const [orbitRot, setOrbitRot] = useState({ x: 0, y: 0 });
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
+
+  // Three.js References
+  const threeRef = useRef<{
+    renderer: THREE.WebGLRenderer;
+    scene: THREE.Scene;
+    camera: THREE.PerspectiveCamera;
+    dominantGroup: THREE.Group;
+    secondaryGroup: THREE.Group;
+    dominantJoints: THREE.Mesh[];
+    dominantBones: THREE.Mesh[];
+    secondaryJoints: THREE.Mesh[];
+    secondaryBones: THREE.Mesh[];
+    palmMeshDominant: THREE.Mesh;
+    palmMeshSecondary: THREE.Mesh;
+  } | null>(null);
+
   const stateRef = useRef({
     currentPose: REST_POSE,
     targetPose: REST_POSE,
@@ -90,7 +233,211 @@ export default function SignPlayer({
 
   const activeToken = tokens[tokenIndex];
 
-  // Draw technical 21-point MediaPipe skeleton
+  // Lookup ASL linguistic guidance for active sign
+  const guideInfo = useMemo(() => {
+    if (!activeToken) return null;
+    if (ASL_HANDSHAPE_GUIDE[activeToken.gloss]) {
+      return ASL_HANDSHAPE_GUIDE[activeToken.gloss];
+    }
+    if (activeToken.type === 'letter') {
+      return {
+        handshape: `ASL Fingerspelling Letter "${activeToken.gloss}"`,
+        palmFacing: 'Palm Forward / Outward toward recipient (Standard Fingerspelling Rule)',
+        motionGuide: `Hold hand steady at shoulder height, forming the canonical ASL "${activeToken.gloss}" handshape.`,
+        facialNMM: 'Direct attentive eye contact with conversational partner.',
+      };
+    }
+    if (activeToken.type === 'number') {
+      return {
+        handshape: `ASL Number Digit "${activeToken.gloss}"`,
+        palmFacing: activeToken.gloss <= '5' ? 'Palm Inward (Traditional ASL 1-5)' : 'Palm Outward',
+        motionGuide: `Form the precise "${activeToken.gloss}" digit configuration with clear finger extension.`,
+        facialNMM: 'Neutral clear posture.',
+      };
+    }
+    return {
+      handshape: `ASL Vocabulary Sign "${activeToken.gloss}"`,
+      palmFacing: 'Natural conversational orientation',
+      motionGuide: activeToken.sign.description || 'Perform standard ASL gesture cleanly in the signing space.',
+      facialNMM: 'Natural facial grammar in sync with gesture.',
+    };
+  }, [activeToken]);
+
+  // Setup Three.js WebGL Scene
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true,
+        alpha: true,
+        powerPreference: 'high-performance',
+      });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(canvas.clientWidth || 360, canvas.clientHeight || height, false);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.1;
+    } catch {
+      return;
+    }
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, (canvas.clientWidth || 360) / (canvas.clientHeight || height), 0.1, 50);
+    camera.position.set(0, 0, 3.4);
+    camera.lookAt(0, 0, 0);
+
+    // Realistic Multi-Point Studio Lighting (Apple / NVIDIA presentation standard)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
+    scene.add(ambientLight);
+
+    // Warm Key Light (Above front-right)
+    const keyLight = new THREE.DirectionalLight(0xfff3e6, 1.8);
+    keyLight.position.set(2.5, 4.0, 3.5);
+    scene.add(keyLight);
+
+    // Cyan Rim Fill Light (Gives crisp contour definition)
+    const rimLight = new THREE.DirectionalLight(0x00e5ff, 0.7);
+    rimLight.position.set(-3.0, -1.0, 2.0);
+    scene.add(rimLight);
+
+    // Subtle Lime Accent Light (GuideLens branding)
+    const bounceLight = new THREE.DirectionalLight(0xb7ff56, 0.5);
+    bounceLight.position.set(0.0, -3.5, 1.0);
+    scene.add(bounceLight);
+
+    // Materials: PBR Realistic Skin Shader
+    const skinMaterial = new THREE.MeshStandardMaterial({
+      color: 0xdeb494,
+      roughness: 0.38,
+      metalness: 0.05,
+    });
+
+    const jointMaterial = new THREE.MeshStandardMaterial({
+      color: 0xd4a080,
+      roughness: 0.32,
+      metalness: 0.08,
+    });
+
+    const secondarySkinMaterial = new THREE.MeshStandardMaterial({
+      color: 0xc8d8c0,
+      roughness: 0.40,
+      metalness: 0.05,
+    });
+
+    // Shared Geometries
+    const sphereGeom = new THREE.SphereGeometry(1, 16, 16);
+    const cylinderGeom = new THREE.CylinderGeometry(1, 1, 1, 16);
+
+    // Build Dominant Hand Meshes
+    const dominantGroup = new THREE.Group();
+    scene.add(dominantGroup);
+
+    const dominantJoints: THREE.Mesh[] = [];
+    for (let i = 0; i < 21; i++) {
+      const radius = i === 0 ? 0.12 : i === 4 || i === 8 || i === 12 || i === 16 || i === 20 ? 0.08 : 0.07;
+      const mesh = new THREE.Mesh(sphereGeom, jointMaterial);
+      mesh.scale.set(radius, radius, radius);
+      dominantGroup.add(mesh);
+      dominantJoints.push(mesh);
+    }
+
+    const dominantBones: THREE.Mesh[] = [];
+    for (let i = 0; i < HAND_CONNECTIONS.length; i++) {
+      const mesh = new THREE.Mesh(cylinderGeom, skinMaterial);
+      dominantGroup.add(mesh);
+      dominantBones.push(mesh);
+    }
+
+    // Palm hull mesh
+    const palmGeom = new THREE.BufferGeometry();
+    const palmMeshDominant = new THREE.Mesh(palmGeom, skinMaterial);
+    dominantGroup.add(palmMeshDominant);
+
+    // Build Secondary Hand Meshes
+    const secondaryGroup = new THREE.Group();
+    scene.add(secondaryGroup);
+
+    const secondaryJoints: THREE.Mesh[] = [];
+    for (let i = 0; i < 21; i++) {
+      const radius = i === 0 ? 0.11 : 0.065;
+      const mesh = new THREE.Mesh(sphereGeom, secondarySkinMaterial);
+      mesh.scale.set(radius, radius, radius);
+      secondaryGroup.add(mesh);
+      secondaryJoints.push(mesh);
+    }
+
+    const secondaryBones: THREE.Mesh[] = [];
+    for (let i = 0; i < HAND_CONNECTIONS.length; i++) {
+      const mesh = new THREE.Mesh(cylinderGeom, secondarySkinMaterial);
+      secondaryGroup.add(mesh);
+      secondaryBones.push(mesh);
+    }
+
+    const palmMeshSecondary = new THREE.Mesh(new THREE.BufferGeometry(), secondarySkinMaterial);
+    secondaryGroup.add(palmMeshSecondary);
+
+    threeRef.current = {
+      renderer,
+      scene,
+      camera,
+      dominantGroup,
+      secondaryGroup,
+      dominantJoints,
+      dominantBones,
+      secondaryJoints,
+      secondaryBones,
+      palmMeshDominant,
+      palmMeshSecondary,
+    };
+
+    return () => {
+      dominantGroup.clear();
+      secondaryGroup.clear();
+      scene.clear();
+      renderer.dispose();
+      threeRef.current = null;
+    };
+  }, [height]);
+
+  // Update 3D Hand Mesh positions from current landmarks
+  const update3DHand = useCallback(
+    (
+      pose: HandPose,
+      joints: THREE.Mesh[],
+      bones: THREE.Mesh[],
+      group: THREE.Group,
+      isVisible: boolean,
+    ) => {
+      group.visible = isVisible;
+      if (!isVisible || !pose || !pose.length) return;
+
+      const vec3List: THREE.Vector3[] = [];
+      for (let i = 0; i < 21; i++) {
+        const pt = pose[i] || REST_POSE[i];
+        const v = landmarkToVec3(pt);
+        vec3List.push(v);
+        joints[i].position.copy(v);
+      }
+
+      // Connect 3D bones with realistic phalanx tapering
+      for (let k = 0; k < HAND_CONNECTIONS.length; k++) {
+        const [start, end] = HAND_CONNECTIONS[k];
+        const p1 = vec3List[start];
+        const p2 = vec3List[end];
+        if (!p1 || !p2) continue;
+
+        // Thickness: metacarpal is thicker, proximal phalanx medium, distal tip tapered
+        const thickness = end <= 4 ? 0.065 : end === 8 || end === 12 || end === 16 || end === 20 ? 0.05 : 0.062;
+        orientCylinderBetweenPoints(bones[k], p1, p2, thickness);
+      }
+    },
+    [],
+  );
+
+  // 2D Skeleton fallback renderer (MediaPipe X-Ray)
   const drawSkeletonHand = useCallback(
     (
       ctx: CanvasRenderingContext2D,
@@ -99,7 +446,6 @@ export default function SignPlayer({
       h: number,
       isSecondary = false,
     ) => {
-      // Connect bones
       ctx.lineWidth = isSecondary ? 2.5 : 3.8;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -116,7 +462,6 @@ export default function SignPlayer({
         ctx.stroke();
       }
 
-      // Draw knuckles / joint dots
       for (let i = 0; i < pose.length; i++) {
         const pt = pose[i];
         if (!pt) continue;
@@ -128,509 +473,12 @@ export default function SignPlayer({
         ctx.arc(x, y, radius, 0, Math.PI * 2);
         ctx.fillStyle = isSecondary ? '#B7FF56' : FINGER_COLORS.joint;
         ctx.fill();
-
-        // Subtle glow on fingertips
-        if (!isSecondary && (i === 4 || i === 8 || i === 12 || i === 16 || i === 20)) {
-          ctx.beginPath();
-          ctx.arc(x, y, radius + 2.5, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
       }
     },
     [],
   );
 
-  // Draw volumetric human hand with skin tone, organic palm & finger contours and fingernails
-  const drawVolumetricHand = useCallback(
-    (
-      ctx: CanvasRenderingContext2D,
-      pose: HandPose,
-      w: number,
-      h: number,
-      isSecondary = false,
-    ) => {
-      if (!pose || !pose.length) return;
-
-      const wrist = pose[0];
-      const thumbCmc = pose[1];
-      const indexMcp = pose[5];
-      const middleMcp = pose[9];
-      const ringMcp = pose[13];
-      const pinkyMcp = pose[17];
-
-      // 1. Palm base fill
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(wrist.x * w, wrist.y * h);
-      ctx.lineTo(thumbCmc.x * w, thumbCmc.y * h);
-      ctx.lineTo(indexMcp.x * w, indexMcp.y * h);
-      ctx.lineTo(middleMcp.x * w, middleMcp.y * h);
-      ctx.lineTo(ringMcp.x * w, ringMcp.y * h);
-      ctx.lineTo(pinkyMcp.x * w, pinkyMcp.y * h);
-      ctx.closePath();
-
-      const palmGrad = ctx.createLinearGradient(
-        wrist.x * w,
-        wrist.y * h,
-        middleMcp.x * w,
-        middleMcp.y * h,
-      );
-      palmGrad.addColorStop(0, isSecondary ? '#BAA088' : SKIN.shadow);
-      palmGrad.addColorStop(1, isSecondary ? '#DFCAA6' : SKIN.base);
-      ctx.fillStyle = palmGrad;
-      ctx.fill();
-
-      // Soft palm outline & shadow
-      ctx.strokeStyle = isSecondary ? 'rgba(90, 75, 60, 0.35)' : 'rgba(120, 80, 50, 0.4)';
-      ctx.lineWidth = 1.8;
-      ctx.stroke();
-
-      // 2. Volumetric finger segments [MCP, PIP, DIP, TIP]
-      const fingerChains = [
-        [1, 2, 3, 4], // Thumb
-        [5, 6, 7, 8], // Index
-        [9, 10, 11, 12], // Middle
-        [13, 14, 15, 16], // Ring
-        [17, 18, 19, 20], // Pinky
-      ];
-
-      for (const chain of fingerChains) {
-        for (let seg = 0; seg < chain.length - 1; seg++) {
-          const p1 = pose[chain[seg]];
-          const p2 = pose[chain[seg + 1]];
-          if (!p1 || !p2) continue;
-
-          const isTip = seg === chain.length - 2;
-          const strokeWidth = seg === 0 ? 8.5 : seg === 1 ? 7.2 : 6.0;
-
-          // Finger segment bone/flesh
-          ctx.beginPath();
-          ctx.moveTo(p1.x * w, p1.y * h);
-          ctx.lineTo(p2.x * w, p2.y * h);
-          ctx.lineWidth = isSecondary ? strokeWidth * 0.9 : strokeWidth;
-          ctx.lineCap = 'round';
-          ctx.strokeStyle = isSecondary ? '#D8C3A5' : SKIN.base;
-          ctx.stroke();
-
-          // Subtle joint highlight/crease
-          ctx.beginPath();
-          ctx.arc(p2.x * w, p2.y * h, strokeWidth * 0.4, 0, Math.PI * 2);
-          ctx.fillStyle = isSecondary ? '#C0AB8E' : SKIN.highlight;
-          ctx.fill();
-
-          // Fingernail on tip
-          if (isTip) {
-            const tip = p2;
-            const dip = p1;
-            const dx = tip.x - dip.x;
-            const dy = tip.y - dip.y;
-            const angle = Math.atan2(dy, dx);
-
-            ctx.save();
-            ctx.translate(tip.x * w, tip.y * h);
-            ctx.rotate(angle);
-            ctx.beginPath();
-            ctx.ellipse(0, 0, 3.2, 2.0, 0, 0, Math.PI * 2);
-            ctx.fillStyle = SKIN.nail;
-            ctx.fill();
-
-            // Nail specular highlight
-            ctx.beginPath();
-            ctx.arc(0.8, -0.6, 0.8, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-            ctx.fill();
-            ctx.restore();
-          }
-        }
-      }
-
-      ctx.restore();
-    },
-    [],
-  );
-
-  // Draw full 3D human avatar signer with torso, expressive face (NMM), organic arms and hands
-  const drawHumanAvatar = useCallback(
-    (
-      ctx: CanvasRenderingContext2D,
-      activePose: HandPose,
-      activeSecondary: HandPose | undefined,
-      w: number,
-      h: number,
-      token: ASLToken,
-      now: number,
-    ) => {
-      // 1. Studio backdrop lighting
-      const bgGrad = ctx.createRadialGradient(
-        w * 0.5,
-        h * 0.35,
-        15,
-        w * 0.5,
-        h * 0.4,
-        Math.max(w, h) * 0.75,
-      );
-      bgGrad.addColorStop(0, '#122D24');
-      bgGrad.addColorStop(0.55, '#0A1814');
-      bgGrad.addColorStop(1, '#06100D');
-      ctx.fillStyle = bgGrad;
-      ctx.fillRect(0, 0, w, h);
-
-      // Subtle atmospheric grid floor
-      ctx.strokeStyle = 'rgba(183, 255, 86, 0.04)';
-      ctx.lineWidth = 1;
-      for (let gy = h * 0.75; gy < h; gy += 18) {
-        ctx.beginPath();
-        ctx.moveTo(0, gy);
-        ctx.lineTo(w, gy);
-        ctx.stroke();
-      }
-
-      // Proportions & subtle breathing
-      const breath = Math.sin(now / 1300) * 1.6;
-      const cx = w * 0.5;
-      const headY = h * 0.22 + breath * 0.4;
-      const hrx = Math.min(w * 0.11, h * 0.135);
-      const hry = hrx * 1.28;
-
-      const lsx = cx - hrx * 2.6;
-      const lsy = h * 0.45 + breath;
-      const rsx = cx + hrx * 2.6;
-      const rsy = h * 0.45 + breath;
-
-      // 2. Torso & Tech Hoodie
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(lsx, lsy);
-      ctx.bezierCurveTo(cx - hrx * 1.6, lsy - 4, cx - hrx * 0.8, h * 0.44, cx - hrx * 0.4, h * 0.45);
-      ctx.lineTo(cx, h * 0.465); // collar notch
-      ctx.lineTo(cx + hrx * 0.4, h * 0.45);
-      ctx.bezierCurveTo(cx + hrx * 0.8, h * 0.44, cx + hrx * 1.6, lsy - 4, rsx, rsy);
-      ctx.lineTo(w * 0.82, h);
-      ctx.lineTo(w * 0.18, h);
-      ctx.closePath();
-
-      const hoodieGrad = ctx.createLinearGradient(cx, h * 0.42, cx, h);
-      hoodieGrad.addColorStop(0, SKIN.hoodie);
-      hoodieGrad.addColorStop(1, SKIN.hoodieShadow);
-      ctx.fillStyle = hoodieGrad;
-      ctx.fill();
-
-      // Hoodie zipper line & collar trim
-      ctx.beginPath();
-      ctx.moveTo(cx, h * 0.465);
-      ctx.lineTo(cx, h);
-      ctx.strokeStyle = SKIN.hoodieTrim;
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-
-      // SFBU ASL Emblem Badge on left chest
-      const badgeX = cx - hrx * 1.45;
-      const badgeY = h * 0.56 + breath;
-      ctx.beginPath();
-      ctx.roundRect(badgeX - 16, badgeY - 7, 32, 14, 4);
-      ctx.fillStyle = SKIN.badge;
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(183, 255, 86, 0.45)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      ctx.fillStyle = SKIN.accent;
-      ctx.font = 'bold 7px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('SFBU ASL', badgeX, badgeY);
-
-      // 3. Neck
-      ctx.beginPath();
-      ctx.moveTo(cx - hrx * 0.35, headY + hry * 0.65);
-      ctx.lineTo(cx - hrx * 0.35, h * 0.46);
-      ctx.lineTo(cx + hrx * 0.35, h * 0.46);
-      ctx.lineTo(cx + hrx * 0.35, headY + hry * 0.65);
-      ctx.closePath();
-
-      const neckGrad = ctx.createLinearGradient(cx, headY + hry * 0.65, cx, h * 0.46);
-      neckGrad.addColorStop(0, SKIN.shadow);
-      neckGrad.addColorStop(1, SKIN.base);
-      ctx.fillStyle = neckGrad;
-      ctx.fill();
-
-      // 4. Head Oval & Face
-      ctx.beginPath();
-      ctx.ellipse(cx, headY, hrx, hry, 0, 0, Math.PI * 2);
-      const faceGrad = ctx.createRadialGradient(
-        cx - hrx * 0.25,
-        headY - hry * 0.2,
-        4,
-        cx,
-        headY,
-        hrx * 1.1,
-      );
-      faceGrad.addColorStop(0, SKIN.highlight);
-      faceGrad.addColorStop(0.7, SKIN.base);
-      faceGrad.addColorStop(1, SKIN.shadow);
-      ctx.fillStyle = faceGrad;
-      ctx.fill();
-
-      // Ears
-      ctx.beginPath();
-      ctx.ellipse(cx - hrx * 0.98, headY + hry * 0.05, hrx * 0.16, hry * 0.26, 0, 0, Math.PI * 2);
-      ctx.ellipse(cx + hrx * 0.98, headY + hry * 0.05, hrx * 0.16, hry * 0.26, 0, 0, Math.PI * 2);
-      ctx.fillStyle = SKIN.base;
-      ctx.fill();
-
-      // Hair (stylish modern cropped haircut)
-      ctx.beginPath();
-      ctx.ellipse(cx, headY - hry * 0.45, hrx * 1.04, hry * 0.68, 0, Math.PI, Math.PI * 2);
-      ctx.lineTo(cx + hrx * 1.02, headY - hry * 0.05);
-      ctx.bezierCurveTo(
-        cx + hrx * 0.8,
-        headY - hry * 0.5,
-        cx - hrx * 0.2,
-        headY - hry * 0.4,
-        cx - hrx * 1.02,
-        headY - hry * 0.05,
-      );
-      ctx.closePath();
-
-      const hairGrad = ctx.createLinearGradient(cx, headY - hry * 1.1, cx, headY);
-      hairGrad.addColorStop(0, SKIN.hairHighlight);
-      hairGrad.addColorStop(1, SKIN.hair);
-      ctx.fillStyle = hairGrad;
-      ctx.fill();
-
-      // 5. Facial Features & Linguistic Non-Manual Markers (NMM)
-      const isBlinking = now % 3800 < 130;
-      const isWhQuestion = /WHERE|WHAT|WHO|WHY|WHEN|HOW/.test(token?.gloss || '');
-      const isAffirmative = /HELLO|THANK|WELCOME|LOVE|YES|GOOD|PLEASE/.test(token?.gloss || '');
-
-      const eyeY = headY - hry * 0.06;
-      const leftEyeX = cx - hrx * 0.36;
-      const rightEyeX = cx + hrx * 0.36;
-
-      if (isBlinking) {
-        // Closed eyelids
-        ctx.strokeStyle = '#382516';
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
-        ctx.arc(leftEyeX, eyeY, hrx * 0.16, 0.1, Math.PI - 0.1);
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.arc(rightEyeX, eyeY, hrx * 0.16, 0.1, Math.PI - 0.1);
-        ctx.stroke();
-      } else {
-        // Open eyes (sclera + amber iris + pupil + specular shine)
-        for (const ex of [leftEyeX, rightEyeX]) {
-          ctx.beginPath();
-          ctx.ellipse(ex, eyeY, hrx * 0.18, hry * 0.11, 0, 0, Math.PI * 2);
-          ctx.fillStyle = '#FFFFFF';
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(70, 45, 25, 0.35)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-
-          // Iris
-          ctx.beginPath();
-          ctx.arc(ex, eyeY, hry * 0.08, 0, Math.PI * 2);
-          ctx.fillStyle = '#4A301D';
-          ctx.fill();
-
-          // Pupil
-          ctx.beginPath();
-          ctx.arc(ex, eyeY, hry * 0.045, 0, Math.PI * 2);
-          ctx.fillStyle = '#0F0B08';
-          ctx.fill();
-
-          // Specular catchlight (adds life)
-          ctx.beginPath();
-          ctx.arc(ex + 1.8, eyeY - 1.8, 1.2, 0, Math.PI * 2);
-          ctx.fillStyle = '#FFFFFF';
-          ctx.fill();
-        }
-      }
-
-      // Eyebrows (Crucial ASL Grammar Marker)
-      // WH-questions: furrowed downward towards center
-      // Affirmative: arched slightly upwards
-      // Neutral: relaxed standard arch
-      const browY = eyeY - hry * 0.22;
-      ctx.strokeStyle = '#27221E';
-      ctx.lineWidth = 2.6;
-      ctx.lineCap = 'round';
-
-      // Left eyebrow
-      ctx.beginPath();
-      if (isWhQuestion) {
-        // Furrowed down toward nose
-        ctx.moveTo(leftEyeX - hrx * 0.18, browY - 1);
-        ctx.lineTo(leftEyeX + hrx * 0.18, browY + 4);
-      } else if (isAffirmative) {
-        // Lifted arch
-        ctx.moveTo(leftEyeX - hrx * 0.18, browY - 2);
-        ctx.quadraticCurveTo(leftEyeX, browY - 7, leftEyeX + hrx * 0.18, browY - 2);
-      } else {
-        // Neutral
-        ctx.moveTo(leftEyeX - hrx * 0.18, browY);
-        ctx.quadraticCurveTo(leftEyeX, browY - 4, leftEyeX + hrx * 0.18, browY - 1);
-      }
-      ctx.stroke();
-
-      // Right eyebrow
-      ctx.beginPath();
-      if (isWhQuestion) {
-        // Furrowed down toward nose
-        ctx.moveTo(rightEyeX - hrx * 0.18, browY + 4);
-        ctx.lineTo(rightEyeX + hrx * 0.18, browY - 1);
-      } else if (isAffirmative) {
-        // Lifted arch
-        ctx.moveTo(rightEyeX - hrx * 0.18, browY - 2);
-        ctx.quadraticCurveTo(rightEyeX, browY - 7, rightEyeX + hrx * 0.18, browY - 2);
-      } else {
-        // Neutral
-        ctx.moveTo(rightEyeX - hrx * 0.18, browY - 1);
-        ctx.quadraticCurveTo(rightEyeX, browY - 4, rightEyeX + hrx * 0.18, browY);
-      }
-      ctx.stroke();
-
-      // Nose
-      const noseY = headY + hry * 0.15;
-      ctx.beginPath();
-      ctx.moveTo(cx, noseY - hry * 0.12);
-      ctx.lineTo(cx + 2, noseY);
-      ctx.lineTo(cx - 3, noseY + 2);
-      ctx.strokeStyle = 'rgba(170, 115, 80, 0.45)';
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-
-      // Mouth
-      const mouthY = headY + hry * 0.44;
-      ctx.beginPath();
-      if (isAffirmative) {
-        // Friendly smile
-        ctx.arc(cx, mouthY - 3, hrx * 0.28, 0.2, Math.PI - 0.2);
-        ctx.strokeStyle = SKIN.lip;
-        ctx.lineWidth = 2.4;
-        ctx.stroke();
-      } else if (isWhQuestion) {
-        // Slightly open question mouth
-        ctx.ellipse(cx, mouthY, hrx * 0.14, hry * 0.08, 0, 0, Math.PI * 2);
-        ctx.fillStyle = '#421E1E';
-        ctx.fill();
-        ctx.strokeStyle = SKIN.lip;
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-      } else {
-        // Calm neutral lips
-        ctx.moveTo(cx - hrx * 0.22, mouthY);
-        ctx.quadraticCurveTo(cx, mouthY + 1.5, cx + hrx * 0.22, mouthY);
-        ctx.strokeStyle = SKIN.lip;
-        ctx.lineWidth = 2.2;
-        ctx.stroke();
-      }
-
-      // 6. Connected Arms & Forearms
-      // Right dominant arm (starts at rsx, rsy and connects to wrist activePose[0])
-      const rwX = activePose[0].x * w;
-      const rwY = activePose[0].y * h;
-      const relbowX = Math.max(rsx + 10, (rsx + rwX) / 2 + w * 0.08);
-      const relbowY = Math.max(rsy + 20, (rsy + rwY) / 2 + h * 0.09);
-
-      // Upper arm
-      ctx.beginPath();
-      ctx.moveTo(rsx, rsy);
-      ctx.lineTo(relbowX, relbowY);
-      ctx.strokeStyle = SKIN.hoodie;
-      ctx.lineWidth = 16;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-
-      // Forearm connecting to wrist
-      ctx.beginPath();
-      ctx.moveTo(relbowX, relbowY);
-      ctx.lineTo(rwX, rwY);
-      ctx.strokeStyle = SKIN.hoodieTrim;
-      ctx.lineWidth = 13;
-      ctx.lineCap = 'round';
-      ctx.stroke();
-
-      // Sleeve cuff
-      ctx.beginPath();
-      ctx.arc(rwX, rwY, 8, 0, Math.PI * 2);
-      ctx.fillStyle = SKIN.hoodie;
-      ctx.fill();
-
-      // Left arm (Secondary hand or resting hand)
-      if (activeSecondary) {
-        const lwX = activeSecondary[0].x * w;
-        const lwY = activeSecondary[0].y * h;
-        const lelbowX = Math.min(lsx - 10, (lsx + lwX) / 2 - w * 0.08);
-        const lelbowY = Math.max(lsy + 20, (lsy + lwY) / 2 + h * 0.09);
-
-        // Left upper arm & forearm
-        ctx.beginPath();
-        ctx.moveTo(lsx, lsy);
-        ctx.lineTo(lelbowX, lelbowY);
-        ctx.strokeStyle = SKIN.hoodie;
-        ctx.lineWidth = 15;
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.moveTo(lelbowX, lelbowY);
-        ctx.lineTo(lwX, lwY);
-        ctx.strokeStyle = SKIN.hoodieTrim;
-        ctx.lineWidth = 12;
-        ctx.lineCap = 'round';
-        ctx.stroke();
-      } else {
-        // Natural resting left arm at side/hip
-        const restElbowX = lsx - 12;
-        const restElbowY = h * 0.65;
-        const restHandX = cx - hrx * 1.5;
-        const restHandY = h * 0.88;
-
-        ctx.beginPath();
-        ctx.moveTo(lsx, lsy);
-        ctx.lineTo(restElbowX, restElbowY);
-        ctx.lineTo(restHandX, restHandY);
-        ctx.strokeStyle = SKIN.hoodie;
-        ctx.lineWidth = 14;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.stroke();
-
-        // Resting hand shape
-        ctx.beginPath();
-        ctx.ellipse(restHandX, restHandY, 11, 7, -0.4, 0, Math.PI * 2);
-        ctx.fillStyle = SKIN.shadow;
-        ctx.fill();
-      }
-
-      // 7. Depth sorted volumetric hands
-      // Compare average z to see which hand is closer to camera
-      const rightZ = activePose[0]?.z || 0;
-      const leftZ = activeSecondary ? activeSecondary[0]?.z || 0 : 999;
-
-      if (activeSecondary && leftZ < rightZ) {
-        // Left hand is in front
-        drawVolumetricHand(ctx, activePose, w, h, false);
-        drawVolumetricHand(ctx, activeSecondary, w, h, true);
-      } else {
-        // Right hand is in front (default)
-        if (activeSecondary) {
-          drawVolumetricHand(ctx, activeSecondary, w, h, true);
-        }
-        drawVolumetricHand(ctx, activePose, w, h, false);
-      }
-
-      ctx.restore();
-    },
-    [drawVolumetricHand],
-  );
-
-  // Main animation loop
+  // Main animation render loop
   useEffect(() => {
     if (!tokens.length || !activeToken) return;
 
@@ -646,29 +494,6 @@ export default function SignPlayer({
     stateRef.current.keyframeDuration = (keyframes[0].durationMs || 400) / playbackSpeed;
 
     const render = (now: number) => {
-      const canvas = canvasRef.current;
-      if (!canvas) {
-        animFrameRef.current = requestAnimationFrame(render);
-        return;
-      }
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-      const displayW = canvas.clientWidth || 340;
-      const displayH = canvas.clientHeight || height;
-
-      if (canvas.width !== displayW * dpr || canvas.height !== displayH * dpr) {
-        canvas.width = displayW * dpr;
-        canvas.height = displayH * dpr;
-      }
-
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, displayW, displayH);
-
-      // Interpolation progress
       const elapsed = now - stateRef.current.startTime;
       const duration = stateRef.current.keyframeDuration;
       const t = Math.min(1, Math.max(0, elapsed / duration));
@@ -679,37 +504,68 @@ export default function SignPlayer({
         ? interpolatePose(secStart!, stateRef.current.targetSecondary, t)
         : undefined;
 
-      if (viewMode === 'avatar') {
-        // 3D Human Avatar Renderer
-        drawHumanAvatar(ctx, activePose, activeSecondary, displayW, displayH, activeToken, now);
-      } else {
-        // Technical 21-point MediaPipe X-Ray Skeleton Renderer
-        ctx.fillStyle = '#081412';
-        ctx.fillRect(0, 0, displayW, displayH);
+      if (viewMode === '3d' && threeRef.current) {
+        const {
+          renderer,
+          scene,
+          camera,
+          dominantGroup,
+          secondaryGroup,
+          dominantJoints,
+          dominantBones,
+          secondaryJoints,
+          secondaryBones,
+        } = threeRef.current;
 
-        // Studio center guidelines
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(displayW * 0.5, 0);
-        ctx.lineTo(displayW * 0.5, displayH);
-        ctx.moveTo(0, displayH * 0.5);
-        ctx.lineTo(displayW, displayH * 0.5);
-        ctx.stroke();
+        // Apply interactive orbit rotation
+        dominantGroup.rotation.set(orbitRot.x, orbitRot.y, 0);
+        secondaryGroup.rotation.set(orbitRot.x, orbitRot.y, 0);
 
-        if (activeSecondary) {
-          drawSkeletonHand(ctx, activeSecondary, displayW, displayH, true);
+        // Update 3D meshes
+        update3DHand(activePose, dominantJoints, dominantBones, dominantGroup, true);
+        update3DHand(activeSecondary || REST_POSE, secondaryJoints, secondaryBones, secondaryGroup, Boolean(activeSecondary));
+
+        renderer.render(scene, camera);
+      } else if (canvasRef.current && viewMode === 'skeleton') {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+          const w = canvas.clientWidth || 360;
+          const h = canvas.clientHeight || height;
+
+          if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+            canvas.width = w * dpr;
+            canvas.height = h * dpr;
+          }
+
+          ctx.save();
+          ctx.scale(dpr, dpr);
+          ctx.fillStyle = '#07120F';
+          ctx.fillRect(0, 0, w, h);
+
+          // Grid
+          ctx.strokeStyle = 'rgba(183, 255, 86, 0.05)';
+          ctx.lineWidth = 1;
+          for (let gx = 0; gx < w; gx += 24) {
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, h);
+            ctx.stroke();
+          }
+
+          if (activeSecondary) {
+            drawSkeletonHand(ctx, activeSecondary, w, h, true);
+          }
+          drawSkeletonHand(ctx, activePose, w, h, false);
+          ctx.restore();
         }
-        drawSkeletonHand(ctx, activePose, displayW, displayH, false);
       }
 
-      ctx.restore();
-
-      // Check if current keyframe finished
+      // Check keyframe progress
       if (isPlaying && t >= 1) {
         const nextKeyframeIdx = stateRef.current.keyframeIdx + 1;
         if (nextKeyframeIdx < keyframes.length) {
-          // Advance to next keyframe of the current sign
           stateRef.current.keyframeIdx = nextKeyframeIdx;
           stateRef.current.currentPose = stateRef.current.targetPose;
           stateRef.current.targetPose = keyframes[nextKeyframeIdx].landmarks;
@@ -718,12 +574,10 @@ export default function SignPlayer({
           stateRef.current.keyframeDuration = (keyframes[nextKeyframeIdx].durationMs || 400) / playbackSpeed;
           stateRef.current.startTime = now;
         } else {
-          // Advance to next word/token
           const nextTokenIdx = tokenIndex + 1;
           if (nextTokenIdx < tokens.length) {
             setTokenIndex(nextTokenIdx);
           } else {
-            // Sequence completed
             onSignComplete?.();
             if (isLooping) {
               setTokenIndex(0);
@@ -750,11 +604,42 @@ export default function SignPlayer({
     playbackSpeed,
     isLooping,
     viewMode,
+    orbitRot,
     onSignComplete,
+    update3DHand,
     drawSkeletonHand,
-    drawHumanAvatar,
     height,
   ]);
+
+  // Touch / Pointer Drag to rotate 3D Hand in Space
+  const handlePointerDown = (e: any) => {
+    isDraggingRef.current = true;
+    const clientX = e.clientX ?? e.nativeEvent?.pageX ?? 0;
+    const clientY = e.clientY ?? e.nativeEvent?.pageY ?? 0;
+    dragStartRef.current = { x: clientX, y: clientY };
+  };
+
+  const handlePointerMove = (e: any) => {
+    if (!isDraggingRef.current) return;
+    const clientX = e.clientX ?? e.nativeEvent?.pageX ?? 0;
+    const clientY = e.clientY ?? e.nativeEvent?.pageY ?? 0;
+    const dx = clientX - dragStartRef.current.x;
+    const dy = clientY - dragStartRef.current.y;
+    dragStartRef.current = { x: clientX, y: clientY };
+
+    setOrbitRot((prev) => ({
+      x: Math.max(-0.9, Math.min(0.9, prev.x + dy * 0.008)),
+      y: Math.max(-1.4, Math.min(1.4, prev.y + dx * 0.008)),
+    }));
+  };
+
+  const handlePointerUp = () => {
+    isDraggingRef.current = false;
+  };
+
+  const resetOrbit = () => {
+    setOrbitRot({ x: 0, y: 0 });
+  };
 
   const handlePrev = () => {
     setTokenIndex((curr) => Math.max(0, curr - 1));
@@ -771,7 +656,7 @@ export default function SignPlayer({
   if (!tokens.length) {
     return (
       <View style={[styles.emptyContainer, { height }]}>
-        <Ionicons name="person-outline" size={36} color="#4E6760" />
+        <Ionicons name="hand-left-outline" size={36} color="#4E6760" />
         <Text style={styles.emptyText}>Enter text or speak to generate sign translation</Text>
       </View>
     );
@@ -779,21 +664,26 @@ export default function SignPlayer({
 
   return (
     <View style={styles.container}>
-      {/* 2D/3D Animated Hand Landmark Canvas */}
-      <View style={[styles.canvasWrapper, { height }]}>
+      {/* 3D WebGL / Kinematic Landmark Viewport */}
+      <View
+        style={[styles.canvasWrapper, { height }]}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+      >
         {Platform.OS === 'web' ? (
           <canvas
             ref={canvasRef as any}
-            style={{ width: '100%', height: '100%', display: 'block' }}
+            style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab' }}
           />
         ) : (
           <View style={styles.fallbackRig}>
-            <Ionicons name="person" size={64} color="#B7FF56" />
+            <Ionicons name="hand-left" size={64} color="#B7FF56" />
           </View>
         )}
 
-        {/* Current Gloss Banner Floating Over Canvas */}
-        <View style={styles.glossOverlay}>
+        {/* Floating Gloss Banner & View Mode Toggle */}
+        <View style={styles.glossOverlay} pointerEvents="box-none">
           <View style={styles.glossTopRow}>
             <View style={styles.glossBadge}>
               <Text style={styles.glossBadgeText}>
@@ -805,33 +695,66 @@ export default function SignPlayer({
               </Text>
             </View>
 
-            {/* Avatar / Skeleton Switcher Pill */}
-            <Pressable
-              onPress={() => setViewMode((m) => (m === 'avatar' ? 'skeleton' : 'avatar'))}
-              style={[styles.viewModeToggle, viewMode === 'avatar' && styles.viewModeToggleActive]}
-              accessibilityRole="button"
-              accessibilityLabel={`Switch to ${viewMode === 'avatar' ? 'X-Ray Skeleton' : '3D Human Avatar'} view`}
-            >
-              <Ionicons
-                name={viewMode === 'avatar' ? 'person' : 'hardware-chip-outline'}
-                size={12}
-                color={viewMode === 'avatar' ? '#07110F' : '#B7FF56'}
-              />
-              <Text
-                style={[
-                  styles.viewModeToggleText,
-                  viewMode === 'avatar' && styles.viewModeToggleTextActive,
-                ]}
+            {/* View Mode Switcher: True 3D WebGL PBR vs X-Ray */}
+            <View style={styles.modePillGroup}>
+              <Pressable
+                onPress={() => setViewMode('3d')}
+                style={[styles.viewModeToggle, viewMode === '3d' && styles.viewModeToggleActive]}
+                accessibilityRole="button"
+                accessibilityLabel="3D WebGL Studio view"
               >
-                {viewMode === 'avatar' ? '3D Human Avatar' : 'X-Ray Skeleton'}
-              </Text>
-            </Pressable>
+                <Ionicons
+                  name="cube"
+                  size={12}
+                  color={viewMode === '3d' ? '#07110F' : '#B7FF56'}
+                />
+                <Text
+                  style={[
+                    styles.viewModeToggleText,
+                    viewMode === '3d' && styles.viewModeToggleTextActive,
+                  ]}
+                >
+                  3D WebGL Hand
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setViewMode('skeleton')}
+                style={[styles.viewModeToggle, viewMode === 'skeleton' && styles.viewModeToggleActive]}
+                accessibilityRole="button"
+                accessibilityLabel="MediaPipe X-Ray Skeleton view"
+              >
+                <Ionicons
+                  name="hardware-chip-outline"
+                  size={12}
+                  color={viewMode === 'skeleton' ? '#07110F' : '#B7FF56'}
+                />
+                <Text
+                  style={[
+                    styles.viewModeToggleText,
+                    viewMode === 'skeleton' && styles.viewModeToggleTextActive,
+                  ]}
+                >
+                  X-Ray
+                </Text>
+              </Pressable>
+            </View>
           </View>
 
           <Text style={styles.glossTitle}>{activeToken.gloss}</Text>
           <Text style={styles.glossDesc} numberOfLines={2}>
             {activeToken.sign.description}
           </Text>
+
+          {/* Interactive 3D Orbit Drag Hint */}
+          {viewMode === '3d' && (
+            <Pressable onPress={resetOrbit} style={styles.dragHintRow}>
+              <Ionicons name="sync-outline" size={12} color="#8EA49B" />
+              <Text style={styles.dragHintText}>
+                Drag to rotate 3D hand angle in real time • Tap to reset
+              </Text>
+            </Pressable>
+          )}
         </View>
 
         {/* Playback Controls Overlay Bar */}
@@ -928,6 +851,62 @@ export default function SignPlayer({
           );
         })}
       </ScrollView>
+
+      {/* Authentic ASL Linguistic & Anatomical Signing Guide (Industry Standard) */}
+      {guideInfo && (
+        <View style={styles.guideCard}>
+          <View style={styles.guideHeaderRow}>
+            <View style={styles.guideTag}>
+              <Ionicons name="book-outline" size={13} color="#B7FF56" />
+              <Text style={styles.guideTagText}>ASL LINGUISTIC SIGNING GUIDE</Text>
+            </View>
+            <Text style={styles.guideGloss}>{activeToken.gloss}</Text>
+          </View>
+
+          {/* Handshape & Palm Orientation */}
+          <View style={styles.guideSpecsGrid}>
+            <View style={styles.guideSpecItem}>
+              <View style={styles.specIconCircle}>
+                <Ionicons name="hand-right" size={14} color="#00E5FF" />
+              </View>
+              <View style={styles.specCopy}>
+                <Text style={styles.specLabel}>HANDSHAPE CONFIGURATION</Text>
+                <Text style={styles.specValue}>{guideInfo.handshape}</Text>
+              </View>
+            </View>
+
+            <View style={styles.guideSpecItem}>
+              <View style={styles.specIconCircle}>
+                <Ionicons name="compass-outline" size={14} color="#FFD043" />
+              </View>
+              <View style={styles.specCopy}>
+                <Text style={styles.specLabel}>PALM ORIENTATION</Text>
+                <Text style={styles.specValue}>{guideInfo.palmFacing}</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Physical Movement Trajectory */}
+          <View style={styles.guideTrajectoryBox}>
+            <View style={styles.trajectoryHeader}>
+              <Ionicons name="arrow-forward-circle-outline" size={14} color="#C8FF72" />
+              <Text style={styles.trajectoryTitle}>MOVEMENT TRAJECTORY & EXECUTION</Text>
+            </View>
+            <Text style={styles.trajectoryText}>{guideInfo.motionGuide}</Text>
+          </View>
+
+          {/* Non-Manual Markers (NMM / Face Expression) */}
+          <View style={styles.guideNmmBox}>
+            <View style={styles.trajectoryHeader}>
+              <Ionicons name="happy-outline" size={14} color="#FF8A7A" />
+              <Text style={[styles.trajectoryTitle, { color: '#FF8A7A' }]}>
+                NON-MANUAL MARKERS (FACIAL & HEAD GRAMMAR)
+              </Text>
+            </View>
+            <Text style={styles.nmmText}>{guideInfo.facialNMM}</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -938,11 +917,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#07110F',
     borderRadius: 16,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#19362A',
   },
   canvasWrapper: {
     width: '100%',
     position: 'relative',
-    backgroundColor: '#07130F',
+    backgroundColor: '#050D0B',
   },
   fallbackRig: {
     flex: 1,
@@ -954,7 +935,6 @@ const styles = StyleSheet.create({
     top: 12,
     left: 14,
     right: 14,
-    pointerEvents: 'box-none',
   },
   glossTopRow: {
     flexDirection: 'row',
@@ -977,20 +957,26 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.6,
   },
+  modePillGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(9, 21, 17, 0.85)',
+    borderRadius: 8,
+    padding: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(183, 255, 86, 0.25)',
+    gap: 3,
+  },
   viewModeToggle: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    backgroundColor: 'rgba(10, 24, 20, 0.75)',
-    borderWidth: 1,
-    borderColor: 'rgba(183, 255, 86, 0.35)',
+    gap: 4,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 8,
+    borderRadius: 6,
   },
   viewModeToggleActive: {
     backgroundColor: '#B7FF56',
-    borderColor: '#B7FF56',
   },
   viewModeToggleText: {
     color: '#B7FF56',
@@ -1006,7 +992,7 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: '900',
     letterSpacing: 0.5,
-    textShadowColor: 'rgba(0, 0, 0, 0.85)',
+    textShadowColor: 'rgba(0, 0, 0, 0.9)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
@@ -1015,9 +1001,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
     lineHeight: 16,
-    textShadowColor: 'rgba(0, 0, 0, 0.85)',
+    textShadowColor: 'rgba(0, 0, 0, 0.9)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  dragHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  dragHintText: {
+    color: '#8EA49B',
+    fontSize: 10,
+    fontWeight: '500',
   },
   controlsBar: {
     position: 'absolute',
@@ -1027,7 +1029,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(7, 17, 15, 0.85)',
+    backgroundColor: 'rgba(7, 17, 15, 0.88)',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
@@ -1077,7 +1079,9 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    backgroundColor: '#091512',
+    borderTopWidth: 1,
+    borderTopColor: '#162F24',
   },
   tokenChip: {
     paddingHorizontal: 12,
@@ -1111,6 +1115,110 @@ const styles = StyleSheet.create({
   },
   tokenSubtextActive: {
     color: '#DCEAE4',
+  },
+  guideCard: {
+    backgroundColor: '#0B1914',
+    padding: 14,
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#173628',
+  },
+  guideHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  guideTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  guideTagText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  guideGloss: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  guideSpecsGrid: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  guideSpecItem: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#07120E',
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#19362A',
+    gap: 8,
+  },
+  specIconCircle: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  specCopy: {
+    flex: 1,
+  },
+  specLabel: {
+    color: '#769486',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  specValue: {
+    color: '#E1EDE7',
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 15,
+  },
+  guideTrajectoryBox: {
+    backgroundColor: '#07120E',
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#19362A',
+    gap: 4,
+  },
+  trajectoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  trajectoryTitle: {
+    color: '#C8FF72',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  trajectoryText: {
+    color: '#D2E2DB',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  guideNmmBox: {
+    backgroundColor: '#07120E',
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#2D1E1E',
+    gap: 4,
+  },
+  nmmText: {
+    color: '#FFB8B8',
+    fontSize: 12,
+    lineHeight: 17,
   },
   emptyContainer: {
     width: '100%',

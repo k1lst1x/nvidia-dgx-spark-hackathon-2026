@@ -323,33 +323,33 @@ export default function TranslateScreen() {
             <SignPlayer tokens={result.tokens} autoPlay={true} height={340} />
           </View>
 
-          {/* 3D Avatar & Sign Guide Information */}
+          {/* 3D WebGL PBR Hand & Linguistic Guide Info */}
           <View style={s.legendCard}>
             <View style={s.avatarBadgeRow}>
               <View style={s.avatarActivePill}>
-                <Ionicons name="person" size={13} color="#07110F" />
-                <Text style={s.avatarActivePillText}>Alex — 3D Avatar Signer</Text>
+                <Ionicons name="cube" size={13} color="#07110F" />
+                <Text style={s.avatarActivePillText}>Three.js WebGL 3D Studio</Text>
               </View>
-              <Text style={s.nmmTag}>Linguistic NMM Active</Text>
+              <Text style={s.nmmTag}>PBR Lighting & 360° Drag Orbit</Text>
             </View>
 
             <Text style={s.avatarDesc}>
-              Includes Non-Manual Markers (NMM): facial expressions, furrowed brows on WH-questions,
-              welcoming smiles, eye blinking, and volumetric hand kinematics with fingernail detail.
+              Hardware-accelerated 3D WebGL hand rendering with real-time specular highlights,
+              anatomical finger tapering, depth sorting, and complete linguistic ASL execution guides.
             </Text>
 
             <View style={s.legendItems}>
               <View style={s.legendItem}>
                 <View style={[s.legendDot, { backgroundColor: '#B7FF56' }]} />
-                <Text style={s.legendText}>3D Avatar / X-Ray Toggle</Text>
+                <Text style={s.legendText}>360° Real-time Orbit Drag</Text>
               </View>
               <View style={s.legendItem}>
                 <View style={[s.legendDot, { backgroundColor: '#00E5FF' }]} />
-                <Text style={s.legendText}>Expressive Brow Grammar</Text>
+                <Text style={s.legendText}>Handshape & Palm Orientation</Text>
               </View>
               <View style={s.legendItem}>
                 <View style={[s.legendDot, { backgroundColor: '#FFD043' }]} />
-                <Text style={s.legendText}>Organic Elbows & Wrists</Text>
+                <Text style={s.legendText}>Physical Trajectory Guide</Text>
               </View>
             </View>
           </View>
