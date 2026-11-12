@@ -546,6 +546,9 @@ export default function HandTracker({
             facingMode: 'user',
             width: { ideal: 1280 },
             height: { ideal: 720 },
+            // Ask for a steady 30 fps. The word model reads 64-frame windows
+            // (~2 s at 30 fps); a higher rate would shorten that window.
+            frameRate: { ideal: 30 },
           },
           audio: false,
         });
@@ -578,8 +581,9 @@ export default function HandTracker({
           }
 
           if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
+            // Resizing a canvas reallocates it, so only do it when the size changes.
+            if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+            if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
 
             if (video.currentTime !== lastVideoTime) {
               lastVideoTime = video.currentTime;
