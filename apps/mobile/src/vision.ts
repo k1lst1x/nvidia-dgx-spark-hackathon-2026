@@ -566,7 +566,14 @@ export function useVisionLoop(camera: RefObject<CameraView | null>, mode: Assist
         }
       }
       const captureStartedAt = performanceNow();
-      const picture = await camera.current.takePictureAsync({ quality: 0.7, skipProcessing: true });
+      // Scene Assist benefits from a higher-quality source image: it preserves
+      // detail for smaller objects before the local model letterboxes the
+      // frame, and for the optional server tracker. Sign capture stays at the
+      // previous quality to keep its overlapping three-frame windows quick.
+      const picture = await camera.current.takePictureAsync({
+        quality: mode === 'scene' ? 0.85 : 0.7,
+        skipProcessing: true,
+      });
       if (!picture?.uri) throw new Error('Camera did not return an image');
       const capturedAt = Date.now();
       const captureEndedAt = performanceNow();

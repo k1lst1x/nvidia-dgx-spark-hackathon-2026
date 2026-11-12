@@ -7,7 +7,9 @@ import type { DetectionResult, LocalDetection } from './detector.types';
 const INPUT_SIZE = 416;
 const SCORE_THRESHOLD = 0.5;
 const IOU_THRESHOLD = 0.45;
-const MAX_RESULTS = 12;
+// Keep enough independent objects for a busy room. The downstream UI and
+// speech summary still prioritize the nearest/highest-confidence results.
+const MAX_RESULTS = 20;
 const MAX_FRAME_COVERAGE = 0.82;
 const LABEL_CONFIDENCE_FLOORS: Record<string, number> = {
   frisbee: 0.72,
