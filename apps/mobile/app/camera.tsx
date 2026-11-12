@@ -67,7 +67,6 @@ export default function CameraScreen() {
   // Decides when the confirmed signs form a finished sentence (src/signUtterance.ts).
   const utteranceController = useRef(new UtteranceController());
   const [utterance, setUtterance] = useState<UtteranceState>(initialUtterance);
-  const spokenUtterance = useRef(0);
   const capturedSequence = useRef<number[][]>([]);
   const capturedFrames = useRef<string[]>([]);
   const cameraRef = useRef<CameraView>(null);
@@ -181,6 +180,12 @@ export default function CameraScreen() {
         : utterance.phase === 'signing'
           ? (onDeviceWords.length ? 'Signing · provisional' : 'Signing detected')
           : signContext.handCount > 0 ? 'Tracking hands' : 'Ready · show your hands';
+  // What the model is seeing right now, with its other guesses, so the signer
+  // can read the meaning instead of hearing it.
+  const liveGuesses = (signContext.wordState?.top3 ?? [])
+    .filter((guess) => guess.label && guess.confidence > 0.01)
+    .map((guess) => ({ word: signWordToEnglish(guess.label), percent: Math.round(guess.confidence * 100) }));
+  const liveWord = offlineWord ? signWordToEnglish(offlineWord) : '';
   const currentLetter = signContext.aslState?.currentLetter;
   const spelledText = signContext.aslState?.spelledText;
   const isHoldingLetter = signContext.aslState?.isHolding;
@@ -317,14 +322,8 @@ export default function CameraScreen() {
     return () => clearInterval(timer);
   }, [usesBrowserHandTracking, signContext.handCount, signContext.wordState?.commitCount]);
 
-  // Speak once, when a sentence is final. Provisional signs are shown, never
-  // spoken, and an unrecognized attempt is not turned into words.
-  useEffect(() => {
-    if (utterance.finalizedCount <= spokenUtterance.current) return;
-    spokenUtterance.current = utterance.finalizedCount;
-    if (utterance.outcome !== 'recognized' || translation) return;
-    speak(glossToEnglish(utterance.words));
-  }, [utterance.finalizedCount]);
+  // Sign to voice is silent by design: recognized words appear on screen, and
+  // nothing is spoken unless the signer taps Speak.
 
   // Shared Sight: check this room's shared reports every few seconds. On
   // arrival, say what is already reported (hazards first); afterwards, say
@@ -658,6 +657,17 @@ export default function CameraScreen() {
                   </Pressable>
                 </View>
               </View>
+              <View style={c.liveRow} accessibilityLiveRegion="polite" accessibilityLabel={liveWord ? `Seeing: ${liveWord}` : 'Waiting for a sign'}>
+                <Text style={c.liveLabel}>SEEING</Text>
+                <Text style={[c.liveWord, !liveWord && c.liveWordEmpty]} numberOfLines={1}>{liveWord || '—'}</Text>
+                <View style={c.liveGuesses}>
+                  {liveGuesses.map((guess, index) => (
+                    <View key={`${guess.word}-${index}`} style={[c.liveChip, index === 0 && c.liveChipTop]}>
+                      <Text style={[c.liveChipText, index === 0 && c.liveChipTextTop]}>{guess.word} {guess.percent}%</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
               <Text style={[c.aslWordText, !displayedTranscript && !spelledText && !onDeviceSentence && !offlineWord && c.aslWordTextEmpty, contextBoardIsError && c.aslWordTextError]}>
                 {contextBoardText}
                 <Text style={c.aslCursor}>_</Text>
@@ -668,7 +678,7 @@ export default function CameraScreen() {
                   disabled={utterance.phase !== 'signing' && utterance.phase !== 'possible_end'}
                   style={[c.aslActionBtn, c.aslFinishBtn, utterance.phase !== 'signing' && utterance.phase !== 'possible_end' && c.aslSpeakMiniBtnDisabled]}
                   accessibilityRole="button"
-                  accessibilityLabel="Finish sentence and speak it"
+                  accessibilityLabel="Finish sentence"
                 >
                   <Ionicons name="checkmark-done" size={14} color="#07110F" />
                   <Text style={[c.aslActionText, c.aslFinishText]}>Finish sentence</Text>
@@ -990,6 +1000,15 @@ const c = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
   },
+  liveRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 6 },
+  liveLabel: { color: '#769286', fontSize: 9, fontWeight: '800', letterSpacing: 1.1 },
+  liveWord: { color: '#B7FF56', fontSize: 30, fontWeight: '900', letterSpacing: 0.4, textTransform: 'uppercase' },
+  liveWordEmpty: { color: '#4E6B5E' },
+  liveGuesses: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, flex: 1, justifyContent: 'flex-end' },
+  liveChip: { borderRadius: 999, borderWidth: 1, borderColor: '#2B4237', paddingHorizontal: 8, paddingVertical: 3 },
+  liveChipTop: { borderColor: '#B7FF56', backgroundColor: 'rgba(183,255,86,0.12)' },
+  liveChipText: { color: '#9EB5AA', fontSize: 11, fontWeight: '700' },
+  liveChipTextTop: { color: '#DFFFB0' },
   aslWordText: {
     color: '#F7FBF8',
     fontSize: 24,
