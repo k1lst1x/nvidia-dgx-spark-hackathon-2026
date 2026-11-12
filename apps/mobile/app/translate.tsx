@@ -323,33 +323,33 @@ export default function TranslateScreen() {
             <SignPlayer tokens={result.tokens} autoPlay={true} height={340} />
           </View>
 
-          {/* Legend & Accessibility Information */}
+          {/* 3D Avatar & Sign Guide Information */}
           <View style={s.legendCard}>
-            <Text style={s.legendTitle}>ANATOMICAL COLOR CODING</Text>
+            <View style={s.avatarBadgeRow}>
+              <View style={s.avatarActivePill}>
+                <Ionicons name="person" size={13} color="#07110F" />
+                <Text style={s.avatarActivePillText}>Alex — 3D Avatar Signer</Text>
+              </View>
+              <Text style={s.nmmTag}>Linguistic NMM Active</Text>
+            </View>
+
+            <Text style={s.avatarDesc}>
+              Includes Non-Manual Markers (NMM): facial expressions, furrowed brows on WH-questions,
+              welcoming smiles, eye blinking, and volumetric hand kinematics with fingernail detail.
+            </Text>
+
             <View style={s.legendItems}>
               <View style={s.legendItem}>
-                <View style={[s.legendDot, { backgroundColor: '#FFB800' }]} />
-                <Text style={s.legendText}>Thumb</Text>
+                <View style={[s.legendDot, { backgroundColor: '#B7FF56' }]} />
+                <Text style={s.legendText}>3D Avatar / X-Ray Toggle</Text>
               </View>
               <View style={s.legendItem}>
                 <View style={[s.legendDot, { backgroundColor: '#00E5FF' }]} />
-                <Text style={s.legendText}>Index</Text>
+                <Text style={s.legendText}>Expressive Brow Grammar</Text>
               </View>
               <View style={s.legendItem}>
-                <View style={[s.legendDot, { backgroundColor: '#00E676' }]} />
-                <Text style={s.legendText}>Middle</Text>
-              </View>
-              <View style={s.legendItem}>
-                <View style={[s.legendDot, { backgroundColor: '#7C4DFF' }]} />
-                <Text style={s.legendText}>Ring</Text>
-              </View>
-              <View style={s.legendItem}>
-                <View style={[s.legendDot, { backgroundColor: '#FF4081' }]} />
-                <Text style={s.legendText}>Pinky</Text>
-              </View>
-              <View style={s.legendItem}>
-                <View style={[s.legendDot, { backgroundColor: 'rgba(183, 255, 86, 0.7)' }]} />
-                <Text style={s.legendText}>Non-dominant</Text>
+                <View style={[s.legendDot, { backgroundColor: '#FFD043' }]} />
+                <Text style={s.legendText}>Organic Elbows & Wrists</Text>
               </View>
             </View>
           </View>
@@ -700,6 +700,35 @@ const s = StyleSheet.create({
     borderColor: '#162E25',
     padding: 12,
     gap: 8,
+  },
+  avatarBadgeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  avatarActivePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#B7FF56',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    gap: 5,
+  },
+  avatarActivePillText: {
+    color: '#07110F',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  nmmTag: {
+    color: '#C8FF72',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  avatarDesc: {
+    color: '#8EA49B',
+    fontSize: 12,
+    lineHeight: 16,
   },
   legendTitle: {
     color: '#667C73',

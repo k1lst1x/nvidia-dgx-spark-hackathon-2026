@@ -21,6 +21,7 @@ export type SignPlayerProps = {
   autoPlay?: boolean;
   onSignComplete?: () => void;
   height?: number;
+  initialMode?: 'avatar' | 'skeleton';
 };
 
 // Color palette for anatomical finger segments (standard MediaPipe accessibility scheme)
@@ -33,6 +34,24 @@ const FINGER_COLORS = {
   palm: 'rgba(255, 255, 255, 0.4)',
   joint: '#FFFFFF',
   secondaryHand: 'rgba(183, 255, 86, 0.65)',
+};
+
+// Natural human skin, hair, and clothing palette
+const SKIN = {
+  base: '#ECC09E',
+  shadow: '#CFA07E',
+  highlight: '#FCE4D0',
+  blush: 'rgba(224, 112, 112, 0.18)',
+  lip: '#C27474',
+  nail: '#F5D3BD',
+  nailShine: '#FFFFFF',
+  hair: '#22201F',
+  hairHighlight: '#3B3734',
+  hoodie: '#10261E',
+  hoodieShadow: '#091612',
+  hoodieTrim: '#1E4738',
+  badge: '#0D201A',
+  accent: '#B7FF56',
 };
 
 function getBoneColor(startIdx: number, endIdx: number): string {
@@ -48,12 +67,14 @@ export default function SignPlayer({
   tokens,
   autoPlay = true,
   onSignComplete,
-  height = 320,
+  height = 340,
+  initialMode = 'avatar',
 }: SignPlayerProps) {
   const [tokenIndex, setTokenIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(autoPlay);
   const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 1.0 | 1.5>(1.0);
   const [isLooping, setIsLooping] = useState(true);
+  const [viewMode, setViewMode] = useState<'avatar' | 'skeleton'>(initialMode);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
@@ -69,8 +90,8 @@ export default function SignPlayer({
 
   const activeToken = tokens[tokenIndex];
 
-  // Draw hand skeleton onto canvas
-  const drawHand = useCallback(
+  // Draw technical 21-point MediaPipe skeleton
+  const drawSkeletonHand = useCallback(
     (
       ctx: CanvasRenderingContext2D,
       pose: HandPose,
@@ -121,6 +142,494 @@ export default function SignPlayer({
     [],
   );
 
+  // Draw volumetric human hand with skin tone, organic palm & finger contours and fingernails
+  const drawVolumetricHand = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      pose: HandPose,
+      w: number,
+      h: number,
+      isSecondary = false,
+    ) => {
+      if (!pose || !pose.length) return;
+
+      const wrist = pose[0];
+      const thumbCmc = pose[1];
+      const indexMcp = pose[5];
+      const middleMcp = pose[9];
+      const ringMcp = pose[13];
+      const pinkyMcp = pose[17];
+
+      // 1. Palm base fill
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(wrist.x * w, wrist.y * h);
+      ctx.lineTo(thumbCmc.x * w, thumbCmc.y * h);
+      ctx.lineTo(indexMcp.x * w, indexMcp.y * h);
+      ctx.lineTo(middleMcp.x * w, middleMcp.y * h);
+      ctx.lineTo(ringMcp.x * w, ringMcp.y * h);
+      ctx.lineTo(pinkyMcp.x * w, pinkyMcp.y * h);
+      ctx.closePath();
+
+      const palmGrad = ctx.createLinearGradient(
+        wrist.x * w,
+        wrist.y * h,
+        middleMcp.x * w,
+        middleMcp.y * h,
+      );
+      palmGrad.addColorStop(0, isSecondary ? '#BAA088' : SKIN.shadow);
+      palmGrad.addColorStop(1, isSecondary ? '#DFCAA6' : SKIN.base);
+      ctx.fillStyle = palmGrad;
+      ctx.fill();
+
+      // Soft palm outline & shadow
+      ctx.strokeStyle = isSecondary ? 'rgba(90, 75, 60, 0.35)' : 'rgba(120, 80, 50, 0.4)';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      // 2. Volumetric finger segments [MCP, PIP, DIP, TIP]
+      const fingerChains = [
+        [1, 2, 3, 4], // Thumb
+        [5, 6, 7, 8], // Index
+        [9, 10, 11, 12], // Middle
+        [13, 14, 15, 16], // Ring
+        [17, 18, 19, 20], // Pinky
+      ];
+
+      for (const chain of fingerChains) {
+        for (let seg = 0; seg < chain.length - 1; seg++) {
+          const p1 = pose[chain[seg]];
+          const p2 = pose[chain[seg + 1]];
+          if (!p1 || !p2) continue;
+
+          const isTip = seg === chain.length - 2;
+          const strokeWidth = seg === 0 ? 8.5 : seg === 1 ? 7.2 : 6.0;
+
+          // Finger segment bone/flesh
+          ctx.beginPath();
+          ctx.moveTo(p1.x * w, p1.y * h);
+          ctx.lineTo(p2.x * w, p2.y * h);
+          ctx.lineWidth = isSecondary ? strokeWidth * 0.9 : strokeWidth;
+          ctx.lineCap = 'round';
+          ctx.strokeStyle = isSecondary ? '#D8C3A5' : SKIN.base;
+          ctx.stroke();
+
+          // Subtle joint highlight/crease
+          ctx.beginPath();
+          ctx.arc(p2.x * w, p2.y * h, strokeWidth * 0.4, 0, Math.PI * 2);
+          ctx.fillStyle = isSecondary ? '#C0AB8E' : SKIN.highlight;
+          ctx.fill();
+
+          // Fingernail on tip
+          if (isTip) {
+            const tip = p2;
+            const dip = p1;
+            const dx = tip.x - dip.x;
+            const dy = tip.y - dip.y;
+            const angle = Math.atan2(dy, dx);
+
+            ctx.save();
+            ctx.translate(tip.x * w, tip.y * h);
+            ctx.rotate(angle);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 3.2, 2.0, 0, 0, Math.PI * 2);
+            ctx.fillStyle = SKIN.nail;
+            ctx.fill();
+
+            // Nail specular highlight
+            ctx.beginPath();
+            ctx.arc(0.8, -0.6, 0.8, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+      }
+
+      ctx.restore();
+    },
+    [],
+  );
+
+  // Draw full 3D human avatar signer with torso, expressive face (NMM), organic arms and hands
+  const drawHumanAvatar = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      activePose: HandPose,
+      activeSecondary: HandPose | undefined,
+      w: number,
+      h: number,
+      token: ASLToken,
+      now: number,
+    ) => {
+      // 1. Studio backdrop lighting
+      const bgGrad = ctx.createRadialGradient(
+        w * 0.5,
+        h * 0.35,
+        15,
+        w * 0.5,
+        h * 0.4,
+        Math.max(w, h) * 0.75,
+      );
+      bgGrad.addColorStop(0, '#122D24');
+      bgGrad.addColorStop(0.55, '#0A1814');
+      bgGrad.addColorStop(1, '#06100D');
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      // Subtle atmospheric grid floor
+      ctx.strokeStyle = 'rgba(183, 255, 86, 0.04)';
+      ctx.lineWidth = 1;
+      for (let gy = h * 0.75; gy < h; gy += 18) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(w, gy);
+        ctx.stroke();
+      }
+
+      // Proportions & subtle breathing
+      const breath = Math.sin(now / 1300) * 1.6;
+      const cx = w * 0.5;
+      const headY = h * 0.22 + breath * 0.4;
+      const hrx = Math.min(w * 0.11, h * 0.135);
+      const hry = hrx * 1.28;
+
+      const lsx = cx - hrx * 2.6;
+      const lsy = h * 0.45 + breath;
+      const rsx = cx + hrx * 2.6;
+      const rsy = h * 0.45 + breath;
+
+      // 2. Torso & Tech Hoodie
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(lsx, lsy);
+      ctx.bezierCurveTo(cx - hrx * 1.6, lsy - 4, cx - hrx * 0.8, h * 0.44, cx - hrx * 0.4, h * 0.45);
+      ctx.lineTo(cx, h * 0.465); // collar notch
+      ctx.lineTo(cx + hrx * 0.4, h * 0.45);
+      ctx.bezierCurveTo(cx + hrx * 0.8, h * 0.44, cx + hrx * 1.6, lsy - 4, rsx, rsy);
+      ctx.lineTo(w * 0.82, h);
+      ctx.lineTo(w * 0.18, h);
+      ctx.closePath();
+
+      const hoodieGrad = ctx.createLinearGradient(cx, h * 0.42, cx, h);
+      hoodieGrad.addColorStop(0, SKIN.hoodie);
+      hoodieGrad.addColorStop(1, SKIN.hoodieShadow);
+      ctx.fillStyle = hoodieGrad;
+      ctx.fill();
+
+      // Hoodie zipper line & collar trim
+      ctx.beginPath();
+      ctx.moveTo(cx, h * 0.465);
+      ctx.lineTo(cx, h);
+      ctx.strokeStyle = SKIN.hoodieTrim;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // SFBU ASL Emblem Badge on left chest
+      const badgeX = cx - hrx * 1.45;
+      const badgeY = h * 0.56 + breath;
+      ctx.beginPath();
+      ctx.roundRect(badgeX - 16, badgeY - 7, 32, 14, 4);
+      ctx.fillStyle = SKIN.badge;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(183, 255, 86, 0.45)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = SKIN.accent;
+      ctx.font = 'bold 7px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('SFBU ASL', badgeX, badgeY);
+
+      // 3. Neck
+      ctx.beginPath();
+      ctx.moveTo(cx - hrx * 0.35, headY + hry * 0.65);
+      ctx.lineTo(cx - hrx * 0.35, h * 0.46);
+      ctx.lineTo(cx + hrx * 0.35, h * 0.46);
+      ctx.lineTo(cx + hrx * 0.35, headY + hry * 0.65);
+      ctx.closePath();
+
+      const neckGrad = ctx.createLinearGradient(cx, headY + hry * 0.65, cx, h * 0.46);
+      neckGrad.addColorStop(0, SKIN.shadow);
+      neckGrad.addColorStop(1, SKIN.base);
+      ctx.fillStyle = neckGrad;
+      ctx.fill();
+
+      // 4. Head Oval & Face
+      ctx.beginPath();
+      ctx.ellipse(cx, headY, hrx, hry, 0, 0, Math.PI * 2);
+      const faceGrad = ctx.createRadialGradient(
+        cx - hrx * 0.25,
+        headY - hry * 0.2,
+        4,
+        cx,
+        headY,
+        hrx * 1.1,
+      );
+      faceGrad.addColorStop(0, SKIN.highlight);
+      faceGrad.addColorStop(0.7, SKIN.base);
+      faceGrad.addColorStop(1, SKIN.shadow);
+      ctx.fillStyle = faceGrad;
+      ctx.fill();
+
+      // Ears
+      ctx.beginPath();
+      ctx.ellipse(cx - hrx * 0.98, headY + hry * 0.05, hrx * 0.16, hry * 0.26, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx + hrx * 0.98, headY + hry * 0.05, hrx * 0.16, hry * 0.26, 0, 0, Math.PI * 2);
+      ctx.fillStyle = SKIN.base;
+      ctx.fill();
+
+      // Hair (stylish modern cropped haircut)
+      ctx.beginPath();
+      ctx.ellipse(cx, headY - hry * 0.45, hrx * 1.04, hry * 0.68, 0, Math.PI, Math.PI * 2);
+      ctx.lineTo(cx + hrx * 1.02, headY - hry * 0.05);
+      ctx.bezierCurveTo(
+        cx + hrx * 0.8,
+        headY - hry * 0.5,
+        cx - hrx * 0.2,
+        headY - hry * 0.4,
+        cx - hrx * 1.02,
+        headY - hry * 0.05,
+      );
+      ctx.closePath();
+
+      const hairGrad = ctx.createLinearGradient(cx, headY - hry * 1.1, cx, headY);
+      hairGrad.addColorStop(0, SKIN.hairHighlight);
+      hairGrad.addColorStop(1, SKIN.hair);
+      ctx.fillStyle = hairGrad;
+      ctx.fill();
+
+      // 5. Facial Features & Linguistic Non-Manual Markers (NMM)
+      const isBlinking = now % 3800 < 130;
+      const isWhQuestion = /WHERE|WHAT|WHO|WHY|WHEN|HOW/.test(token?.gloss || '');
+      const isAffirmative = /HELLO|THANK|WELCOME|LOVE|YES|GOOD|PLEASE/.test(token?.gloss || '');
+
+      const eyeY = headY - hry * 0.06;
+      const leftEyeX = cx - hrx * 0.36;
+      const rightEyeX = cx + hrx * 0.36;
+
+      if (isBlinking) {
+        // Closed eyelids
+        ctx.strokeStyle = '#382516';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(leftEyeX, eyeY, hrx * 0.16, 0.1, Math.PI - 0.1);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(rightEyeX, eyeY, hrx * 0.16, 0.1, Math.PI - 0.1);
+        ctx.stroke();
+      } else {
+        // Open eyes (sclera + amber iris + pupil + specular shine)
+        for (const ex of [leftEyeX, rightEyeX]) {
+          ctx.beginPath();
+          ctx.ellipse(ex, eyeY, hrx * 0.18, hry * 0.11, 0, 0, Math.PI * 2);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(70, 45, 25, 0.35)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          // Iris
+          ctx.beginPath();
+          ctx.arc(ex, eyeY, hry * 0.08, 0, Math.PI * 2);
+          ctx.fillStyle = '#4A301D';
+          ctx.fill();
+
+          // Pupil
+          ctx.beginPath();
+          ctx.arc(ex, eyeY, hry * 0.045, 0, Math.PI * 2);
+          ctx.fillStyle = '#0F0B08';
+          ctx.fill();
+
+          // Specular catchlight (adds life)
+          ctx.beginPath();
+          ctx.arc(ex + 1.8, eyeY - 1.8, 1.2, 0, Math.PI * 2);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fill();
+        }
+      }
+
+      // Eyebrows (Crucial ASL Grammar Marker)
+      // WH-questions: furrowed downward towards center
+      // Affirmative: arched slightly upwards
+      // Neutral: relaxed standard arch
+      const browY = eyeY - hry * 0.22;
+      ctx.strokeStyle = '#27221E';
+      ctx.lineWidth = 2.6;
+      ctx.lineCap = 'round';
+
+      // Left eyebrow
+      ctx.beginPath();
+      if (isWhQuestion) {
+        // Furrowed down toward nose
+        ctx.moveTo(leftEyeX - hrx * 0.18, browY - 1);
+        ctx.lineTo(leftEyeX + hrx * 0.18, browY + 4);
+      } else if (isAffirmative) {
+        // Lifted arch
+        ctx.moveTo(leftEyeX - hrx * 0.18, browY - 2);
+        ctx.quadraticCurveTo(leftEyeX, browY - 7, leftEyeX + hrx * 0.18, browY - 2);
+      } else {
+        // Neutral
+        ctx.moveTo(leftEyeX - hrx * 0.18, browY);
+        ctx.quadraticCurveTo(leftEyeX, browY - 4, leftEyeX + hrx * 0.18, browY - 1);
+      }
+      ctx.stroke();
+
+      // Right eyebrow
+      ctx.beginPath();
+      if (isWhQuestion) {
+        // Furrowed down toward nose
+        ctx.moveTo(rightEyeX - hrx * 0.18, browY + 4);
+        ctx.lineTo(rightEyeX + hrx * 0.18, browY - 1);
+      } else if (isAffirmative) {
+        // Lifted arch
+        ctx.moveTo(rightEyeX - hrx * 0.18, browY - 2);
+        ctx.quadraticCurveTo(rightEyeX, browY - 7, rightEyeX + hrx * 0.18, browY - 2);
+      } else {
+        // Neutral
+        ctx.moveTo(rightEyeX - hrx * 0.18, browY - 1);
+        ctx.quadraticCurveTo(rightEyeX, browY - 4, rightEyeX + hrx * 0.18, browY);
+      }
+      ctx.stroke();
+
+      // Nose
+      const noseY = headY + hry * 0.15;
+      ctx.beginPath();
+      ctx.moveTo(cx, noseY - hry * 0.12);
+      ctx.lineTo(cx + 2, noseY);
+      ctx.lineTo(cx - 3, noseY + 2);
+      ctx.strokeStyle = 'rgba(170, 115, 80, 0.45)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      // Mouth
+      const mouthY = headY + hry * 0.44;
+      ctx.beginPath();
+      if (isAffirmative) {
+        // Friendly smile
+        ctx.arc(cx, mouthY - 3, hrx * 0.28, 0.2, Math.PI - 0.2);
+        ctx.strokeStyle = SKIN.lip;
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+      } else if (isWhQuestion) {
+        // Slightly open question mouth
+        ctx.ellipse(cx, mouthY, hrx * 0.14, hry * 0.08, 0, 0, Math.PI * 2);
+        ctx.fillStyle = '#421E1E';
+        ctx.fill();
+        ctx.strokeStyle = SKIN.lip;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      } else {
+        // Calm neutral lips
+        ctx.moveTo(cx - hrx * 0.22, mouthY);
+        ctx.quadraticCurveTo(cx, mouthY + 1.5, cx + hrx * 0.22, mouthY);
+        ctx.strokeStyle = SKIN.lip;
+        ctx.lineWidth = 2.2;
+        ctx.stroke();
+      }
+
+      // 6. Connected Arms & Forearms
+      // Right dominant arm (starts at rsx, rsy and connects to wrist activePose[0])
+      const rwX = activePose[0].x * w;
+      const rwY = activePose[0].y * h;
+      const relbowX = Math.max(rsx + 10, (rsx + rwX) / 2 + w * 0.08);
+      const relbowY = Math.max(rsy + 20, (rsy + rwY) / 2 + h * 0.09);
+
+      // Upper arm
+      ctx.beginPath();
+      ctx.moveTo(rsx, rsy);
+      ctx.lineTo(relbowX, relbowY);
+      ctx.strokeStyle = SKIN.hoodie;
+      ctx.lineWidth = 16;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Forearm connecting to wrist
+      ctx.beginPath();
+      ctx.moveTo(relbowX, relbowY);
+      ctx.lineTo(rwX, rwY);
+      ctx.strokeStyle = SKIN.hoodieTrim;
+      ctx.lineWidth = 13;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Sleeve cuff
+      ctx.beginPath();
+      ctx.arc(rwX, rwY, 8, 0, Math.PI * 2);
+      ctx.fillStyle = SKIN.hoodie;
+      ctx.fill();
+
+      // Left arm (Secondary hand or resting hand)
+      if (activeSecondary) {
+        const lwX = activeSecondary[0].x * w;
+        const lwY = activeSecondary[0].y * h;
+        const lelbowX = Math.min(lsx - 10, (lsx + lwX) / 2 - w * 0.08);
+        const lelbowY = Math.max(lsy + 20, (lsy + lwY) / 2 + h * 0.09);
+
+        // Left upper arm & forearm
+        ctx.beginPath();
+        ctx.moveTo(lsx, lsy);
+        ctx.lineTo(lelbowX, lelbowY);
+        ctx.strokeStyle = SKIN.hoodie;
+        ctx.lineWidth = 15;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(lelbowX, lelbowY);
+        ctx.lineTo(lwX, lwY);
+        ctx.strokeStyle = SKIN.hoodieTrim;
+        ctx.lineWidth = 12;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      } else {
+        // Natural resting left arm at side/hip
+        const restElbowX = lsx - 12;
+        const restElbowY = h * 0.65;
+        const restHandX = cx - hrx * 1.5;
+        const restHandY = h * 0.88;
+
+        ctx.beginPath();
+        ctx.moveTo(lsx, lsy);
+        ctx.lineTo(restElbowX, restElbowY);
+        ctx.lineTo(restHandX, restHandY);
+        ctx.strokeStyle = SKIN.hoodie;
+        ctx.lineWidth = 14;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+
+        // Resting hand shape
+        ctx.beginPath();
+        ctx.ellipse(restHandX, restHandY, 11, 7, -0.4, 0, Math.PI * 2);
+        ctx.fillStyle = SKIN.shadow;
+        ctx.fill();
+      }
+
+      // 7. Depth sorted volumetric hands
+      // Compare average z to see which hand is closer to camera
+      const rightZ = activePose[0]?.z || 0;
+      const leftZ = activeSecondary ? activeSecondary[0]?.z || 0 : 999;
+
+      if (activeSecondary && leftZ < rightZ) {
+        // Left hand is in front
+        drawVolumetricHand(ctx, activePose, w, h, false);
+        drawVolumetricHand(ctx, activeSecondary, w, h, true);
+      } else {
+        // Right hand is in front (default)
+        if (activeSecondary) {
+          drawVolumetricHand(ctx, activeSecondary, w, h, true);
+        }
+        drawVolumetricHand(ctx, activePose, w, h, false);
+      }
+
+      ctx.restore();
+    },
+    [drawVolumetricHand],
+  );
+
   // Main animation loop
   useEffect(() => {
     if (!tokens.length || !activeToken) return;
@@ -147,7 +656,7 @@ export default function SignPlayer({
       if (!ctx) return;
 
       const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-      const displayW = canvas.clientWidth || 320;
+      const displayW = canvas.clientWidth || 340;
       const displayH = canvas.clientHeight || height;
 
       if (canvas.width !== displayW * dpr || canvas.height !== displayH * dpr) {
@@ -159,26 +668,40 @@ export default function SignPlayer({
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, displayW, displayH);
 
-      // Background grid / visual studio depth
-      ctx.fillStyle = '#081412';
-      ctx.fillRect(0, 0, displayW, displayH);
-
       // Interpolation progress
       const elapsed = now - stateRef.current.startTime;
       const duration = stateRef.current.keyframeDuration;
       const t = Math.min(1, Math.max(0, elapsed / duration));
 
       const activePose = interpolatePose(stateRef.current.currentPose, stateRef.current.targetPose, t);
+      const secStart = stateRef.current.currentSecondary || stateRef.current.targetSecondary;
+      const activeSecondary = stateRef.current.targetSecondary
+        ? interpolatePose(secStart!, stateRef.current.targetSecondary, t)
+        : undefined;
 
-      // Draw secondary hand first if two-handed sign
-      if (stateRef.current.targetSecondary) {
-        const secStart = stateRef.current.currentSecondary || stateRef.current.targetSecondary;
-        const activeSec = interpolatePose(secStart, stateRef.current.targetSecondary, t);
-        drawHand(ctx, activeSec, displayW, displayH, true);
+      if (viewMode === 'avatar') {
+        // 3D Human Avatar Renderer
+        drawHumanAvatar(ctx, activePose, activeSecondary, displayW, displayH, activeToken, now);
+      } else {
+        // Technical 21-point MediaPipe X-Ray Skeleton Renderer
+        ctx.fillStyle = '#081412';
+        ctx.fillRect(0, 0, displayW, displayH);
+
+        // Studio center guidelines
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(displayW * 0.5, 0);
+        ctx.lineTo(displayW * 0.5, displayH);
+        ctx.moveTo(0, displayH * 0.5);
+        ctx.lineTo(displayW, displayH * 0.5);
+        ctx.stroke();
+
+        if (activeSecondary) {
+          drawSkeletonHand(ctx, activeSecondary, displayW, displayH, true);
+        }
+        drawSkeletonHand(ctx, activePose, displayW, displayH, false);
       }
-
-      // Draw dominant hand
-      drawHand(ctx, activePose, displayW, displayH, false);
 
       ctx.restore();
 
@@ -226,8 +749,10 @@ export default function SignPlayer({
     isPlaying,
     playbackSpeed,
     isLooping,
+    viewMode,
     onSignComplete,
-    drawHand,
+    drawSkeletonHand,
+    drawHumanAvatar,
     height,
   ]);
 
@@ -246,7 +771,7 @@ export default function SignPlayer({
   if (!tokens.length) {
     return (
       <View style={[styles.emptyContainer, { height }]}>
-        <Ionicons name="hand-right-outline" size={36} color="#4E6760" />
+        <Ionicons name="person-outline" size={36} color="#4E6760" />
         <Text style={styles.emptyText}>Enter text or speak to generate sign translation</Text>
       </View>
     );
@@ -263,21 +788,46 @@ export default function SignPlayer({
           />
         ) : (
           <View style={styles.fallbackRig}>
-            <Ionicons name="hand-right" size={64} color="#B7FF56" />
+            <Ionicons name="person" size={64} color="#B7FF56" />
           </View>
         )}
 
         {/* Current Gloss Banner Floating Over Canvas */}
         <View style={styles.glossOverlay}>
-          <View style={styles.glossBadge}>
-            <Text style={styles.glossBadgeText}>
-              {activeToken.type === 'letter'
-                ? 'FINGERSPELLING'
-                : activeToken.type === 'number'
-                ? 'NUMBER'
-                : 'ASL SIGN'}
-            </Text>
+          <View style={styles.glossTopRow}>
+            <View style={styles.glossBadge}>
+              <Text style={styles.glossBadgeText}>
+                {activeToken.type === 'letter'
+                  ? 'FINGERSPELLING'
+                  : activeToken.type === 'number'
+                  ? 'NUMBER'
+                  : 'ASL SIGN'}
+              </Text>
+            </View>
+
+            {/* Avatar / Skeleton Switcher Pill */}
+            <Pressable
+              onPress={() => setViewMode((m) => (m === 'avatar' ? 'skeleton' : 'avatar'))}
+              style={[styles.viewModeToggle, viewMode === 'avatar' && styles.viewModeToggleActive]}
+              accessibilityRole="button"
+              accessibilityLabel={`Switch to ${viewMode === 'avatar' ? 'X-Ray Skeleton' : '3D Human Avatar'} view`}
+            >
+              <Ionicons
+                name={viewMode === 'avatar' ? 'person' : 'hardware-chip-outline'}
+                size={12}
+                color={viewMode === 'avatar' ? '#07110F' : '#B7FF56'}
+              />
+              <Text
+                style={[
+                  styles.viewModeToggleText,
+                  viewMode === 'avatar' && styles.viewModeToggleTextActive,
+                ]}
+              >
+                {viewMode === 'avatar' ? '3D Human Avatar' : 'X-Ray Skeleton'}
+              </Text>
+            </Pressable>
           </View>
+
           <Text style={styles.glossTitle}>{activeToken.gloss}</Text>
           <Text style={styles.glossDesc} numberOfLines={2}>
             {activeToken.sign.description}
@@ -358,14 +908,22 @@ export default function SignPlayer({
               ]}
               accessibilityLabel={`Sign ${token.gloss}`}
             >
-              <Text style={[styles.tokenGloss, isActive && styles.tokenGlossActive]}>
+              <Text
+                style={[
+                  styles.tokenGloss,
+                  isActive && styles.tokenGlossActive,
+                ]}
+              >
                 {token.gloss}
               </Text>
-              {token.type === 'word' && (
-                <Text style={[styles.tokenSubtext, isActive && styles.tokenSubtextActive]}>
-                  {token.text}
-                </Text>
-              )}
+              <Text
+                style={[
+                  styles.tokenSubtext,
+                  isActive && styles.tokenSubtextActive,
+                ]}
+              >
+                {token.text}
+              </Text>
             </Pressable>
           );
         })}
@@ -380,17 +938,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#07110F',
     borderRadius: 16,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
   },
   canvasWrapper: {
     width: '100%',
     position: 'relative',
-    backgroundColor: '#081412',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: '#07130F',
   },
   fallbackRig: {
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -399,7 +954,13 @@ const styles = StyleSheet.create({
     top: 12,
     left: 14,
     right: 14,
-    pointerEvents: 'none',
+    pointerEvents: 'box-none',
+  },
+  glossTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
   },
   glossBadge: {
     alignSelf: 'flex-start',
@@ -409,7 +970,6 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     paddingHorizontal: 7,
     paddingVertical: 2,
-    marginBottom: 4,
   },
   glossBadgeText: {
     color: '#B7FF56',
@@ -417,12 +977,36 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.6,
   },
+  viewModeToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(10, 24, 20, 0.75)',
+    borderWidth: 1,
+    borderColor: 'rgba(183, 255, 86, 0.35)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  viewModeToggleActive: {
+    backgroundColor: '#B7FF56',
+    borderColor: '#B7FF56',
+  },
+  viewModeToggleText: {
+    color: '#B7FF56',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  viewModeToggleTextActive: {
+    color: '#07110F',
+    fontWeight: '800',
+  },
   glossTitle: {
     color: '#FFFFFF',
     fontSize: 24,
     fontWeight: '900',
     letterSpacing: 0.5,
-    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowColor: 'rgba(0, 0, 0, 0.85)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
@@ -431,7 +1015,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
     lineHeight: 16,
-    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowColor: 'rgba(0, 0, 0, 0.85)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
@@ -443,7 +1027,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(7, 17, 15, 0.82)',
+    backgroundColor: 'rgba(7, 17, 15, 0.85)',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 12,
