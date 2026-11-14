@@ -256,7 +256,7 @@ export default function AssistantHub() {
             <View style={s.brandTitleRow}>
               <Text style={s.brandTitle}>GuideLens</Text>
               <View style={s.versionChip}>
-                <Text style={s.versionText}>v0.1.8</Text>
+                <Text style={s.versionText}>v1.0.0</Text>
               </View>
             </View>
             <Text style={s.brandSubtitle}>Spatial Perception & Sign Intelligence</Text>
@@ -1003,7 +1003,7 @@ export default function AssistantHub() {
 
               <View style={s.versionFooter}>
                 <Text style={s.versionFooterText}>
-                  GuideLens Native Edition · Built for SFBU × NVIDIA DGX Hackathon 2026
+                  GuideLens Native Edition · 🏆 1st Place Winner · SFBU × NVIDIA DGX Spark Hackathon 2026
                 </Text>
               </View>
             </View>

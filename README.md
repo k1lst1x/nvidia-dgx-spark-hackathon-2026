@@ -1,10 +1,22 @@
-# GuideLens
+# GuideLens — 🏆 1st Place Winner: SFBU NVIDIA DGX Spark Hackathon 2026
 
-Accessible AI vision companion for the **SFBU NVIDIA DGX Spark Hackathon 2026**. GuideLens uses a phone camera to identify nearby objects and speaks a concise scene description. This repo includes a universal Expo app, a web landing/demo, and a FastAPI gateway using Groq Vision.
+[![1st Place Winner](https://img.shields.io/badge/🏆_1st_Place_Winner-SFBU_NVIDIA_DGX_Spark_Hackathon_2026-gold?style=for-the-badge)](https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026)
+[![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0-emerald?style=for-the-badge)](https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
-It also includes **VisionMate**, a native SwiftUI iPhone client for the first phase of the assistive vision MVP.
+**GuideLens** is the **1st Place winning solution** of the **SFBU NVIDIA DGX Spark Hackathon 2026**. It is a real-time, privacy-first accessible AI vision and sign language ecosystem engineered for blind, visually impaired, deaf, and deaf-blind individuals.
 
-> **Safety:** experimental prototypes. They must not replace a cane, guide dog, orientation training, medication instructions, or other mobility and safety aids.
+Powered by edge AI and the **NVIDIA DGX Spark**, GuideLens translates visual scenes into natural spoken briefs, bridges spoken speech and American Sign Language (ASL) via 3D skeletal avatars and on-device MediaPipe gesture recognition, and maps hazards through a cooperative, privacy-preserving campus memory.
+
+> **Safety:** Assistive companion technology. Not a substitute for a white cane, guide dog, orientation training, mobility aids, or medical devices.
+
+## 🌟 Award-Winning Highlights
+
+- **Spatial Perception & Scene Audio Briefs:** Instant on-device YOLOX Nano + BoT-SORT object tracking and depth awareness, producing calm spoken scene summaries via DGX Spark (Qwen-VL) with cloud fallback.
+- **Deaf–Blind Bridge:** Direct two-way cross-disability communication. ASL gestures captured via camera are voiced aloud to blind users, while spoken responses render in giant high-contrast typography and animated signs for deaf participants.
+- **English ⇄ ASL Sign Studio:** Bidirectional English-to-ASL grammar engine featuring a hardware-accelerated Three.js WebGL 3D PBR skeletal hand avatar with 360° orbit drag, pacing controls, and automatic fingerspelling.
+- **Shared Sight & Campus Memory:** Collaborative spatial hazard detection (wet floors, moved obstacles, closed doors) pinned to shared 3D room sketches without ever storing or uploading raw camera imagery.
+- **100% Offline Autonomy:** Zero-network fallback with embedded WASM/native neural inference for object detection and sign language translation anywhere on campus.
 
 ## Stack
 
@@ -162,7 +174,7 @@ The `Native release builds` GitHub Actions workflow produces real installable ar
 - Linux: AppImage and `.deb`;
 - Android: installable debug APK for hackathon testing.
 
-Run the workflow manually from **Actions**, or create a tag such as `v0.1.0` to build and attach every artifact to a GitHub Release. Set the repository Actions variable `EXPO_PUBLIC_API_URL` to the public HTTPS backend URL before building. YOLOX works offline; Groq scene descriptions require that backend.
+Run the workflow manually from **Actions**, or create a tag such as `v1.0.0` to build and attach every artifact to a GitHub Release. Set the repository Actions variable `EXPO_PUBLIC_API_URL` to the public HTTPS backend URL before building. YOLOX works offline; Groq scene descriptions require that backend.
 
 Desktop artifacts are intentionally unsigned hackathon builds. Windows SmartScreen and macOS Gatekeeper may warn users. Public distribution should use Windows code signing and Apple signing/notarization. The Android debug APK is appropriate for direct testing, not a Play Store production release.
 

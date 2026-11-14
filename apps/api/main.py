@@ -192,7 +192,7 @@ MOBILITY_COLLISION_WARNINGS_ENABLED = os.getenv("MOBILITY_COLLISION_WARNINGS_ENA
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("guidelens")
-app = FastAPI(title="GuideLens Vision API", version="0.2.0")
+app = FastAPI(title="GuideLens Vision API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     # Expo/Web and Electron serve the local app via dynamic or standard loopback ports.

@@ -252,9 +252,9 @@ function LandingPage() {
             </View>
           </View>
           <View style={s.navRight}>
-            <View style={s.statusPill} accessibilityLabel="Prototype status: ready for demo">
+            <View style={s.statusPill} accessibilityLabel="1st Place Winner - SFBU NVIDIA DGX Spark Hackathon 2026">
               <View style={s.statusDot} />
-              <Text style={s.statusText}>v0.1.6 READY</Text>
+              <Text style={s.statusText}>🏆 1ST PLACE WINNER · v1.0.0</Text>
             </View>
             <Link href="/hub" asChild>
               <Pressable accessibilityRole="button" accessibilityLabel="Launch Assistant Hub" style={s.navLaunchBtn}>
@@ -268,7 +268,7 @@ function LandingPage() {
         <View style={s.hero}>
           <View style={s.eyebrow}>
             <View style={s.eyebrowLine} />
-            <Text style={s.eyebrowText}>SFBU × NVIDIA DGX SPARK 2026</Text>
+            <Text style={s.eyebrowText}>🏆 1ST PLACE WINNER · SFBU × NVIDIA DGX SPARK 2026</Text>
           </View>
           <Text style={s.title}>Visual help, delivered with clarity.</Text>
           <Text style={s.subtitle}>
@@ -341,7 +341,7 @@ function LandingPage() {
               </Pressable>
             ))}
           </View>
-          <Text style={s.downloadNote}>Hackathon preview builds may trigger an unsigned-app warning. Android users must allow installation from their browser.</Text>
+          <Text style={s.downloadNote}>Production release builds (v1.0.0) may trigger an unsigned-app warning on desktop. Android users must allow installation from their browser.</Text>
         </View>
 
         <View style={s.briefing}>
@@ -497,7 +497,7 @@ function LandingPage() {
           </View>
         </Reveal>
 
-        <Text style={s.footer}>BUILT FOR THE SFBU NVIDIA DGX SPARK HACKATHON · 2026</Text>
+        <Text style={s.footer}>🏆 1ST PLACE WINNER · SFBU NVIDIA DGX SPARK HACKATHON 2026</Text>
       </Animated.ScrollView>
     </SafeAreaView>
   );
