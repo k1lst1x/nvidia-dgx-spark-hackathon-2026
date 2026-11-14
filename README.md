@@ -1,6 +1,6 @@
-# GuideLens — 🏆 1st Place Winner: SFBU NVIDIA DGX Spark Hackathon 2026
+# GuideLens — 1st Place Winner: SFBU NVIDIA DGX Spark Hackathon 2026
 
-[![1st Place Winner](https://img.shields.io/badge/🏆_1st_Place_Winner-SFBU_NVIDIA_DGX_Spark_Hackathon_2026-gold?style=for-the-badge)](https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026)
+[![1st Place Winner](https://img.shields.io/badge/1st_Place_Winner-SFBU_NVIDIA_DGX_Spark_Hackathon_2026-gold?style=for-the-badge)](https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026)
 [![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0-emerald?style=for-the-badge)](https://github.com/k1lst1x/nvidia-dgx-spark-hackathon-2026/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
@@ -10,7 +10,7 @@ Powered by edge AI and the **NVIDIA DGX Spark**, GuideLens translates visual sce
 
 > **Safety:** Assistive companion technology. Not a substitute for a white cane, guide dog, orientation training, mobility aids, or medical devices.
 
-## 🌟 Award-Winning Highlights
+## Award-Winning Highlights
 
 - **Spatial Perception & Scene Audio Briefs:** Instant on-device YOLOX Nano + BoT-SORT object tracking and depth awareness, producing calm spoken scene summaries via DGX Spark (Qwen-VL) with cloud fallback.
 - **Deaf–Blind Bridge:** Direct two-way cross-disability communication. ASL gestures captured via camera are voiced aloud to blind users, while spoken responses render in giant high-contrast typography and animated signs for deaf participants.
